@@ -43,6 +43,15 @@ enum Commands {
     },
     /// List available profiles
     Profiles,
+    /// View server logs
+    Logs {
+        /// Follow mode — stream new lines
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show (default 50)
+        #[arg(short, long, default_value = "50")]
+        n: usize,
+    },
     /// Validate config file
     #[command(name = "config")]
     ConfigValidate,
@@ -148,6 +157,7 @@ async fn main() {
         Commands::Gpu { json } => cmd_gpu(&client, json).await,
         Commands::Swap { profile } => cmd_swap(&client, &profile).await,
         Commands::Profiles => cmd_profiles(&client).await,
+        Commands::Logs { follow, n } => cmd_logs(&client, follow, n).await,
         Commands::ConfigValidate => cmd_config_validate().await,
         Commands::Agent { cmd } => match cmd {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
@@ -448,6 +458,62 @@ async fn cmd_profiles(client: &DaemonClient) -> Result<(), Box<dyn std::error::E
             print!(", ~{:.1}GB VRAM", v as f64 / 1024.0);
         }
         println!();
+    }
+
+    Ok(())
+}
+
+async fn cmd_logs(client: &DaemonClient, follow: bool, n: usize) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    if !follow {
+        // Fetch last N lines
+        let resp: serde_json::Value = client.get(&format!("/api/logs?n={n}")).await?;
+        if let Some(lines) = resp["lines"].as_array() {
+            for line in lines {
+                println!("{}", line.as_str().unwrap_or(""));
+            }
+        }
+        return Ok(());
+    }
+
+    // Follow mode — connect to SSE and stream log lines
+    println!("following logs (Ctrl+C to stop)...\n");
+
+    let url = format!("{}/api/events", client.base_url());
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to connect to SSE: {e}"))?;
+
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+
+    let mut buffer = String::new();
+    let mut current_event = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("stream error: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete SSE messages (double newline separated)
+        while let Some(pos) = buffer.find("\n\n") {
+            let message = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            for line in message.lines() {
+                if let Some(event_type) = line.strip_prefix("event: ") {
+                    current_event = event_type.to_string();
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    if current_event == "log" {
+                        println!("{data}");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

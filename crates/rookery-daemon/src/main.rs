@@ -1,16 +1,18 @@
 mod app_state;
 mod routes;
+mod sse;
 
 use app_state::AppState;
 use axum::routing::{get, post};
 use axum::Router;
 use rookery_core::config::Config;
 use rookery_core::state::StatePersistence;
+use rookery_engine::agent::AgentManager;
 use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
-use rookery_engine::agent::AgentManager;
 use rookery_engine::process::ProcessManager;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
@@ -51,6 +53,9 @@ async fn main() {
     let process_manager = ProcessManager::new(log_buffer.clone());
     let agent_manager = AgentManager::new(log_buffer.clone());
 
+    // State change broadcast channel
+    let (state_tx, _) = broadcast::channel::<serde_json::Value>(64);
+
     // Load and reconcile persisted state
     let state_persistence = StatePersistence::new();
     if let Ok(prev_state) = state_persistence.load() {
@@ -66,12 +71,16 @@ async fn main() {
         gpu_monitor,
         log_buffer,
         state_persistence,
+        state_tx,
     });
 
     let app = Router::new()
+        .route("/", get(routes::get_dashboard))
         .route("/api/health", get(routes::get_health))
         .route("/api/status", get(routes::get_status))
         .route("/api/gpu", get(routes::get_gpu))
+        .route("/api/logs", get(routes::get_logs))
+        .route("/api/events", get(sse::get_events))
         .route("/api/start", post(routes::post_start))
         .route("/api/stop", post(routes::post_stop))
         .route("/api/swap", post(routes::post_swap))
@@ -82,6 +91,7 @@ async fn main() {
         .with_state(state);
 
     tracing::info!(%listen, "rookeryd starting");
+    tracing::info!(%listen, "dashboard at http://{listen}/");
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

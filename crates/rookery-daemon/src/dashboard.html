@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rookery</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; padding: 20px; }
+h1 { font-size: 1.4em; color: #00ff88; margin-bottom: 16px; }
+h1 span { color: #666; font-weight: normal; font-size: 0.7em; }
+h2 { font-size: 0.9em; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.card { background: #141414; border: 1px solid #222; border-radius: 8px; padding: 16px; }
+
+.status-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+.status-badge.running { background: #00ff8822; color: #00ff88; border: 1px solid #00ff8844; }
+.status-badge.stopped { background: #ff444422; color: #ff4444; border: 1px solid #ff444444; }
+.status-badge.starting, .status-badge.stopping, .status-badge.swapping { background: #ffaa0022; color: #ffaa00; border: 1px solid #ffaa0044; }
+
+.stat { margin: 8px 0; }
+.stat-label { color: #666; font-size: 0.8em; }
+.stat-value { color: #e0e0e0; font-size: 1.1em; }
+
+.bar-container { background: #1a1a1a; border-radius: 4px; height: 20px; margin: 4px 0; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+.bar-fill.vram { background: linear-gradient(90deg, #00ff88, #00cc66); }
+.bar-fill.temp { background: linear-gradient(90deg, #00aaff, #ff4444); }
+.bar-fill.util { background: linear-gradient(90deg, #aa66ff, #ff66aa); }
+.bar-fill.power { background: linear-gradient(90deg, #ffaa00, #ff4400); }
+
+.profiles-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.profile-btn { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 8px 14px; color: #ccc; cursor: pointer; font-family: inherit; font-size: 0.85em; transition: all 0.2s; }
+.profile-btn:hover { border-color: #00ff88; color: #00ff88; }
+.profile-btn.active { border-color: #00ff88; color: #00ff88; background: #00ff8811; }
+.profile-btn.default::after { content: ' *'; color: #666; }
+
+.agent-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; }
+.agent-dot.running { background: #00ff88; }
+.agent-dot.stopped { background: #444; }
+.agent-name { flex: 1; }
+.agent-btn { background: none; border: 1px solid #333; border-radius: 4px; padding: 3px 10px; color: #888; cursor: pointer; font-family: inherit; font-size: 0.8em; }
+.agent-btn:hover { border-color: #00ff88; color: #00ff88; }
+
+.btn-row { display: flex; gap: 8px; margin-top: 10px; }
+.btn { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 8px 16px; color: #ccc; cursor: pointer; font-family: inherit; font-size: 0.85em; }
+.btn:hover { border-color: #00ff88; color: #00ff88; }
+.btn.danger:hover { border-color: #ff4444; color: #ff4444; }
+
+#log-viewer { background: #0d0d0d; border: 1px solid #222; border-radius: 8px; height: 300px; overflow-y: auto; padding: 10px; font-size: 0.78em; line-height: 1.6; color: #888; white-space: pre-wrap; word-break: break-all; }
+#log-viewer .log-line { color: #999; }
+#log-viewer .log-line:hover { color: #e0e0e0; }
+
+.section { margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<h1>rookery <span>local inference command center</span></h1>
+
+<div class="grid">
+  <div class="card">
+    <h2>Server</h2>
+    <div class="stat">
+      <span class="stat-label">State</span>
+      <div><span id="state-badge" class="status-badge stopped">stopped</span></div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Profile</span>
+      <div class="stat-value" id="profile-name">—</div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">PID / Port</span>
+      <div class="stat-value" id="pid-port">—</div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Uptime</span>
+      <div class="stat-value" id="uptime">—</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="startServer()">Start</button>
+      <button class="btn danger" onclick="stopServer()">Stop</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>GPU</h2>
+    <div class="stat">
+      <span class="stat-label">Device</span>
+      <div class="stat-value" id="gpu-name">—</div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">VRAM</span>
+      <div id="vram-text" class="stat-value">—</div>
+      <div class="bar-container"><div class="bar-fill vram" id="vram-bar" style="width:0%"></div></div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Temperature</span>
+      <div id="temp-text" class="stat-value">—</div>
+      <div class="bar-container"><div class="bar-fill temp" id="temp-bar" style="width:0%"></div></div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Utilization</span>
+      <div id="util-text" class="stat-value">—</div>
+      <div class="bar-container"><div class="bar-fill util" id="util-bar" style="width:0%"></div></div>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Power</span>
+      <div id="power-text" class="stat-value">—</div>
+      <div class="bar-container"><div class="bar-fill power" id="power-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Profiles</h2>
+    <div class="profiles-list" id="profiles-list"></div>
+  </div>
+
+  <div class="card">
+    <h2>Agents</h2>
+    <div id="agents-list"><span style="color:#666">loading...</span></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Logs</h2>
+  <div id="log-viewer"></div>
+</div>
+
+<script>
+let activeProfile = null;
+let currentState = 'stopped';
+
+// SSE connection
+const events = new EventSource('/api/events');
+
+events.addEventListener('gpu', (e) => {
+  const data = JSON.parse(e.data);
+  if (data.gpus && data.gpus.length > 0) {
+    const g = data.gpus[0];
+    document.getElementById('gpu-name').textContent = g.name;
+
+    const vramPct = ((g.vram_used_mb / g.vram_total_mb) * 100).toFixed(0);
+    document.getElementById('vram-text').textContent = `${g.vram_used_mb} / ${g.vram_total_mb} MB (${vramPct}%)`;
+    document.getElementById('vram-bar').style.width = vramPct + '%';
+
+    const tempPct = Math.min((g.temperature_c / 90) * 100, 100);
+    document.getElementById('temp-text').textContent = g.temperature_c + 'C';
+    document.getElementById('temp-bar').style.width = tempPct + '%';
+
+    document.getElementById('util-text').textContent = g.utilization_pct + '%';
+    document.getElementById('util-bar').style.width = g.utilization_pct + '%';
+
+    const powerPct = ((g.power_watts / g.power_limit_watts) * 100).toFixed(0);
+    document.getElementById('power-text').textContent = `${g.power_watts.toFixed(0)}W / ${g.power_limit_watts.toFixed(0)}W`;
+    document.getElementById('power-bar').style.width = powerPct + '%';
+  }
+});
+
+events.addEventListener('state', (e) => {
+  const data = JSON.parse(e.data);
+  updateState(data);
+});
+
+events.addEventListener('log', (e) => {
+  const viewer = document.getElementById('log-viewer');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = e.data;
+  viewer.appendChild(line);
+
+  // Keep only last 500 lines in DOM
+  while (viewer.children.length > 500) {
+    viewer.removeChild(viewer.firstChild);
+  }
+
+  // Auto-scroll if near bottom
+  const isNearBottom = viewer.scrollTop + viewer.clientHeight >= viewer.scrollHeight - 50;
+  if (isNearBottom) {
+    viewer.scrollTop = viewer.scrollHeight;
+  }
+});
+
+function updateState(data) {
+  currentState = data.state || 'stopped';
+  const badge = document.getElementById('state-badge');
+  const baseState = currentState.split(':')[0].trim();
+  badge.textContent = currentState;
+  badge.className = 'status-badge ' + baseState;
+
+  document.getElementById('profile-name').textContent = data.profile || '—';
+  activeProfile = data.profile;
+
+  if (data.pid && data.port) {
+    document.getElementById('pid-port').textContent = `${data.pid} / :${data.port}`;
+  } else {
+    document.getElementById('pid-port').textContent = '—';
+  }
+
+  if (data.uptime_secs) {
+    const h = Math.floor(data.uptime_secs / 3600);
+    const m = Math.floor((data.uptime_secs % 3600) / 60);
+    const s = data.uptime_secs % 60;
+    document.getElementById('uptime').textContent = `${h}h ${m}m ${s}s`;
+  } else {
+    document.getElementById('uptime').textContent = '—';
+  }
+
+  // Update profile buttons
+  document.querySelectorAll('.profile-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.name === activeProfile);
+  });
+}
+
+// Load profiles
+async function loadProfiles() {
+  const resp = await fetch('/api/profiles');
+  const data = await resp.json();
+  const container = document.getElementById('profiles-list');
+  container.innerHTML = '';
+
+  data.profiles.forEach(p => {
+    const btn = document.createElement('button');
+    btn.className = 'profile-btn' + (p.default ? ' default' : '') + (p.name === activeProfile ? ' active' : '');
+    btn.dataset.name = p.name;
+    const ctx = p.ctx_size >= 1024 ? (p.ctx_size / 1024) + 'K' : p.ctx_size;
+    const thinking = p.reasoning_budget !== 0 ? ' thinking' : '';
+    btn.textContent = `${p.name} (${ctx}${thinking})`;
+    btn.onclick = () => swapProfile(p.name);
+    container.appendChild(btn);
+  });
+}
+
+// Load agents
+async function loadAgents() {
+  const resp = await fetch('/api/agents');
+  const data = await resp.json();
+  const container = document.getElementById('agents-list');
+  container.innerHTML = '';
+
+  if (data.configured.length === 0) {
+    container.innerHTML = '<span style="color:#666">no agents configured</span>';
+    return;
+  }
+
+  const runningNames = new Set(data.agents.filter(a => a.status === 'running').map(a => a.name));
+
+  data.configured.forEach(name => {
+    const running = runningNames.has(name);
+    const row = document.createElement('div');
+    row.className = 'agent-row';
+    row.innerHTML = `
+      <div class="agent-dot ${running ? 'running' : 'stopped'}"></div>
+      <span class="agent-name">${name}</span>
+      <button class="agent-btn" onclick="toggleAgent('${name}', ${running})">${running ? 'Stop' : 'Start'}</button>
+    `;
+    container.appendChild(row);
+  });
+}
+
+// Actions
+async function startServer() {
+  await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+}
+
+async function stopServer() {
+  await fetch('/api/stop', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+}
+
+async function swapProfile(name) {
+  if (currentState === 'stopped') {
+    await fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile: name}) });
+  } else {
+    await fetch('/api/swap', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile: name}) });
+  }
+}
+
+async function toggleAgent(name, running) {
+  const endpoint = running ? '/api/agents/stop' : '/api/agents/start';
+  await fetch(endpoint, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name}) });
+  setTimeout(loadAgents, 1000);
+}
+
+// Load initial logs
+async function loadLogs() {
+  const resp = await fetch('/api/logs?n=100');
+  const data = await resp.json();
+  const viewer = document.getElementById('log-viewer');
+  data.lines.forEach(line => {
+    const el = document.createElement('div');
+    el.className = 'log-line';
+    el.textContent = line;
+    viewer.appendChild(el);
+  });
+  viewer.scrollTop = viewer.scrollHeight;
+}
+
+// Init
+loadProfiles();
+loadAgents();
+loadLogs();
+
+// Refresh agents periodically
+setInterval(loadAgents, 10000);
+</script>
+</body>
+</html>

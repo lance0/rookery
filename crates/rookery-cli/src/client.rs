@@ -54,6 +54,10 @@ impl DaemonClient {
             .map_err(|e| ClientError::Parse(e.to_string()))
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub async fn health(&self) -> bool {
         self.client
             .get(format!("{}/api/health", self.base_url))

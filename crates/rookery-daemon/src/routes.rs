@@ -1,4 +1,4 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,7 @@ pub async fn post_start(
         since: chrono::Utc::now(),
     };
     let _ = state.state_persistence.save(&starting_state);
+    broadcast_state(&state, &starting_state);
 
     match state
         .process_manager
@@ -124,6 +125,7 @@ pub async fn post_start(
     {
         Ok(server_state) => {
             let _ = state.state_persistence.save(&server_state);
+            broadcast_state(&state, &server_state);
             let is_running = server_state.is_running();
 
             let status = status_from_state(&server_state);
@@ -144,6 +146,7 @@ pub async fn post_start(
                 since: chrono::Utc::now(),
             };
             let _ = state.state_persistence.save(&failed);
+            broadcast_state(&state, &failed);
             tracing::error!(error = %e, "failed to start server");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
@@ -159,11 +162,13 @@ pub async fn post_stop(
         since: chrono::Utc::now(),
     };
     let _ = state.state_persistence.save(&stopping);
+    broadcast_state(&state, &stopping);
 
     match state.process_manager.stop().await {
         Ok(()) => {
             let stopped = rookery_core::state::ServerState::Stopped;
             let _ = state.state_persistence.save(&stopped);
+            broadcast_state(&state, &stopped);
             let status = status_from_state(&stopped);
             Ok(Json(ActionResponse {
                 success: true,
@@ -206,6 +211,7 @@ pub async fn post_swap(
     {
         Ok(server_state) => {
             let _ = state.state_persistence.save(&server_state);
+            broadcast_state(&state, &server_state);
             let is_running = server_state.is_running();
             let status = status_from_state(&server_state);
 
@@ -268,6 +274,50 @@ pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json
 
 pub async fn get_health() -> StatusCode {
     StatusCode::OK
+}
+
+// --- Logs ---
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    #[serde(default = "default_log_count")]
+    pub n: usize,
+}
+
+fn default_log_count() -> usize {
+    50
+}
+
+pub async fn get_logs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LogsQuery>,
+) -> Json<serde_json::Value> {
+    let lines = state.log_buffer.last_n(query.n);
+    Json(serde_json::json!({ "lines": lines }))
+}
+
+// --- Dashboard ---
+
+pub async fn get_dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("dashboard.html"))
+}
+
+// --- Helpers ---
+
+pub fn status_json_from_state(state: &rookery_core::state::ServerState) -> serde_json::Value {
+    let s = status_from_state(state);
+    serde_json::json!({
+        "state": s.state,
+        "profile": s.profile,
+        "pid": s.pid,
+        "port": s.port,
+        "uptime_secs": s.uptime_secs,
+    })
+}
+
+fn broadcast_state(app: &AppState, server_state: &rookery_core::state::ServerState) {
+    let json = status_json_from_state(server_state);
+    let _ = app.state_tx.send(json);
 }
 
 // --- Agent routes ---
