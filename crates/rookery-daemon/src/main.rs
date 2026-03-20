@@ -136,7 +136,6 @@ async fn main() {
     let shutdown_state = state.clone();
 
     let app = Router::new()
-        .route("/", get(routes::get_dashboard))
         .route("/api/health", get(routes::get_health))
         .route("/api/status", get(routes::get_status))
         .route("/api/gpu", get(routes::get_gpu))
@@ -150,6 +149,7 @@ async fn main() {
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))
+        .fallback(routes::get_dashboard)
         .with_state(state);
 
     tracing::info!(%listen, "rookeryd starting");

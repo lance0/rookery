@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/rookery-core", "crates/rookery-engine", "crates/rookery-daemon", "crates/rookery-cli"]
+exclude = ["crates/rookery-dashboard"]
 
 [workspace.package]
 version = "0.1.0"

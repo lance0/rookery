@@ -343,9 +343,43 @@ pub async fn get_logs(
 
 // --- Dashboard ---
 
-pub async fn get_dashboard() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("dashboard.html"))
+use include_dir::{include_dir, Dir};
+
+static DASHBOARD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../rookery-dashboard/dist");
+
+pub async fn get_dashboard(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() || path.starts_with("api/") {
+        "index.html"
+    } else {
+        path
+    };
+
+    match DASHBOARD_DIR.get_file(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                file.contents(),
+            )
+                .into_response()
+        }
+        None => {
+            // SPA fallback — serve index.html
+            let file = DASHBOARD_DIR.get_file("index.html").unwrap();
+            let mime = mime_guess::from_path("index.html").first_or_octet_stream();
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                file.contents(),
+            )
+                .into_response()
+        }
+    }
 }
+
+use axum::response::IntoResponse;
 
 // --- Bench ---
 

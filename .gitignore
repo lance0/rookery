@@ -2,3 +2,6 @@
 *.swp
 *.swo
 .DS_Store
+# Dashboard build artifacts
+crates/rookery-dashboard/target/
+crates/rookery-dashboard/Cargo.lock

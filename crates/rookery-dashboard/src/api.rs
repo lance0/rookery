@@ -1,0 +1,95 @@
+use gloo_net::http::Request;
+use serde_json;
+
+use crate::{AgentsData, ProfileInfo};
+
+pub async fn fetch_profiles() -> Result<Vec<ProfileInfo>, String> {
+    let resp = Request::get("/api/profiles")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let profiles: Vec<ProfileInfo> =
+        serde_json::from_value(data["profiles"].clone()).unwrap_or_default();
+    Ok(profiles)
+}
+
+pub async fn fetch_agents() -> Result<AgentsData, String> {
+    let resp = Request::get("/api/agents")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_logs(n: usize) -> Result<Vec<String>, String> {
+    let resp = Request::get(&format!("/api/logs?n={n}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let lines: Vec<String> = serde_json::from_value(data["lines"].clone()).unwrap_or_default();
+    Ok(lines)
+}
+
+pub async fn start_server(profile: Option<&str>) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "profile": profile });
+    let resp = Request::post("/api/start")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn stop_server() -> Result<serde_json::Value, String> {
+    let resp = Request::post("/api/stop")
+        .json(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn swap_profile(profile: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "profile": profile });
+    let resp = Request::post("/api/swap")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn start_agent(name: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "name": name });
+    let resp = Request::post("/api/agents/start")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn stop_agent(name: &str) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "name": name });
+    let resp = Request::post("/api/agents/stop")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn run_bench() -> Result<serde_json::Value, String> {
+    let resp = Request::get("/api/bench")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}

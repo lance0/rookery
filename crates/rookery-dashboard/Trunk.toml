@@ -1,0 +1,6 @@
+[build]
+dist = "dist"
+filehash = true
+
+[watch]
+watch = ["src", "style.css", "index.html"]
