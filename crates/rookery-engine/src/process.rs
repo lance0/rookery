@@ -211,18 +211,10 @@ impl ProcessManager {
     }
 
     pub async fn to_server_state(&self) -> ServerState {
-        let child_alive = {
-            let mut child_lock = self.child.lock().await;
-            if let Some(ref mut child) = *child_lock {
-                matches!(child.try_wait(), Ok(None))
-            } else {
-                false
-            }
-        };
-
+        let alive = self.is_running().await;
         let info = self.info.lock().await.clone();
 
-        match (child_alive, info) {
+        match (alive, info) {
             (true, Some(info)) => ServerState::Running {
                 profile: info.profile,
                 pid: info.pid,

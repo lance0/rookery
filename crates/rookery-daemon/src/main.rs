@@ -133,6 +133,8 @@ async fn main() {
         state_tx,
     });
 
+    let shutdown_state = state.clone();
+
     let app = Router::new()
         .route("/", get(routes::get_dashboard))
         .route("/api/health", get(routes::get_health))
@@ -144,6 +146,7 @@ async fn main() {
         .route("/api/stop", post(routes::post_stop))
         .route("/api/swap", post(routes::post_swap))
         .route("/api/profiles", get(routes::get_profiles))
+        .route("/api/bench", get(routes::get_bench))
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))
@@ -157,12 +160,17 @@ async fn main() {
         .expect("failed to bind");
 
     tracing::info!(%listen, "rookeryd listening");
-
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
 
+    // Clean up child processes on shutdown
+    tracing::info!("shutting down — stopping agents and server");
+    shutdown_state.agent_manager.stop_all().await;
+    let _ = shutdown_state.process_manager.stop().await;
+    let stopped = rookery_core::state::ServerState::Stopped;
+    let _ = shutdown_state.state_persistence.save(&stopped);
     tracing::info!("rookeryd shut down");
 }
 

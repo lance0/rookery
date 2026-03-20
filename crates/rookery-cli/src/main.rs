@@ -1,6 +1,6 @@
 mod client;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use client::DaemonClient;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +52,8 @@ enum Commands {
         #[arg(short, long, default_value = "50")]
         n: usize,
     },
+    /// Run a quick benchmark
+    Bench,
     /// Validate config file
     #[command(name = "config")]
     ConfigValidate,
@@ -59,6 +61,11 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         cmd: AgentCommands,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell type
+        shell: clap_complete::Shell,
     },
 }
 
@@ -158,11 +165,21 @@ async fn main() {
         Commands::Swap { profile } => cmd_swap(&client, &profile).await,
         Commands::Profiles => cmd_profiles(&client).await,
         Commands::Logs { follow, n } => cmd_logs(&client, follow, n).await,
+        Commands::Bench => cmd_bench(&client).await,
         Commands::ConfigValidate => cmd_config_validate().await,
         Commands::Agent { cmd } => match cmd {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
             AgentCommands::Stop { name } => cmd_agent_stop(&client, &name).await,
             AgentCommands::Status => cmd_agent_status(&client).await,
+        },
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "rookery",
+                &mut std::io::stdout(),
+            );
+            Ok(())
         },
     };
 
@@ -514,6 +531,38 @@ async fn cmd_logs(client: &DaemonClient, follow: bool, n: usize) -> Result<(), B
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_bench(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    println!("running benchmark...\n");
+
+    let resp: serde_json::Value = client.get("/api/bench").await?;
+    let tests = resp["tests"].as_array().ok_or("no bench results")?;
+
+    if tests.is_empty() {
+        println!("no results (is a model running?)");
+        return Ok(());
+    }
+
+    println!("{:<12} {:>8} {:>8} {:>10} {:>10}", "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s");
+    println!("{}", "-".repeat(52));
+
+    for t in tests {
+        println!(
+            "{:<12} {:>8} {:>8} {:>10.0} {:>10.0}",
+            t["name"].as_str().unwrap_or("?"),
+            t["prompt_tokens"].as_u64().unwrap_or(0),
+            t["completion_tokens"].as_u64().unwrap_or(0),
+            t["pp_tok_s"].as_f64().unwrap_or(0.0),
+            t["gen_tok_s"].as_f64().unwrap_or(0.0),
+        );
     }
 
     Ok(())

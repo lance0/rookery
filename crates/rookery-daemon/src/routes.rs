@@ -108,6 +108,51 @@ pub async fn post_start(
         .resolve_profile_name(req.profile.as_deref())
         .to_string();
 
+    // Idempotent: if already running with same profile, no-op
+    let current = state.process_manager.to_server_state().await;
+    if let rookery_core::state::ServerState::Running { ref profile, pid, port, .. } = current {
+        if profile == &profile_name {
+            return Ok(Json(ActionResponse {
+                success: true,
+                message: format!("already running with profile '{profile_name}'"),
+                status: status_from_state(&current),
+            }));
+        } else {
+            return Ok(Json(ActionResponse {
+                success: false,
+                message: format!("server is running with profile '{profile}' — use swap to change"),
+                status: status_from_state(&current),
+            }));
+        }
+    }
+
+    // Capacity gate: check VRAM before starting
+    if let Some(ref monitor) = state.gpu_monitor {
+        let model_name = state.config.profiles.get(&profile_name)
+            .map(|p| p.model.as_str());
+        if let Some(model_name) = model_name {
+            if let Some(model) = state.config.models.get(model_name) {
+                if let Some(estimated_mb) = model.estimated_vram_mb {
+                    if let Ok(stats) = monitor.stats() {
+                        if let Some(gpu) = stats.first() {
+                            let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
+                            if free_mb < estimated_mb as u64 {
+                                return Ok(Json(ActionResponse {
+                                    success: false,
+                                    message: format!(
+                                        "insufficient VRAM: need ~{}MB, only {}MB free ({}MB / {}MB used)",
+                                        estimated_mb, free_mb, gpu.vram_used_mb, gpu.vram_total_mb
+                                    ),
+                                    status: status_from_state(&current),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     tracing::info!(profile = %profile_name, "starting server");
 
     // Persist starting state
@@ -300,6 +345,77 @@ pub async fn get_logs(
 
 pub async fn get_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("dashboard.html"))
+}
+
+// --- Bench ---
+
+#[derive(Serialize)]
+pub struct BenchResult {
+    pub tests: Vec<BenchTest>,
+}
+
+#[derive(Serialize)]
+pub struct BenchTest {
+    pub name: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub pp_tok_s: f64,
+    pub gen_tok_s: f64,
+}
+
+pub async fn get_bench(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BenchResult>, StatusCode> {
+    let current = state.process_manager.to_server_state().await;
+    let port = match current {
+        rookery_core::state::ServerState::Running { port, .. } => port,
+        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let prompts = vec![
+        ("short", "Write a Python function that checks if a number is prime. Just the function."),
+        ("medium", "Explain the difference between a mutex, semaphore, and condition variable. Give a code example for each in Rust."),
+    ];
+
+    let mut tests = Vec::new();
+    for (name, prompt) in prompts {
+        let body = serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 256,
+        });
+
+        match client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    if let Some(timings) = data.get("timings") {
+                        tests.push(BenchTest {
+                            name: name.to_string(),
+                            prompt_tokens: timings["prompt_n"].as_u64().unwrap_or(0),
+                            completion_tokens: timings["predicted_n"].as_u64().unwrap_or(0),
+                            pp_tok_s: timings["prompt_per_second"].as_f64().unwrap_or(0.0),
+                            gen_tok_s: timings["predicted_per_second"].as_f64().unwrap_or(0.0),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, test = name, "bench request failed");
+            }
+        }
+    }
+
+    Ok(Json(BenchResult { tests }))
 }
 
 // --- Helpers ---
