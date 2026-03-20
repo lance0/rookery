@@ -121,7 +121,7 @@ impl ProcessManager {
 
         if let Some(ref mut child) = *child_lock {
             let pid = child.id();
-            tracing::info!(?pid, "stopping llama-server");
+            tracing::info!(?pid, "stopping llama-server (owned child)");
 
             // Try SIGTERM first
             if let Some(pid) = pid {
@@ -147,6 +147,36 @@ impl ProcessManager {
                     let _ = child.kill().await;
                 }
             }
+        } else if let Some(info) = self.info.lock().await.as_ref() {
+            // No child handle (daemon restarted), but we know the PID — kill by PID
+            let pid = info.pid;
+            tracing::info!(pid, "stopping llama-server (orphan PID, no child handle)");
+
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+
+            // Wait for process to exit
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+                if !proc_path.exists() {
+                    tracing::info!(pid, "orphan llama-server exited");
+                    break;
+                }
+            }
+
+            // SIGKILL if still alive
+            let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+            if proc_path.exists() {
+                tracing::warn!(pid, "orphan didn't exit, sending SIGKILL");
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
 
         *child_lock = None;
@@ -155,12 +185,24 @@ impl ProcessManager {
         Ok(())
     }
 
+    /// Adopt an existing process by PID (used when daemon restarts and finds a running server).
+    pub async fn adopt(&self, info: ProcessInfo) {
+        tracing::info!(pid = info.pid, profile = %info.profile, "adopting existing llama-server");
+        *self.info.lock().await = Some(info);
+        // No child handle — stop() will fall back to kill-by-PID
+    }
+
     pub async fn is_running(&self) -> bool {
         let mut child_lock = self.child.lock().await;
         if let Some(ref mut child) = *child_lock {
             matches!(child.try_wait(), Ok(None))
         } else {
-            false
+            // No child handle — check by PID (adopted process)
+            if let Some(info) = self.info.lock().await.as_ref() {
+                std::path::PathBuf::from(format!("/proc/{}", info.pid)).exists()
+            } else {
+                false
+            }
         }
     }
 

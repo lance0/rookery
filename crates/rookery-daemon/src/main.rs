@@ -57,13 +57,36 @@ async fn main() {
     let (state_tx, _) = broadcast::channel::<serde_json::Value>(64);
 
     // Load and reconcile persisted state
-    // Load and reconcile persisted state
     let state_persistence = StatePersistence::new();
     let tracked_pid = if let Ok(prev_state) = state_persistence.load() {
         let reconciled = state_persistence.reconcile(prev_state);
         let pid = reconciled.pid();
         tracing::info!(state = ?format!("{:?}", reconciled), "reconciled previous state");
         let _ = state_persistence.save(&reconciled);
+
+        // Adopt the running process so stop/swap can kill it
+        if let rookery_core::state::ServerState::Running {
+            ref profile,
+            pid: running_pid,
+            port,
+            ref since,
+            ref command_line,
+            ref exe_path,
+            ..
+        } = reconciled
+        {
+            process_manager
+                .adopt(rookery_engine::process::ProcessInfo {
+                    pid: running_pid,
+                    port,
+                    profile: profile.clone(),
+                    started_at: *since,
+                    command_line: command_line.clone(),
+                    exe_path: exe_path.clone().unwrap_or_default(),
+                })
+                .await;
+        }
+
         pid
     } else {
         None
