@@ -74,6 +74,8 @@ async fn main() {
         .route("/api/gpu", get(routes::get_gpu))
         .route("/api/start", post(routes::post_start))
         .route("/api/stop", post(routes::post_stop))
+        .route("/api/swap", post(routes::post_swap))
+        .route("/api/profiles", get(routes::get_profiles))
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))

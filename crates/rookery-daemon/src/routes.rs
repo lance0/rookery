@@ -178,6 +178,94 @@ pub async fn post_stop(
     }
 }
 
+#[derive(Deserialize)]
+pub struct SwapRequest {
+    pub profile: String,
+}
+
+pub async fn post_swap(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SwapRequest>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let old_profile = state
+        .process_manager
+        .process_info()
+        .await
+        .map(|i| i.profile);
+
+    tracing::info!(
+        from = ?old_profile,
+        to = %req.profile,
+        "swapping model"
+    );
+
+    match state
+        .process_manager
+        .swap(&state.config, &req.profile)
+        .await
+    {
+        Ok(server_state) => {
+            let _ = state.state_persistence.save(&server_state);
+            let is_running = server_state.is_running();
+            let status = status_from_state(&server_state);
+
+            // Restart agents that have restart_on_swap = true
+            if is_running {
+                for (name, agent_config) in &state.config.agents {
+                    if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
+                        tracing::info!(agent = %name, "restarting agent after swap");
+                        let _ = state.agent_manager.stop(name).await;
+                        let _ = state.agent_manager.start(name, agent_config).await;
+                    }
+                }
+            }
+
+            Ok(Json(ActionResponse {
+                success: is_running,
+                message: if is_running {
+                    format!(
+                        "swapped {} → '{}'",
+                        old_profile
+                            .map(|p| format!("'{p}'"))
+                            .unwrap_or("(stopped)".into()),
+                        req.profile
+                    )
+                } else {
+                    "swap failed — server did not start".into()
+                },
+                status,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "swap failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let profiles: Vec<serde_json::Value> = state
+        .config
+        .profiles
+        .iter()
+        .map(|(name, p)| {
+            let is_default = name == &state.config.default_profile;
+            let model = state.config.models.get(&p.model);
+            serde_json::json!({
+                "name": name,
+                "model": p.model,
+                "port": p.port,
+                "ctx_size": p.ctx_size,
+                "reasoning_budget": p.reasoning_budget,
+                "default": is_default,
+                "estimated_vram_mb": model.and_then(|m| m.estimated_vram_mb),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "profiles": profiles }))
+}
+
 pub async fn get_health() -> StatusCode {
     StatusCode::OK
 }

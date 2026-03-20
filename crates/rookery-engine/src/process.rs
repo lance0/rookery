@@ -158,17 +158,7 @@ impl ProcessManager {
     pub async fn is_running(&self) -> bool {
         let mut child_lock = self.child.lock().await;
         if let Some(ref mut child) = *child_lock {
-            // try_wait returns None if still running
-            match child.try_wait() {
-                Ok(None) => true,
-                _ => {
-                    // Process exited, clean up
-                    drop(child_lock);
-                    *self.child.lock().await = None;
-                    *self.info.lock().await = None;
-                    false
-                }
-            }
+            matches!(child.try_wait(), Ok(None))
         } else {
             false
         }
@@ -179,22 +169,51 @@ impl ProcessManager {
     }
 
     pub async fn to_server_state(&self) -> ServerState {
-        if let Some(info) = self.process_info().await {
-            if self.is_running().await {
-                ServerState::Running {
-                    profile: info.profile,
-                    pid: info.pid,
-                    port: info.port,
-                    since: info.started_at,
-                    command_line: info.command_line,
-                    exe_path: Some(info.exe_path),
-                }
+        let child_alive = {
+            let mut child_lock = self.child.lock().await;
+            if let Some(ref mut child) = *child_lock {
+                matches!(child.try_wait(), Ok(None))
             } else {
-                ServerState::Stopped
+                false
             }
-        } else {
-            ServerState::Stopped
+        };
+
+        let info = self.info.lock().await.clone();
+
+        match (child_alive, info) {
+            (true, Some(info)) => ServerState::Running {
+                profile: info.profile,
+                pid: info.pid,
+                port: info.port,
+                since: info.started_at,
+                command_line: info.command_line,
+                exe_path: Some(info.exe_path),
+            },
+            _ => ServerState::Stopped,
         }
+    }
+
+    /// Hot-swap: stop current server, start new profile, health check.
+    pub async fn swap(
+        &self,
+        config: &Config,
+        new_profile: &str,
+    ) -> Result<ServerState> {
+        let old_profile = self.process_info().await.map(|i| i.profile.clone());
+
+        tracing::info!(
+            from = ?old_profile,
+            to = new_profile,
+            "hot-swapping model"
+        );
+
+        // Stop current if running
+        if self.is_running().await {
+            self.stop().await?;
+        }
+
+        // Start new profile
+        self.start_and_wait(config, new_profile).await
     }
 
     /// Start and wait for health check, returning the final state.

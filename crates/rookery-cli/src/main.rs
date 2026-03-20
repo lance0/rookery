@@ -36,6 +36,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Hot-swap to a different profile
+    Swap {
+        /// Profile name to swap to
+        profile: String,
+    },
+    /// List available profiles
+    Profiles,
     /// Validate config file
     #[command(name = "config")]
     ConfigValidate,
@@ -139,6 +146,8 @@ async fn main() {
         Commands::Stop => cmd_stop(&client).await,
         Commands::Status { json } => cmd_status(&client, json).await,
         Commands::Gpu { json } => cmd_gpu(&client, json).await,
+        Commands::Swap { profile } => cmd_swap(&client, &profile).await,
+        Commands::Profiles => cmd_profiles(&client).await,
         Commands::ConfigValidate => cmd_config_validate().await,
         Commands::Agent { cmd } => match cmd {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
@@ -380,6 +389,65 @@ async fn cmd_agent_status(client: &DaemonClient) -> Result<(), Box<dyn std::erro
             };
             println!("  {} (PID {}) — {}", agent.name, agent.pid, status);
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_swap(client: &DaemonClient, profile: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    println!("swapping to '{profile}'...");
+    let resp: ActionResponse = client
+        .post("/api/swap", &serde_json::json!({ "profile": profile }))
+        .await?;
+
+    if resp.success {
+        println!("{}", resp.message);
+        if let Some(pid) = resp.status.pid {
+            println!("  PID:  {pid}");
+        }
+        if let Some(port) = resp.status.port {
+            println!("  API:  http://localhost:{port}/v1");
+        }
+    } else {
+        eprintln!("{}", resp.message);
+    }
+
+    Ok(())
+}
+
+async fn cmd_profiles(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get("/api/profiles").await?;
+    let profiles = resp["profiles"].as_array().unwrap();
+
+    for p in profiles {
+        let name = p["name"].as_str().unwrap_or("?");
+        let model = p["model"].as_str().unwrap_or("?");
+        let ctx = p["ctx_size"].as_u64().unwrap_or(0);
+        let reasoning = p["reasoning_budget"].as_i64().unwrap_or(0);
+        let is_default = p["default"].as_bool().unwrap_or(false);
+        let vram = p["estimated_vram_mb"].as_u64();
+
+        let default_marker = if is_default { " (default)" } else { "" };
+        let thinking = if reasoning != 0 { " thinking" } else { "" };
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+
+        print!("  {name}{default_marker} — {model}, {ctx_label} ctx{thinking}");
+        if let Some(v) = vram {
+            print!(", ~{:.1}GB VRAM", v as f64 / 1024.0);
+        }
+        println!();
     }
 
     Ok(())
