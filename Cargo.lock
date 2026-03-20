@@ -1196,6 +1196,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "nix",
  "rookery-core",
  "rookery-engine",
  "serde",

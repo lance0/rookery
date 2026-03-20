@@ -1,5 +1,6 @@
 use nvml_wrapper::Nvml;
 use serde::Serialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GpuStats {
@@ -11,6 +12,14 @@ pub struct GpuStats {
     pub utilization_pct: u32,
     pub power_watts: f32,
     pub power_limit_watts: f32,
+    pub processes: Vec<GpuProcess>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuProcess {
+    pub pid: u32,
+    pub name: String,
+    pub vram_mb: u64,
 }
 
 pub struct GpuMonitor {
@@ -38,6 +47,27 @@ impl GpuMonitor {
             let power = device.power_usage().unwrap_or(0); // milliwatts
             let power_limit = device.enforced_power_limit().unwrap_or(0);
 
+            // Enumerate compute processes on this GPU
+            let processes = device
+                .running_compute_processes()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| {
+                    let name = process_name(p.pid);
+                    let vram_mb = match p.used_gpu_memory {
+                        nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => {
+                            bytes / (1024 * 1024)
+                        }
+                        _ => 0,
+                    };
+                    GpuProcess {
+                        pid: p.pid,
+                        name,
+                        vram_mb,
+                    }
+                })
+                .collect();
+
             stats.push(GpuStats {
                 index: i,
                 name,
@@ -47,9 +77,35 @@ impl GpuMonitor {
                 utilization_pct: util.gpu,
                 power_watts: power as f32 / 1000.0,
                 power_limit_watts: power_limit as f32 / 1000.0,
+                processes,
             });
         }
 
         Ok(stats)
     }
+
+    /// Find orphan llama-server processes not tracked by rookery.
+    pub fn find_orphan_llama_servers(&self, tracked_pid: Option<u32>) -> Vec<GpuProcess> {
+        let mut orphans = Vec::new();
+        if let Ok(stats) = self.stats() {
+            for gpu in stats {
+                for proc in gpu.processes {
+                    if proc.name.contains("llama-server") || proc.name.contains("llama_server") {
+                        if tracked_pid != Some(proc.pid) {
+                            orphans.push(proc);
+                        }
+                    }
+                }
+            }
+        }
+        orphans
+    }
+}
+
+/// Read process name from /proc/<pid>/comm
+fn process_name(pid: u32) -> String {
+    let comm_path = PathBuf::from(format!("/proc/{pid}/comm"));
+    std::fs::read_to_string(&comm_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| format!("pid:{pid}"))
 }

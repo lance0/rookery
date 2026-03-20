@@ -57,11 +57,47 @@ async fn main() {
     let (state_tx, _) = broadcast::channel::<serde_json::Value>(64);
 
     // Load and reconcile persisted state
+    // Load and reconcile persisted state
     let state_persistence = StatePersistence::new();
-    if let Ok(prev_state) = state_persistence.load() {
+    let tracked_pid = if let Ok(prev_state) = state_persistence.load() {
         let reconciled = state_persistence.reconcile(prev_state);
+        let pid = reconciled.pid();
         tracing::info!(state = ?format!("{:?}", reconciled), "reconciled previous state");
         let _ = state_persistence.save(&reconciled);
+        pid
+    } else {
+        None
+    };
+
+    // Kill orphan llama-server processes hogging VRAM
+    if let Some(ref monitor) = gpu_monitor {
+        let orphans = monitor.find_orphan_llama_servers(tracked_pid);
+        for orphan in &orphans {
+            tracing::warn!(
+                pid = orphan.pid,
+                vram_mb = orphan.vram_mb,
+                "killing orphan llama-server ({}MB VRAM)",
+                orphan.vram_mb
+            );
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(orphan.pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        if !orphans.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // SIGKILL any that didn't exit
+            for orphan in &orphans {
+                let proc_path = std::path::PathBuf::from(format!("/proc/{}", orphan.pid));
+                if proc_path.exists() {
+                    tracing::warn!(pid = orphan.pid, "orphan didn't exit, sending SIGKILL");
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(orphan.pid as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+            }
+        }
     }
 
     let state = Arc::new(AppState {

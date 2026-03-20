@@ -111,6 +111,10 @@ h2 { font-size: 0.9em; color: #888; text-transform: uppercase; letter-spacing: 1
       <div id="power-text" class="stat-value">—</div>
       <div class="bar-container"><div class="bar-fill power" id="power-bar" style="width:0%"></div></div>
     </div>
+    <div class="stat">
+      <span class="stat-label">GPU Processes</span>
+      <div id="gpu-processes" style="font-size:0.8em;color:#888;margin-top:4px;">—</div>
+    </div>
   </div>
 </div>
 
@@ -158,6 +162,16 @@ events.addEventListener('gpu', (e) => {
     const powerPct = ((g.power_watts / g.power_limit_watts) * 100).toFixed(0);
     document.getElementById('power-text').textContent = `${g.power_watts.toFixed(0)}W / ${g.power_limit_watts.toFixed(0)}W`;
     document.getElementById('power-bar').style.width = powerPct + '%';
+
+    // GPU processes
+    const procEl = document.getElementById('gpu-processes');
+    if (g.processes && g.processes.length > 0) {
+      procEl.innerHTML = g.processes.map(p =>
+        `<div style="display:flex;justify-content:space-between;padding:2px 0;"><span>${p.name} (${p.pid})</span><span>${p.vram_mb} MB</span></div>`
+      ).join('');
+    } else {
+      procEl.textContent = 'none';
+    }
   }
 });
 
