@@ -74,6 +74,6 @@ min_p = 0.0
 # Agents — external processes managed by rookery
 [agents.hermes]
 command = "/home/lance/.local/bin/hermes"
-args = ["gateway", "run"]
+args = ["gateway", "run", "--replace"]
 auto_start = false
 restart_on_swap = true
