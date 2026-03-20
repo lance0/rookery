@@ -33,19 +33,26 @@
 - [x] State change broadcasting via tokio broadcast channel
 - [x] CLI: `rookery logs` and `rookery logs -f` (follow mode via SSE)
 
-## Phase 5: Polish
-- [ ] `rookery bench` — quick PP + gen speed benchmark
-- [ ] Graceful daemon shutdown (stop llama-server on SIGTERM)
-- [ ] Shell completions (clap_complete)
-- [ ] Idempotent start (no-op if already running with same profile)
-- [ ] `--json` flag on all commands
-- [ ] Orphan process cleanup (kill stale llama-servers on daemon startup)
-- [ ] CapacityGate — check free VRAM before starting
+## Phase 5: Polish (Done)
+- [x] `rookery bench` — quick PP + gen speed benchmark via `/api/bench`
+- [x] Graceful daemon shutdown (stop llama-server + agents on SIGTERM/SIGINT)
+- [x] Shell completions (`rookery completions <shell>` via clap_complete)
+- [x] Idempotent start (no-op if already running with same profile)
+- [x] Capacity gate — check free VRAM before starting (uses model's estimated_vram_mb)
+- [x] Orphan process cleanup (find stale llama-servers via NVML GPU process list, SIGTERM/SIGKILL)
+- [x] Orphan process adoption (daemon restart discovers running server, adopts PID for stop/swap)
+- [x] GPU process visibility (per-GPU compute process list with PID, name, VRAM in stats)
+
+## Phase 6: Hardening
+- [ ] systemd unit (auto-start on boot, restart on crash, journalctl logs)
+- [ ] Agent state persistence (survive daemon restarts)
+- [ ] Auto-sleep (unload model after idle timeout, reload on request)
+- [ ] Better dashboard (SVG gauges, better CSS, eventually Leptos)
 
 ## Future
 - Leptos WASM dashboard (replace vanilla HTML with proper Rust frontend)
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Model downloads (`rookery models pull` to prefetch GGUF files)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
-- systemd unit (auto-start on boot, restart on crash)
 - Custom agent framework (build/test agents against local models)
+- `--json` flag on all remaining commands
