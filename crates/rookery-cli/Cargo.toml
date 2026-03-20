@@ -1,0 +1,17 @@
+[package]
+name = "rookery-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rookery"
+path = "src/main.rs"
+
+[dependencies]
+rookery-core = { path = "../rookery-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+thiserror = { workspace = true }

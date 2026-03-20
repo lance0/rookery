@@ -1,0 +1,13 @@
+[package]
+name = "rookery-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+dirs = "6"
+tracing = { workspace = true }
