@@ -3,7 +3,7 @@ mod routes;
 mod sse;
 
 use app_state::AppState;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 use rookery_core::config::Config;
 use rookery_core::state::StatePersistence;
@@ -12,7 +12,7 @@ use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::process::ProcessManager;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 #[tokio::main]
 async fn main() {
@@ -124,13 +124,14 @@ async fn main() {
     }
 
     let state = Arc::new(AppState {
-        config,
+        config: Arc::new(RwLock::new(config)),
         process_manager,
         agent_manager,
         gpu_monitor,
         log_buffer,
         state_persistence,
         state_tx,
+        op_lock: Mutex::new(()),
     });
 
     let shutdown_state = state.clone();
@@ -149,6 +150,11 @@ async fn main() {
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))
+        .route("/api/config", get(routes::get_config))
+        .route("/api/config/profile/{name}", put(routes::put_profile))
+        .route("/api/model-info", get(routes::get_model_info))
+        .route("/api/server-stats", get(routes::get_server_stats))
+        .route("/api/chat", post(routes::post_chat))
         .fallback(routes::get_dashboard)
         .with_state(state);
 

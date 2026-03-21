@@ -2,7 +2,7 @@
 
 Local inference command center — Rust daemon + CLI for managing llama-server.
 
-All 5 phases complete (MVP, agents, hot-swap, dashboard, polish).
+All 6 phases complete (MVP, agents, hot-swap, dashboard, polish, reliability).
 
 ## Stack
 - **Rust** (2024 edition, workspace with 4 crates)
@@ -54,6 +54,8 @@ cargo test --workspace   # run all tests
 - **Orphan process adoption** — on restart, daemon finds previously-running llama-server via persisted state, adopts its PID into ProcessManager (no child handle, falls back to kill-by-PID on stop)
 - **Orphan cleanup** — on startup, scans NVML GPU process list for untracked llama-server processes, kills them (SIGTERM then SIGKILL)
 - **Capacity gate** — checks free VRAM against model's estimated_vram_mb before starting, rejects with clear error
+- **Operation mutex** — `op_lock` serializes start/stop/swap to prevent concurrent state-changing operations from racing
+- **Atomic saves** — config and state persistence write to `.tmp` then `rename()` to prevent corruption on crash
 - **Idempotent start** — if already running with same profile, returns success no-op; if different profile, returns error with hint to use swap
 - **SSE streaming** — single `/api/events` endpoint merges three streams: GPU stats (2s interval), state changes (broadcast channel), log lines (broadcast channel)
 - **Graceful shutdown** — SIGTERM/SIGINT triggers stop of all agents and llama-server, persists Stopped state

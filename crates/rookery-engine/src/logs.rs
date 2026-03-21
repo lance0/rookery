@@ -21,7 +21,7 @@ impl LogBuffer {
     pub fn push(&self, line: String) {
         let _ = self.tx.send(line.clone());
 
-        let mut lines = self.lines.write().unwrap();
+        let mut lines = self.lines.write().unwrap_or_else(|e| e.into_inner());
         if lines.len() >= self.capacity {
             lines.pop_front();
         }
@@ -29,7 +29,7 @@ impl LogBuffer {
     }
 
     pub fn last_n(&self, n: usize) -> Vec<String> {
-        let lines = self.lines.read().unwrap();
+        let lines = self.lines.read().unwrap_or_else(|e| e.into_inner());
         lines.iter().rev().take(n).rev().cloned().collect()
     }
 
@@ -38,7 +38,7 @@ impl LogBuffer {
     }
 
     pub fn len(&self) -> usize {
-        self.lines.read().unwrap().len()
+        self.lines.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {

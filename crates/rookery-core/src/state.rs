@@ -98,7 +98,9 @@ impl StatePersistence {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(state)?;
-        std::fs::write(&self.path, content)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
