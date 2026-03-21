@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use crate::{ProfileInfo, ServerStatus, AgentsData, api};
+use crate::components::toast::{Toast, ToastKind, show_toast};
 
 #[component]
 pub fn ProfileSwitcher(
@@ -7,6 +8,7 @@ pub fn ProfileSwitcher(
     status: ReadSignal<ServerStatus>,
     set_profiles: WriteSignal<Vec<ProfileInfo>>,
     set_agents: WriteSignal<AgentsData>,
+    set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     let active_profile = move || status.get().profile.clone();
     let is_running = move || status.get().state == "running";
@@ -34,15 +36,25 @@ pub fn ProfileSwitcher(
                         let running = is_running();
                         let set_profiles = set_profiles.clone();
                         let set_agents = set_agents.clone();
+                        let set_toasts = set_toasts.clone();
                         let on_click = move |_| {
                             let n = click_name.clone();
                             let sp = set_profiles.clone();
                             let sa = set_agents.clone();
+                            let st = set_toasts.clone();
                             wasm_bindgen_futures::spawn_local(async move {
-                                if running {
-                                    let _ = api::swap_profile(&n).await;
+                                let result = if running {
+                                    api::swap_profile(&n).await
                                 } else {
-                                    let _ = api::start_server(Some(&n)).await;
+                                    api::start_server(Some(&n)).await
+                                };
+                                match result {
+                                    Ok(resp) => {
+                                        let msg = resp["message"].as_str().unwrap_or("done").to_string();
+                                        let success = resp["success"].as_bool().unwrap_or(false);
+                                        show_toast(st, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                                    }
+                                    Err(e) => show_toast(st, format!("failed: {e}"), ToastKind::Error),
                                 }
                                 if let Ok(p) = api::fetch_profiles().await { sp.set(p); }
                                 if let Ok(a) = api::fetch_agents().await { sa.set(a); }

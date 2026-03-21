@@ -1,7 +1,7 @@
 use gloo_net::http::Request;
 use serde_json;
 
-use crate::{AgentsData, ProfileInfo};
+use crate::{AgentsData, ModelInfoData, ProfileInfo};
 
 pub async fn fetch_profiles() -> Result<Vec<ProfileInfo>, String> {
     let resp = Request::get("/api/profiles")
@@ -88,6 +88,40 @@ pub async fn stop_agent(name: &str) -> Result<serde_json::Value, String> {
 
 pub async fn run_bench() -> Result<serde_json::Value, String> {
     let resp = Request::get("/api/bench")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_model_info() -> Result<ModelInfoData, String> {
+    let resp = Request::get("/api/model-info")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_server_stats() -> Result<serde_json::Value, String> {
+    let resp = Request::get("/api/server-stats")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_config() -> Result<serde_json::Value, String> {
+    let resp = Request::get("/api/config")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn update_profile(name: &str, data: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let resp = Request::put(&format!("/api/config/profile/{name}"))
+        .json(data)
+        .map_err(|e| e.to_string())?
         .send()
         .await
         .map_err(|e| e.to_string())?;

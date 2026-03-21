@@ -304,6 +304,18 @@ impl Config {
     pub fn resolve_profile_name<'a>(&'a self, name: Option<&'a str>) -> &'a str {
         name.unwrap_or(&self.default_profile)
     }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::config_path();
+        let content = toml::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

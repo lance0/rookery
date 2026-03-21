@@ -1,10 +1,12 @@
 use leptos::prelude::*;
 use crate::{AgentsData, api};
+use crate::components::toast::{Toast, ToastKind, show_toast};
 
 #[component]
 pub fn AgentPanel(
     agents: ReadSignal<AgentsData>,
     set_agents: WriteSignal<AgentsData>,
+    set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     view! {
         <div class="card">
@@ -30,14 +32,24 @@ pub fn AgentPanel(
                             let click_name = name.clone();
                             let running = is_running;
                             let set_agents = set_agents.clone();
+                            let set_toasts = set_toasts.clone();
                             let on_click = move |_| {
                                 let n = click_name.clone();
                                 let sa = set_agents.clone();
+                                let st = set_toasts.clone();
                                 wasm_bindgen_futures::spawn_local(async move {
-                                    if running {
-                                        let _ = api::stop_agent(&n).await;
+                                    let result = if running {
+                                        api::stop_agent(&n).await
                                     } else {
-                                        let _ = api::start_agent(&n).await;
+                                        api::start_agent(&n).await
+                                    };
+                                    match result {
+                                        Ok(resp) => {
+                                            let msg = resp["message"].as_str().unwrap_or("done").to_string();
+                                            let success = resp["success"].as_bool().unwrap_or(false);
+                                            show_toast(st, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                                        }
+                                        Err(e) => show_toast(st, format!("failed: {e}"), ToastKind::Error),
                                     }
                                     gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
                                     if let Ok(a) = api::fetch_agents().await { sa.set(a); }

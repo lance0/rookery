@@ -1,11 +1,13 @@
 use leptos::prelude::*;
 use crate::{ServerStatus, ProfileInfo, AgentsData, api};
+use crate::components::toast::{Toast, ToastKind, show_toast};
 
 #[component]
 pub fn StatusCard(
     status: ReadSignal<ServerStatus>,
     set_profiles: WriteSignal<Vec<ProfileInfo>>,
     set_agents: WriteSignal<AgentsData>,
+    set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     let state_class = move || {
         let s = status.get();
@@ -34,16 +36,31 @@ pub fn StatusCard(
     let on_start = move |_| {
         let set_profiles = set_profiles.clone();
         let set_agents = set_agents.clone();
+        let set_toasts = set_toasts.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = api::start_server(None).await;
+            match api::start_server(None).await {
+                Ok(resp) => {
+                    let msg = resp["message"].as_str().unwrap_or("started").to_string();
+                    let success = resp["success"].as_bool().unwrap_or(false);
+                    show_toast(set_toasts, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                }
+                Err(e) => show_toast(set_toasts, format!("start failed: {e}"), ToastKind::Error),
+            }
             if let Ok(p) = api::fetch_profiles().await { set_profiles.set(p); }
             if let Ok(a) = api::fetch_agents().await { set_agents.set(a); }
         });
     };
 
     let on_stop = move |_| {
+        let set_toasts = set_toasts.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = api::stop_server().await;
+            match api::stop_server().await {
+                Ok(resp) => {
+                    let msg = resp["message"].as_str().unwrap_or("stopped").to_string();
+                    show_toast(set_toasts, msg, ToastKind::Success);
+                }
+                Err(e) => show_toast(set_toasts, format!("stop failed: {e}"), ToastKind::Error),
+            }
         });
     };
 

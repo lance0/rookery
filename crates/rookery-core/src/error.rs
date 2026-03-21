@@ -23,6 +23,9 @@ pub enum Error {
     #[error("state persistence error: {0}")]
     StatePersist(String),
 
+    #[error("config serialize error: {0}")]
+    ConfigSerialize(#[from] toml::ser::Error),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

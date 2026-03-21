@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
@@ -103,14 +103,27 @@ pub async fn post_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StartRequest>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
-    let profile_name = state
-        .config
-        .resolve_profile_name(req.profile.as_deref())
-        .to_string();
+    let _op_guard = state.op_lock.lock().await;
+
+    // Read config, extract what we need, then drop the lock before long awaits
+    let profile_name;
+    let estimated_vram_mb;
+    {
+        let config = state.config.read().await;
+        profile_name = config
+            .resolve_profile_name(req.profile.as_deref())
+            .to_string();
+
+        estimated_vram_mb = config
+            .profiles
+            .get(&profile_name)
+            .and_then(|p| config.models.get(&p.model))
+            .and_then(|m| m.estimated_vram_mb);
+    }
 
     // Idempotent: if already running with same profile, no-op
     let current = state.process_manager.to_server_state().await;
-    if let rookery_core::state::ServerState::Running { ref profile, pid, port, .. } = current {
+    if let rookery_core::state::ServerState::Running { ref profile, .. } = current {
         if profile == &profile_name {
             return Ok(Json(ActionResponse {
                 success: true,
@@ -128,25 +141,19 @@ pub async fn post_start(
 
     // Capacity gate: check VRAM before starting
     if let Some(ref monitor) = state.gpu_monitor {
-        let model_name = state.config.profiles.get(&profile_name)
-            .map(|p| p.model.as_str());
-        if let Some(model_name) = model_name {
-            if let Some(model) = state.config.models.get(model_name) {
-                if let Some(estimated_mb) = model.estimated_vram_mb {
-                    if let Ok(stats) = monitor.stats() {
-                        if let Some(gpu) = stats.first() {
-                            let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
-                            if free_mb < estimated_mb as u64 {
-                                return Ok(Json(ActionResponse {
-                                    success: false,
-                                    message: format!(
-                                        "insufficient VRAM: need ~{}MB, only {}MB free ({}MB / {}MB used)",
-                                        estimated_mb, free_mb, gpu.vram_used_mb, gpu.vram_total_mb
-                                    ),
-                                    status: status_from_state(&current),
-                                }));
-                            }
-                        }
+        if let Some(estimated_mb) = estimated_vram_mb {
+            if let Ok(stats) = monitor.stats() {
+                if let Some(gpu) = stats.first() {
+                    let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
+                    if free_mb < estimated_mb as u64 {
+                        return Ok(Json(ActionResponse {
+                            success: false,
+                            message: format!(
+                                "insufficient VRAM: need ~{}MB, only {}MB free ({}MB / {}MB used)",
+                                estimated_mb, free_mb, gpu.vram_used_mb, gpu.vram_total_mb
+                            ),
+                            status: status_from_state(&current),
+                        }));
                     }
                 }
             }
@@ -163,9 +170,11 @@ pub async fn post_start(
     let _ = state.state_persistence.save(&starting_state);
     broadcast_state(&state, &starting_state);
 
+    // Re-acquire config for start_and_wait (needs full Config reference)
+    let config = state.config.read().await;
     match state
         .process_manager
-        .start_and_wait(&state.config, &profile_name)
+        .start_and_wait(&config, &profile_name)
         .await
     {
         Ok(server_state) => {
@@ -201,6 +210,8 @@ pub async fn post_start(
 pub async fn post_stop(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
+    let _op_guard = state.op_lock.lock().await;
+
     tracing::info!("stopping server");
 
     let stopping = rookery_core::state::ServerState::Stopping {
@@ -237,6 +248,8 @@ pub async fn post_swap(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwapRequest>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
+    let _op_guard = state.op_lock.lock().await;
+
     let old_profile = state
         .process_manager
         .process_info()
@@ -249,11 +262,13 @@ pub async fn post_swap(
         "swapping model"
     );
 
-    match state
-        .process_manager
-        .swap(&state.config, &req.profile)
-        .await
-    {
+    // Hold config lock only for the swap call, then drop before agent restarts
+    let swap_result = {
+        let config = state.config.read().await;
+        state.process_manager.swap(&config, &req.profile).await
+    };
+
+    match swap_result {
         Ok(server_state) => {
             let _ = state.state_persistence.save(&server_state);
             broadcast_state(&state, &server_state);
@@ -261,8 +276,10 @@ pub async fn post_swap(
             let status = status_from_state(&server_state);
 
             // Restart agents that have restart_on_swap = true
+            // Re-acquire config lock only for the agent restart loop
             if is_running {
-                for (name, agent_config) in &state.config.agents {
+                let config = state.config.read().await;
+                for (name, agent_config) in &config.agents {
                     if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
                         tracing::info!(agent = %name, "restarting agent after swap");
                         let _ = state.agent_manager.stop(name).await;
@@ -295,13 +312,13 @@ pub async fn post_swap(
 }
 
 pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let profiles: Vec<serde_json::Value> = state
-        .config
+    let config = state.config.read().await;
+    let profiles: Vec<serde_json::Value> = config
         .profiles
         .iter()
         .map(|(name, p)| {
-            let is_default = name == &state.config.default_profile;
-            let model = state.config.models.get(&p.model);
+            let is_default = name == &config.default_profile;
+            let model = config.models.get(&p.model);
             serde_json::json!({
                 "name": name,
                 "model": p.model,
@@ -319,6 +336,242 @@ pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json
 
 pub async fn get_health() -> StatusCode {
     StatusCode::OK
+}
+
+// --- Config ---
+
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let config = state.config.read().await;
+    Json(serde_json::to_value(&*config).unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+pub struct ProfileUpdate {
+    #[serde(default)]
+    pub temp: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
+    pub ctx_size: Option<u32>,
+    #[serde(default)]
+    pub threads: Option<u8>,
+    #[serde(default)]
+    pub threads_batch: Option<u8>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    pub ubatch_size: Option<u32>,
+    #[serde(default)]
+    pub reasoning_budget: Option<i32>,
+    #[serde(default)]
+    pub flash_attention: Option<bool>,
+    #[serde(default)]
+    pub cache_type_k: Option<String>,
+    #[serde(default)]
+    pub cache_type_v: Option<String>,
+}
+
+pub async fn put_profile(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(update): Json<ProfileUpdate>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut config = state.config.write().await;
+
+    let profile = config
+        .profiles
+        .get_mut(&name)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Some(v) = update.temp { profile.temp = v; }
+    if let Some(v) = update.top_p { profile.top_p = v; }
+    if let Some(v) = update.top_k { profile.top_k = v; }
+    if let Some(v) = update.min_p { profile.min_p = v; }
+    if let Some(v) = update.ctx_size { profile.ctx_size = v; }
+    if let Some(v) = update.threads { profile.threads = v; }
+    if let Some(v) = update.threads_batch { profile.threads_batch = v; }
+    if let Some(v) = update.batch_size { profile.batch_size = v; }
+    if let Some(v) = update.ubatch_size { profile.ubatch_size = v; }
+    if let Some(v) = update.reasoning_budget { profile.reasoning_budget = v; }
+    if let Some(v) = update.flash_attention { profile.flash_attention = v; }
+    if let Some(v) = update.cache_type_k { profile.cache_type_k = v; }
+    if let Some(v) = update.cache_type_v { profile.cache_type_v = v; }
+
+    if let Err(e) = config.save() {
+        tracing::error!(error = %e, "failed to save config");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    tracing::info!(profile = %name, "profile updated and saved to disk");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("profile '{name}' updated — changes apply on next start/swap"),
+    })))
+}
+
+// --- Model Info ---
+
+#[derive(Serialize)]
+pub struct ModelInfoResponse {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub props: Option<serde_json::Value>,
+}
+
+pub async fn get_model_info(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ModelInfoResponse>, StatusCode> {
+    let current = state.process_manager.to_server_state().await;
+    let port = match current {
+        rookery_core::state::ServerState::Running { port, .. } => port,
+        _ => {
+            return Ok(Json(ModelInfoResponse {
+                available: false,
+                model_id: None,
+                owned_by: None,
+                props: None,
+            }))
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut model_id = None;
+    let mut owned_by = None;
+
+    // Fetch /v1/models
+    if let Ok(resp) = client
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .send()
+        .await
+    {
+        if let Ok(data) = resp.json::<serde_json::Value>().await {
+            if let Some(models) = data["data"].as_array() {
+                if let Some(first) = models.first() {
+                    model_id = first["id"].as_str().map(String::from);
+                    owned_by = first["owned_by"].as_str().map(String::from);
+                }
+            }
+        }
+    }
+
+    // Fetch /props
+    let props = if let Ok(resp) = client
+        .get(format!("http://127.0.0.1:{port}/props"))
+        .send()
+        .await
+    {
+        resp.json::<serde_json::Value>().await.ok()
+    } else {
+        None
+    };
+
+    Ok(Json(ModelInfoResponse {
+        available: true,
+        model_id,
+        owned_by,
+        props,
+    }))
+}
+
+// --- Chat proxy (streaming passthrough) ---
+
+#[derive(Deserialize)]
+pub struct ChatRequest {
+    pub messages: Vec<serde_json::Value>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: i32,
+}
+
+fn default_max_tokens() -> i32 {
+    2048
+}
+
+pub async fn post_chat(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let current = state.process_manager.to_server_state().await;
+    let port = match current {
+        rookery_core::state::ServerState::Running { port, .. } => port,
+        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let body = serde_json::json!({
+        "model": "test",
+        "messages": req.messages,
+        "max_tokens": req.max_tokens,
+        "stream": true,
+    });
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "chat proxy request failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let stream = resp.bytes_stream();
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        axum::body::Body::from_stream(stream),
+    ))
+}
+
+// --- Server Stats (slots proxy) ---
+
+pub async fn get_server_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let current = state.process_manager.to_server_state().await;
+    let port = match current {
+        rookery_core::state::ServerState::Running { port, .. } => port,
+        _ => {
+            return Ok(Json(serde_json::json!({ "available": false })));
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Fetch /slots
+    let slots = if let Ok(resp) = client
+        .get(format!("http://127.0.0.1:{port}/slots"))
+        .send()
+        .await
+    {
+        resp.json::<serde_json::Value>().await.ok()
+    } else {
+        None
+    };
+
+    Ok(Json(serde_json::json!({
+        "available": true,
+        "slots": slots,
+    })))
 }
 
 // --- Logs ---
@@ -479,8 +732,9 @@ pub struct AgentsResponse {
 }
 
 pub async fn get_agents(State(state): State<Arc<AppState>>) -> Json<AgentsResponse> {
+    let config = state.config.read().await;
     let running = state.agent_manager.list().await;
-    let configured: Vec<String> = state.config.agents.keys().cloned().collect();
+    let configured: Vec<String> = config.agents.keys().cloned().collect();
     Json(AgentsResponse {
         agents: running,
         configured,
@@ -502,13 +756,13 @@ pub async fn post_agent_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AgentActionRequest>,
 ) -> Result<Json<AgentActionResponse>, StatusCode> {
-    let config = state
-        .config
+    let config = state.config.read().await;
+    let agent_config = config
         .agents
         .get(&req.name)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    match state.agent_manager.start(&req.name, config).await {
+    match state.agent_manager.start(&req.name, agent_config).await {
         Ok(info) => Ok(Json(AgentActionResponse {
             success: true,
             message: format!("agent '{}' started (PID {})", req.name, info.pid),

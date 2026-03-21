@@ -19,6 +19,18 @@ web-sys = { version = "0.3", features = [
     "Element",
     "ScrollBehavior",
     "ScrollIntoViewOptions",
+    "Document",
+    "Storage",
+    "Window",
+    "KeyboardEvent",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "Headers",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
