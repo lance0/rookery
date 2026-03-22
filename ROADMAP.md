@@ -89,17 +89,40 @@
 - [ ] Bench panel: show error toast on failure instead of silent swallow
 - [x] Fix CSS variable: --text-muted → --muted in header connection status
 
-## Phase 7: Production Hardening
-- [ ] systemd unit file (auto-start, restart on crash, journalctl)
-- [ ] OOM killer protection: set oom_score_adj on llama-server process
-- [ ] Proactive restart: schedule periodic restarts to counter performance degradation over time
-- [ ] Agent state persistence (survive daemon restarts)
-- [ ] Model swap drain: stop accepting new requests during swap, wait for in-flight to complete
-- [ ] Redact sensitive fields from GET /api/config (agent env vars, paths)
+## Phase 7: Production Hardening (Done)
+- [x] Redact sensitive fields from GET /api/config (agent env vars replaced with count)
+- [x] OOM killer protection: set oom_score_adj=-900 on llama-server after spawn
+- [x] systemd unit file (journal output, AmbientCapabilities for OOM adj, auto-start on boot)
+- [x] Model swap drain: 5s grace period before stop, 503 on new chat requests during drain
+- [x] Agent state persistence: agents.json, reconcile+adopt on daemon restart, auto_start support
+- [ ] Proactive restart: schedule periodic restarts (skipped — llama-server is stable)
+
+## Phase 8: Model Discovery & Management
+### CLI — `rookery models`
+- [ ] `rookery models search <query>` — search HuggingFace for GGUF repos
+- [ ] `rookery models quants <repo>` — list available quants (extract labels, group split shards, show sizes, highlight recommended)
+- [ ] `rookery models recommend <repo>` — VRAM-aware auto-selection (best quant that fits in free VRAM)
+- [ ] `rookery models list` — scan HF cache for already-downloaded GGUFs
+- [ ] `rookery models pull <repo> [quant]` — download a specific quant (or auto-pick best fit)
+- [ ] Quant preference ordering: UD variants first (UD-Q4_K_XL > UD-Q4_K_L > ...), then standard (Q4_K_M > Q5_K_M > ...)
+- [ ] Auto-prefix shorthand: bare names without `/` get `unsloth/` prepended
+
+### Dashboard — Model Browser
+- [ ] Model search panel in Settings or new Models tab
+- [ ] Quant selector with sizes, download status, VRAM fit indicator
+- [ ] One-click download + add to config
+- [ ] Show already-downloaded models from HF cache
+- [ ] VRAM recommendation badge per quant
+
+### Backend — Engine
+- [ ] HuggingFace HTTP API client in rookery-engine (repo metadata, file listing, search)
+- [ ] Quant label extraction from GGUF filenames (regex: Q4_K_M, IQ4_XS, UD-Q4_K_XL, etc.)
+- [ ] Split shard grouping (multiple files per quant, sum sizes)
+- [ ] HF cache scanner (`~/.cache/huggingface/hub/models--*` or llama.cpp cache)
+- [ ] `/api/models/search`, `/api/models/quants/:repo`, `/api/models/recommend/:repo`, `/api/models/pull` endpoints
 
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
-- Model downloads (`rookery models pull` to prefetch GGUF files)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
 - Custom agent framework (build/test agents against local models)
 - `--json` flag on all remaining commands

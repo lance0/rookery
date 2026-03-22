@@ -35,7 +35,15 @@ rookery completions bash    # generate shell completions
 
 ## Dashboard
 
-Open `http://127.0.0.1:3000/` in a browser for a live dashboard with GPU gauges, server status, profile switcher, agent controls, and a log viewer. All data streams via SSE.
+Open `http://127.0.0.1:3000/` for a Leptos WASM dashboard with tabbed UI:
+
+- **Overview** — GPU gauges, server status, model info, server stats (requests, context window)
+- **Settings** — profile switcher, sampling param editor (saves to config.toml), agent controls
+- **Chat** — streaming chat playground (SSE proxy to llama-server)
+- **Bench** — PP + gen speed benchmark
+- **Logs** — live log viewer
+
+Keyboard shortcuts: `1`-`5` switch tabs, `s` start, `x` stop, `t` toggle theme. All data streams via SSE with automatic reconnection.
 
 ## Architecture
 
@@ -44,7 +52,7 @@ Two binaries:
 - **`rookeryd`** — long-running daemon (axum REST API on `127.0.0.1:3000`)
 - **`rookery`** — thin CLI that talks to the daemon over HTTP
 
-The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures logs, manages agents, and persists state across restarts. On startup it reconciles persisted state, adopts orphan processes, and cleans up stale llama-servers hogging VRAM.
+The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures logs, manages agents, and persists state across restarts. On startup it reconciles persisted state (both server and agent PIDs), adopts orphan processes, auto-starts configured agents, and cleans up stale llama-servers hogging VRAM.
 
 ## Config
 
@@ -95,13 +103,29 @@ The daemon exposes a REST API:
 | `/api/agents` | GET | List agents and their status |
 | `/api/agents/start` | POST | Start agent `{ "name": "hermes" }` |
 | `/api/agents/stop` | POST | Stop agent `{ "name": "hermes" }` |
+| `/api/config` | GET | Full config (agent env vars redacted) |
+| `/api/config/profile/{name}` | PUT | Update profile sampling params |
+| `/api/model-info` | GET | Model ID, context window from llama-server |
+| `/api/server-stats` | GET | Slot status, request count from llama-server |
+| `/api/chat` | POST | Streaming chat proxy to llama-server |
+
+## systemd
+
+```bash
+sudo cp rookery.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rookeryd
+```
+
+The unit file grants `CAP_SYS_RESOURCE` so the daemon can set `oom_score_adj=-900` on llama-server, protecting it from the OOM killer. Logs go to journalctl (`journalctl -u rookeryd -f`).
 
 ## Workspace
 
 ```
 crates/
-  rookery-core/     # config, state machine, shared types
-  rookery-engine/   # process manager, GPU monitor, health checker, log buffer, agent manager
-  rookery-daemon/   # axum REST API server, SSE, dashboard
-  rookery-cli/      # clap CLI client
+  rookery-core/       # config, state machine (server + agent), shared types
+  rookery-engine/     # process manager, GPU monitor, health checker, log buffer, agent manager
+  rookery-daemon/     # axum REST API server, SSE, embedded dashboard
+  rookery-dashboard/  # Leptos WASM frontend (built with trunk, embedded into daemon)
+  rookery-cli/        # clap CLI client
 ```

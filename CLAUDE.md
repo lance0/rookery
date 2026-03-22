@@ -2,7 +2,7 @@
 
 Local inference command center — Rust daemon + CLI for managing llama-server.
 
-All 6 phases complete (MVP, agents, hot-swap, dashboard, polish, reliability).
+All 7 phases complete (MVP, agents, hot-swap, dashboard, polish, reliability, production hardening).
 
 ## Stack
 - **Rust** (2024 edition, workspace with 4 crates)
@@ -56,6 +56,9 @@ cargo test --workspace   # run all tests
 - **Capacity gate** — checks free VRAM against model's estimated_vram_mb before starting, rejects with clear error
 - **Operation mutex** — `op_lock` serializes start/stop/swap to prevent concurrent state-changing operations from racing
 - **Atomic saves** — config and state persistence write to `.tmp` then `rename()` to prevent corruption on crash
+- **OOM protection** — llama-server gets `oom_score_adj=-900` after spawn (requires CAP_SYS_RESOURCE via systemd)
+- **Swap drain** — 5s grace period before killing old server, new chat requests get 503 during drain
+- **Agent persistence** — agent PIDs saved to `agents.json`, reconciled+adopted on daemon restart; `auto_start` config honored
 - **Idempotent start** — if already running with same profile, returns success no-op; if different profile, returns error with hint to use swap
 - **SSE streaming** — single `/api/events` endpoint merges three streams: GPU stats (2s interval), state changes (broadcast channel), log lines (broadcast channel)
 - **Graceful shutdown** — SIGTERM/SIGINT triggers stop of all agents and llama-server, persists Stopped state

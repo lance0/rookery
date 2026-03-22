@@ -96,8 +96,43 @@ Agents are external processes (coding agents like OpenCode, Hermes, etc.) manage
 - **Config**: command, args, workdir, env vars, auto_start flag, restart_on_swap flag
 - **Lifecycle**: spawn with stdout/stderr captured into LogBuffer (prefixed with `[agent:name]`), stop via SIGTERM/SIGKILL
 - **Swap integration**: agents with `restart_on_swap = true` are automatically stopped and restarted after a model hot-swap completes
+- **Persistence**: agent PIDs are saved to `~/.local/state/rookery/agents.json` (same atomic write-tmp-rename pattern as server state). On daemon restart, persisted agents are reconciled (verify PID alive via `/proc`) and adopted — adopted agents have no child handle, so stop falls back to kill-by-PID.
+- **Auto-start**: agents with `auto_start = true` are started on daemon boot if not already running (checked after reconciliation)
 
-AgentManager tracks running agents in a `HashMap<String, ManagedAgent>` behind a `Mutex`. The `list()` method checks each child's exit status, cleaning up dead agents and reporting their final status.
+AgentManager tracks running agents in a `HashMap<String, ManagedAgent>` behind a `Mutex`. `ManagedAgent.child` is `Option<Child>` — `Some` for freshly spawned agents, `None` for adopted ones. The `list()` method checks each agent's status (via `try_wait()` for owned children, `/proc` for adopted), cleaning up dead agents and persisting the updated state.
+
+## Concurrency
+
+State-changing operations (start, stop, swap) are serialized by `op_lock: tokio::sync::Mutex<()>` in `AppState`. This prevents two concurrent starts from racing past the idempotency check, or a stop racing with a swap.
+
+The config `RwLock` read guard is dropped before long `.await`s (like `start_and_wait`) to avoid holding the lock across process spawn + health check. Data needed after the await is cloned before dropping.
+
+## Swap Drain
+
+Hot-swap includes a 5-second drain period before killing the old server:
+
+1. `ProcessManager.draining` flag set (`AtomicBool`)
+2. New chat requests immediately get 503 Service Unavailable
+3. In-flight requests have 5s to complete
+4. Old server is stopped (SIGTERM → 10s wait → SIGKILL)
+5. Drain flag cleared
+6. New profile started with health check
+
+## Atomic Persistence
+
+Both config and state files use write-to-tmpfile + `rename()`:
+
+```rust
+let tmp = path.with_extension("toml.tmp");
+std::fs::write(&tmp, content)?;
+std::fs::rename(&tmp, &path)?;  // atomic on Linux (same filesystem)
+```
+
+This prevents half-written files from corrupting state on crash or power loss.
+
+## OOM Protection
+
+After spawning llama-server, the daemon writes `-900` to `/proc/{pid}/oom_score_adj`. This makes llama-server nearly unkillable by the OOM reaper — important because the 20GB+ model is expensive to reload. Requires `CAP_SYS_RESOURCE` (granted by the systemd unit file).
 
 ## Graceful Shutdown
 
@@ -114,8 +149,18 @@ This ensures no orphan processes are left behind on daemon stop.
 - Daemon binds to `127.0.0.1` only — not exposed to network
 - llama-server binds to `0.0.0.0` for LAN access (configurable per profile)
 - No authentication on daemon API (localhost only)
+- `GET /api/config` redacts agent env vars (replaces with count) to prevent credential leakage
 - Future: optional bearer token for remote access
 
-## Future Phases
+## Dashboard
 
-See ROADMAP.md for planned features and timeline.
+The dashboard is a Leptos WASM app built with `trunk` and embedded into the daemon binary via `include_dir!`. It connects to `/api/events` (SSE) for real-time updates and uses REST API calls for actions.
+
+Key design decisions:
+- **Single polling loop** — server stats polling runs at the `App` level, passed as a signal prop to `ServerStats`. This prevents accumulation of polling loops when tabs are switched (Leptos recreates components on tab change).
+- **SSE reconnection** — `EventSource` auto-reconnects natively; `onopen` handler resets the connected state after reconnection.
+- **Chat streaming** — SSE proxy through the daemon (`POST /api/chat`) to llama-server's `/v1/chat/completions`. Partial failures mark the message as `[incomplete]`.
+
+## Future
+
+See ROADMAP.md for planned features.

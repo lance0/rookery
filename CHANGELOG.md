@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 — 2026-03-21
+
+Phase 7: Production hardening.
+
+### Added
+- **OOM protection** — sets `oom_score_adj=-900` on llama-server after spawn, protecting the 20GB+ model from the OOM killer
+- **systemd unit file** — `rookery.service` with journal output, `AmbientCapabilities=CAP_SYS_RESOURCE`, auto-restart on failure
+- **Agent state persistence** — agent PIDs saved to `~/.local/state/rookery/agents.json`, reconciled and adopted on daemon restart (mirrors server state persistence pattern)
+- **Agent auto-start** — agents with `auto_start = true` are started on daemon boot (config field existed but was never checked)
+- **Swap drain** — 5s grace period before killing old server during hot-swap; new chat requests get 503 during drain
+
+### Security
+- **Config API redaction** — `GET /api/config` now replaces agent env vars with `"[N vars redacted]"` instead of exposing API keys and tokens
+
+## 0.3.0 — 2026-03-21
+
+Phases 5b + 6: Dashboard v2 and reliability sprint.
+
+### Added
+- **Dashboard v2** — replaced vanilla JS with Leptos WASM app: tabbed layout (Overview, Settings, Chat, Bench, Logs), streaming chat playground, live profile settings editor, model info panel, server stats, dark/light theme with localStorage, keyboard shortcuts (1-5 tabs, s/x start/stop, t theme), toast notifications
+- **Dashboard API** — `GET /api/config`, `PUT /api/config/profile/:name`, `GET /api/model-info`, `GET /api/server-stats`, `POST /api/chat` (streaming SSE proxy)
+- **SSE onopen handler** — dashboard reconnects automatically after daemon restart
+
+### Fixed
+- **Operation mutex** — `tokio::sync::Mutex<()>` serializes start/stop/swap, preventing concurrent state-changing operations from racing
+- **Atomic saves** — config and state persistence use write-to-tmpfile + `rename()` to prevent corruption on crash
+- **RwLock guard lifetime** — config read lock dropped before long `.await`s in start/swap handlers
+- **LogBuffer poison recovery** — `unwrap_or_else(|e| e.into_inner())` instead of panicking on poisoned lock
+- **Chat payload ordering** — message list built before empty assistant placeholder, preventing empty messages in API request
+- **Stats polling accumulation** — single polling loop at App level instead of per-component (prevented unbounded request accumulation on tab switch)
+- **Chat partial failure** — incomplete assistant messages marked with `[incomplete]` and filtered from subsequent API payloads
+- **CSS variable** — `var(--text-muted)` replaced with `var(--muted)` (was undefined)
+
 ## 0.2.0 — 2026-03-20
 
 Phases 2–5 complete. Agent management, hot-swap, dashboard, and polish.
