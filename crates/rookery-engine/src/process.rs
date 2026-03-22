@@ -4,6 +4,7 @@ use rookery_core::error::{Error, Result};
 use rookery_core::state::ServerState;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -16,6 +17,7 @@ pub struct ProcessManager {
     child: Arc<Mutex<Option<Child>>>,
     info: Arc<Mutex<Option<ProcessInfo>>>,
     log_buffer: Arc<LogBuffer>,
+    draining: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +36,12 @@ impl ProcessManager {
             child: Arc::new(Mutex::new(None)),
             info: Arc::new(Mutex::new(None)),
             log_buffer,
+            draining: AtomicBool::new(false),
         }
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
     }
 
     pub async fn start(&self, config: &Config, profile_name: &str) -> Result<ProcessInfo> {
@@ -77,6 +84,14 @@ impl ProcessManager {
                 "failed to get child PID",
             ))
         })?;
+
+        // Protect llama-server from OOM killer (requires CAP_SYS_RESOURCE or root)
+        let oom_path = format!("/proc/{pid}/oom_score_adj");
+        if let Err(e) = std::fs::write(&oom_path, "-900") {
+            tracing::warn!(pid, error = %e, "failed to set oom_score_adj");
+        } else {
+            tracing::info!(pid, "set oom_score_adj to -900");
+        }
 
         let info = ProcessInfo {
             pid,
@@ -227,7 +242,7 @@ impl ProcessManager {
         }
     }
 
-    /// Hot-swap: stop current server, start new profile, health check.
+    /// Hot-swap: drain in-flight requests, stop current server, start new profile, health check.
     pub async fn swap(
         &self,
         config: &Config,
@@ -241,9 +256,13 @@ impl ProcessManager {
             "hot-swapping model"
         );
 
-        // Stop current if running
+        // Stop current if running, with drain period
         if self.is_running().await {
+            self.draining.store(true, Ordering::SeqCst);
+            tracing::info!("draining in-flight requests (5s)");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             self.stop().await?;
+            self.draining.store(false, Ordering::SeqCst);
         }
 
         // Start new profile

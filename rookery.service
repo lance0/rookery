@@ -1,0 +1,18 @@
+[Unit]
+Description=Rookery Inference Daemon
+After=network.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=lance
+ExecStart=/home/lance/projects/rookery/target/release/rookeryd
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=rookery=info
+WorkingDirectory=/home/lance/projects/rookery
+StandardOutput=journal
+StandardError=journal
+AmbientCapabilities=CAP_SYS_RESOURCE
+
+[Install]
+WantedBy=multi-user.target

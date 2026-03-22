@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rookery_core::config::AgentConfig;
+use rookery_core::state::{AgentEntry, AgentPersistence, AgentState};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -27,13 +28,14 @@ pub enum AgentStatus {
 }
 
 struct ManagedAgent {
-    child: Child,
+    child: Option<Child>,
     info: AgentInfo,
 }
 
 pub struct AgentManager {
     agents: Mutex<HashMap<String, ManagedAgent>>,
     log_buffer: Arc<LogBuffer>,
+    persistence: AgentPersistence,
 }
 
 impl AgentManager {
@@ -41,6 +43,43 @@ impl AgentManager {
         Self {
             agents: Mutex::new(HashMap::new()),
             log_buffer,
+            persistence: AgentPersistence::new(),
+        }
+    }
+
+    /// Adopt a previously-running agent by PID (used after daemon restart).
+    pub async fn adopt(&self, name: &str, entry: &AgentEntry) {
+        tracing::info!(agent = name, pid = entry.pid, "adopting existing agent");
+        let info = AgentInfo {
+            name: name.to_string(),
+            pid: entry.pid,
+            started_at: entry.started_at,
+            status: AgentStatus::Running,
+        };
+        let mut agents = self.agents.lock().await;
+        agents.insert(
+            name.to_string(),
+            ManagedAgent { child: None, info },
+        );
+    }
+
+    fn persist_state(&self, agents: &HashMap<String, ManagedAgent>) {
+        let state = AgentState {
+            agents: agents
+                .iter()
+                .map(|(name, a)| {
+                    (
+                        name.clone(),
+                        AgentEntry {
+                            pid: a.info.pid,
+                            started_at: a.info.started_at,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        if let Err(e) = self.persistence.save(&state) {
+            tracing::warn!(error = %e, "failed to persist agent state");
         }
     }
 
@@ -53,13 +92,15 @@ impl AgentManager {
 
         // Check if already running
         if let Some(agent) = agents.get_mut(name) {
-            match agent.child.try_wait() {
-                Ok(None) => return Err(AgentError::AlreadyRunning(name.to_string())),
-                _ => {
-                    // Exited, clean up
-                    agents.remove(name);
-                }
+            let alive = match &mut agent.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+            };
+            if alive {
+                return Err(AgentError::AlreadyRunning(name.to_string()));
             }
+            // Exited, clean up
+            agents.remove(name);
         }
 
         tracing::info!(agent = name, command = %config.command, "starting agent");
@@ -125,10 +166,12 @@ impl AgentManager {
         agents.insert(
             name.to_string(),
             ManagedAgent {
-                child,
+                child: Some(child),
                 info: info.clone(),
             },
         );
+
+        self.persist_state(&agents);
 
         tracing::info!(agent = name, pid, "agent started");
         Ok(info)
@@ -141,31 +184,56 @@ impl AgentManager {
             .get_mut(name)
             .ok_or_else(|| AgentError::NotFound(name.to_string()))?;
 
-        tracing::info!(agent = name, pid = agent.info.pid, "stopping agent");
+        let pid = agent.info.pid;
+        tracing::info!(agent = name, pid, "stopping agent");
 
-        // SIGTERM first
-        if let Some(pid) = agent.child.id() {
+        if let Some(ref mut child) = agent.child {
+            // Owned child — SIGTERM then wait
+            if let Some(cpid) = child.id() {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(cpid as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+
+            let wait_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+
+            match wait_result {
+                Ok(Ok(status)) => {
+                    tracing::info!(agent = name, ?status, "agent exited");
+                }
+                _ => {
+                    tracing::warn!(agent = name, "agent did not exit in time, killing");
+                    let _ = child.kill().await;
+                }
+            }
+        } else {
+            // Adopted agent — kill by PID
+            tracing::info!(agent = name, pid, "stopping adopted agent by PID");
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGTERM,
             );
-        }
 
-        // Wait up to 5 seconds
-        let wait_result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), agent.child.wait()).await;
-
-        match wait_result {
-            Ok(Ok(status)) => {
-                tracing::info!(agent = name, ?status, "agent exited");
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    break;
+                }
             }
-            _ => {
-                tracing::warn!(agent = name, "agent did not exit in time, killing");
-                let _ = agent.child.kill().await;
+
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                tracing::warn!(agent = name, pid, "adopted agent didn't exit, sending SIGKILL");
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             }
         }
 
         agents.remove(name);
+        self.persist_state(&agents);
         Ok(())
     }
 
@@ -189,37 +257,27 @@ impl AgentManager {
         // Check each agent's actual status
         let mut dead = Vec::new();
         for (name, agent) in agents.iter_mut() {
-            match agent.child.try_wait() {
-                Ok(None) => {
-                    // Still running
-                    result.push(agent.info.clone());
-                }
-                Ok(Some(status)) => {
-                    let mut info = agent.info.clone();
-                    info.status = if status.success() {
-                        AgentStatus::Stopped
-                    } else {
-                        AgentStatus::Failed {
-                            error: format!("exited with {status}"),
-                        }
-                    };
-                    result.push(info);
-                    dead.push(name.clone());
-                }
-                Err(e) => {
-                    let mut info = agent.info.clone();
-                    info.status = AgentStatus::Failed {
-                        error: e.to_string(),
-                    };
-                    result.push(info);
-                    dead.push(name.clone());
-                }
+            let alive = match &mut agent.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+            };
+
+            if alive {
+                result.push(agent.info.clone());
+            } else {
+                let mut info = agent.info.clone();
+                info.status = AgentStatus::Stopped;
+                result.push(info);
+                dead.push(name.clone());
             }
         }
 
         // Clean up dead agents
-        for name in dead {
-            agents.remove(&name);
+        if !dead.is_empty() {
+            for name in dead {
+                agents.remove(&name);
+            }
+            self.persist_state(&agents);
         }
 
         result
@@ -228,7 +286,10 @@ impl AgentManager {
     pub async fn is_running(&self, name: &str) -> bool {
         let mut agents = self.agents.lock().await;
         if let Some(agent) = agents.get_mut(name) {
-            matches!(agent.child.try_wait(), Ok(None))
+            match &mut agent.child {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+            }
         } else {
             false
         }

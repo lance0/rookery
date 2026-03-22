@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
@@ -121,6 +122,76 @@ impl StatePersistence {
             }
             _ => state,
         }
+    }
+}
+
+// --- Agent state persistence ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEntry {
+    pub pid: u32,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentState {
+    pub agents: HashMap<String, AgentEntry>,
+}
+
+pub struct AgentPersistence {
+    path: PathBuf,
+}
+
+impl AgentPersistence {
+    pub fn new() -> Self {
+        let path = if let Some(state_dir) = dirs::state_dir() {
+            state_dir.join("rookery").join("agents.json")
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".local")
+                .join("state")
+                .join("rookery")
+                .join("agents.json")
+        } else {
+            PathBuf::from("/tmp/rookery-agents.json")
+        };
+        Self { path }
+    }
+
+    pub fn load(&self) -> Result<AgentState> {
+        if !self.path.exists() {
+            return Ok(AgentState::default());
+        }
+        let content = std::fs::read_to_string(&self.path)?;
+        let state: AgentState = serde_json::from_str(&content)?;
+        Ok(state)
+    }
+
+    pub fn save(&self, state: &AgentState) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(state)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+
+    /// Remove dead agents from persisted state.
+    pub fn reconcile(&self, mut state: AgentState) -> AgentState {
+        let dead: Vec<String> = state
+            .agents
+            .iter()
+            .filter(|(_name, entry)| !is_process_alive(entry.pid, None))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in &dead {
+            tracing::warn!(agent = %name, "persisted agent no longer running, removing");
+            state.agents.remove(name);
+        }
+
+        state
     }
 }
 

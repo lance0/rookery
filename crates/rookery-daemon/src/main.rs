@@ -6,7 +6,7 @@ use app_state::AppState;
 use axum::routing::{get, post, put};
 use axum::Router;
 use rookery_core::config::Config;
-use rookery_core::state::StatePersistence;
+use rookery_core::state::{AgentPersistence, StatePersistence};
 use rookery_engine::agent::AgentManager;
 use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
@@ -119,6 +119,27 @@ async fn main() {
                         nix::sys::signal::Signal::SIGKILL,
                     );
                 }
+            }
+        }
+    }
+
+    // Reconcile persisted agent state — adopt running agents
+    let agent_persistence = AgentPersistence::new();
+    if let Ok(agent_state) = agent_persistence.load() {
+        let reconciled = agent_persistence.reconcile(agent_state);
+        for (name, entry) in &reconciled.agents {
+            agent_manager.adopt(name, entry).await;
+        }
+        let _ = agent_persistence.save(&reconciled);
+    }
+
+    // Auto-start agents configured with auto_start = true
+    for (name, agent_config) in &config.agents {
+        if agent_config.auto_start && !agent_manager.is_running(name).await {
+            tracing::info!(agent = %name, "auto-starting agent");
+            match agent_manager.start(name, agent_config).await {
+                Ok(info) => tracing::info!(agent = %name, pid = info.pid, "agent auto-started"),
+                Err(e) => tracing::warn!(agent = %name, error = %e, "failed to auto-start agent"),
             }
         }
     }

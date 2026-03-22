@@ -342,7 +342,19 @@ pub async fn get_health() -> StatusCode {
 
 pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let config = state.config.read().await;
-    Json(serde_json::to_value(&*config).unwrap_or_default())
+    let mut val = serde_json::to_value(&*config).unwrap_or_default();
+
+    // Redact sensitive fields from agent configs
+    if let Some(agents) = val.get_mut("agents").and_then(|a| a.as_object_mut()) {
+        for (_name, agent) in agents.iter_mut() {
+            if let Some(env) = agent.get_mut("env") {
+                let count = env.as_object().map(|o| o.len()).unwrap_or(0);
+                *env = serde_json::json!(format!("[{count} vars redacted]"));
+            }
+        }
+    }
+
+    Json(val)
 }
 
 #[derive(Deserialize)]
@@ -503,6 +515,11 @@ pub async fn post_chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // Reject new requests during swap drain
+    if state.process_manager.is_draining() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     let current = state.process_manager.to_server_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
