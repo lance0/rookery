@@ -137,6 +137,11 @@ pub struct AgentConfig {
     /// Whether to auto-restart the agent if it crashes or exits unexpectedly
     #[serde(default)]
     pub restart_on_crash: bool,
+
+    /// Port this agent depends on (e.g. llama-server on 8081). If the server
+    /// on this port restarts (down→up transition), the watchdog bounces the agent.
+    #[serde(default)]
+    pub depends_on_port: Option<u16>,
 }
 
 fn default_port() -> u16 {

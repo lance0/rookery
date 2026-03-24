@@ -122,7 +122,7 @@
 - [ ] `/api/models/search`, `/api/models/quants/:repo`, `/api/models/recommend/:repo`, `/api/models/pull` endpoints
 
 ## Agent Reliability
-- [ ] Agent health check: verify agents are responsive, not just PID-alive (e.g., check for active network connections, stuck CLOSE-WAIT sockets)
+- [x] Agent health check: `depends_on_port` config — watchdog detects server restart (down→up) and bounces dependent agents
 - [x] Auto-restart on crash: `restart_on_crash = true` config flag with exponential backoff
 - [x] Agent watchdog loop: background task polling agent liveness every 30s, kill+restart stuck agents
 - [x] Restart agents on daemon restart: adopted agents with restart_on_swap bounced for fresh connections

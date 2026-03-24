@@ -329,9 +329,103 @@ impl AgentManager {
             const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
             const MAX_BACKOFF_SECS: u64 = 60;
             const HEALTHY_RESET_SECS: u64 = 300; // reset backoff after 5min uptime
+            const BOUNCE_MIN_UPTIME_SECS: i64 = 60; // skip freshly-started agents
+
+            // Track dependency port liveness for down→up transition detection.
+            // Initialized to true so a cold start doesn't trigger a false bounce.
+            let tracked_ports: std::collections::HashSet<u16> = configs
+                .values()
+                .filter_map(|c| c.depends_on_port)
+                .collect();
+            let mut port_was_up: HashMap<u16, bool> = tracked_ports
+                .iter()
+                .map(|&p| (p, true))
+                .collect();
 
             loop {
                 tokio::time::sleep(POLL_INTERVAL).await;
+
+                // Check dependency ports for down→up transitions (server restarted).
+                // Agents holding stale connections need to be bounced.
+                if !tracked_ports.is_empty() {
+                    let mut ports_recovered: Vec<u16> = Vec::new();
+
+                    for &port in &tracked_ports {
+                        let is_up = crate::health::check_health(
+                            port,
+                            std::time::Duration::from_secs(3),
+                        )
+                        .await;
+                        let was_up = port_was_up.get(&port).copied().unwrap_or(true);
+
+                        if is_up && !was_up {
+                            tracing::info!(
+                                port,
+                                "dependency port recovered, will bounce dependent agents"
+                            );
+                            ports_recovered.push(port);
+                        }
+
+                        if is_up != was_up {
+                            if !is_up {
+                                tracing::warn!(port, "dependency port is down");
+                            }
+                            port_was_up.insert(port, is_up);
+                        }
+                    }
+
+                    // Bounce running agents whose dependency port just recovered
+                    if !ports_recovered.is_empty() {
+                        let bounce_names: Vec<String> = {
+                            let agents = manager.agents.lock().await;
+                            agents
+                                .iter()
+                                .filter(|(name, agent)| {
+                                    if let Some(cfg) = configs.get(*name) {
+                                        if let Some(dep_port) = cfg.depends_on_port {
+                                            if ports_recovered.contains(&dep_port) {
+                                                let uptime = Utc::now()
+                                                    .signed_duration_since(agent.info.started_at)
+                                                    .num_seconds();
+                                                return uptime > BOUNCE_MIN_UPTIME_SECS
+                                                    && !agent.intentional_stop;
+                                            }
+                                        }
+                                    }
+                                    false
+                                })
+                                .map(|(name, _)| name.clone())
+                                .collect()
+                        };
+
+                        for name in bounce_names {
+                            if let Some(cfg) = configs.get(&name) {
+                                tracing::info!(
+                                    agent = %name,
+                                    "bouncing agent after dependency port recovered"
+                                );
+                                let _ = manager.stop(&name).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                match manager.start(&name, cfg).await {
+                                    Ok(info) => {
+                                        tracing::info!(
+                                            agent = %name,
+                                            pid = info.pid,
+                                            "agent bounced after port recovery"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            agent = %name,
+                                            error = %e,
+                                            "failed to bounce agent after port recovery"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Collect dead agents that need restarting
                 let to_restart: Vec<String> = {
