@@ -121,6 +121,12 @@
 - [ ] HF cache scanner (`~/.cache/huggingface/hub/models--*` or llama.cpp cache)
 - [ ] `/api/models/search`, `/api/models/quants/:repo`, `/api/models/recommend/:repo`, `/api/models/pull` endpoints
 
+## Agent Reliability
+- [ ] Agent health check: verify agents are responsive, not just PID-alive (e.g., check for active network connections, stuck CLOSE-WAIT sockets)
+- [ ] Auto-restart on crash: `restart_on_crash = true` config flag with exponential backoff
+- [ ] Agent watchdog loop: background task polling agent liveness every 30-60s, kill+restart stuck agents
+- [ ] Restart agents on daemon restart: agents holding stale connections to llama-server should be restarted after daemon comes back up
+
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
