@@ -123,9 +123,9 @@
 
 ## Agent Reliability
 - [ ] Agent health check: verify agents are responsive, not just PID-alive (e.g., check for active network connections, stuck CLOSE-WAIT sockets)
-- [ ] Auto-restart on crash: `restart_on_crash = true` config flag with exponential backoff
-- [ ] Agent watchdog loop: background task polling agent liveness every 30-60s, kill+restart stuck agents
-- [ ] Restart agents on daemon restart: agents holding stale connections to llama-server should be restarted after daemon comes back up
+- [x] Auto-restart on crash: `restart_on_crash = true` config flag with exponential backoff
+- [x] Agent watchdog loop: background task polling agent liveness every 30s, kill+restart stuck agents
+- [x] Restart agents on daemon restart: adopted agents with restart_on_swap bounced for fresh connections
 
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)

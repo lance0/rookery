@@ -51,7 +51,7 @@ async fn main() {
 
     // Init process manager and agent manager
     let process_manager = ProcessManager::new(log_buffer.clone());
-    let agent_manager = AgentManager::new(log_buffer.clone());
+    let agent_manager = Arc::new(AgentManager::new(log_buffer.clone()));
 
     // State change broadcast channel
     let (state_tx, _) = broadcast::channel::<serde_json::Value>(64);
@@ -138,6 +138,22 @@ async fn main() {
             agent_manager.adopt(name, entry).await;
         }
         let _ = agent_persistence.save(&reconciled);
+
+        // Restart adopted agents that need fresh connections to llama-server.
+        // After a daemon restart, agents may hold stale CLOSE-WAIT sockets to
+        // the old llama-server process and silently fail to send requests.
+        for (name, _entry) in &reconciled.agents {
+            if let Some(agent_config) = config.agents.get(name) {
+                if agent_config.restart_on_swap {
+                    tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
+                    let _ = agent_manager.stop(name).await;
+                    match agent_manager.start(name, agent_config).await {
+                        Ok(info) => tracing::info!(agent = %name, pid = info.pid, "agent restarted"),
+                        Err(e) => tracing::warn!(agent = %name, error = %e, "failed to restart adopted agent"),
+                    }
+                }
+            }
+        }
     }
 
     // Auto-start agents configured with auto_start = true
@@ -149,6 +165,21 @@ async fn main() {
                 Err(e) => tracing::warn!(agent = %name, error = %e, "failed to auto-start agent"),
             }
         }
+    }
+
+    // Spawn agent watchdog for restart_on_crash support
+    let watchdog_configs: std::collections::HashMap<String, _> = config
+        .agents
+        .iter()
+        .filter(|(_, c)| c.restart_on_crash)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if !watchdog_configs.is_empty() {
+        tracing::info!(
+            agents = ?watchdog_configs.keys().collect::<Vec<_>>(),
+            "starting agent watchdog"
+        );
+        agent_manager.spawn_watchdog(config.agents.clone());
     }
 
     // Build hardware profile and HF client

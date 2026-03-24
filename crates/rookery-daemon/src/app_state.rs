@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub process_manager: ProcessManager,
-    pub agent_manager: AgentManager,
+    pub agent_manager: Arc<AgentManager>,
     pub gpu_monitor: Option<GpuMonitor>,
     pub log_buffer: Arc<LogBuffer>,
     pub state_persistence: StatePersistence,

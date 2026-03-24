@@ -133,6 +133,10 @@ pub struct AgentConfig {
     /// Whether to restart the agent when the model is swapped
     #[serde(default = "default_true")]
     pub restart_on_swap: bool,
+
+    /// Whether to auto-restart the agent if it crashes or exits unexpectedly
+    #[serde(default)]
+    pub restart_on_crash: bool,
 }
 
 fn default_port() -> u16 {

@@ -30,12 +30,16 @@ pub enum AgentStatus {
 struct ManagedAgent {
     child: Option<Child>,
     info: AgentInfo,
+    /// Whether this agent was intentionally stopped (not a crash).
+    intentional_stop: bool,
 }
 
 pub struct AgentManager {
     agents: Mutex<HashMap<String, ManagedAgent>>,
     log_buffer: Arc<LogBuffer>,
     persistence: AgentPersistence,
+    /// Tracks consecutive crash count per agent for exponential backoff.
+    crash_counts: Mutex<HashMap<String, u32>>,
 }
 
 impl AgentManager {
@@ -44,6 +48,7 @@ impl AgentManager {
             agents: Mutex::new(HashMap::new()),
             log_buffer,
             persistence: AgentPersistence::new(),
+            crash_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -59,7 +64,11 @@ impl AgentManager {
         let mut agents = self.agents.lock().await;
         agents.insert(
             name.to_string(),
-            ManagedAgent { child: None, info },
+            ManagedAgent {
+                child: None,
+                info,
+                intentional_stop: false,
+            },
         );
     }
 
@@ -168,6 +177,7 @@ impl AgentManager {
             ManagedAgent {
                 child: Some(child),
                 info: info.clone(),
+                intentional_stop: false,
             },
         );
 
@@ -183,6 +193,9 @@ impl AgentManager {
         let agent = agents
             .get_mut(name)
             .ok_or_else(|| AgentError::NotFound(name.to_string()))?;
+
+        // Mark as intentional so watchdog doesn't restart it
+        agent.intentional_stop = true;
 
         let pid = agent.info.pid;
         tracing::info!(agent = name, pid, "stopping agent");
@@ -234,6 +247,10 @@ impl AgentManager {
 
         agents.remove(name);
         self.persist_state(&agents);
+
+        // Reset crash count on intentional stop
+        self.crash_counts.lock().await.remove(name);
+
         Ok(())
     }
 
@@ -293,6 +310,138 @@ impl AgentManager {
         } else {
             false
         }
+    }
+
+    /// Spawn a background watchdog task that checks agent liveness and
+    /// auto-restarts agents with `restart_on_crash = true`.
+    ///
+    /// The watchdog polls every 30 seconds. On crash detection it uses
+    /// exponential backoff: 1s, 2s, 4s, 8s, … up to 60s cap. The backoff
+    /// resets after 5 minutes of successful uptime.
+    pub fn spawn_watchdog(
+        self: &Arc<Self>,
+        configs: HashMap<String, AgentConfig>,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = Arc::clone(self);
+        let configs = Arc::new(configs);
+
+        tokio::spawn(async move {
+            const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+            const MAX_BACKOFF_SECS: u64 = 60;
+            const HEALTHY_RESET_SECS: u64 = 300; // reset backoff after 5min uptime
+
+            loop {
+                tokio::time::sleep(POLL_INTERVAL).await;
+
+                // Collect dead agents that need restarting
+                let to_restart: Vec<String> = {
+                    let mut agents = manager.agents.lock().await;
+                    let mut dead_names = Vec::new();
+
+                    for (name, agent) in agents.iter_mut() {
+                        let alive = match &mut agent.child {
+                            Some(child) => matches!(child.try_wait(), Ok(None)),
+                            None => {
+                                std::path::Path::new(&format!("/proc/{}", agent.info.pid))
+                                    .exists()
+                            }
+                        };
+
+                        if !alive && !agent.intentional_stop {
+                            // Check if this agent has restart_on_crash
+                            if let Some(cfg) = configs.get(name) {
+                                if cfg.restart_on_crash {
+                                    tracing::warn!(
+                                        agent = %name,
+                                        pid = agent.info.pid,
+                                        "agent exited unexpectedly, scheduling restart"
+                                    );
+                                    dead_names.push(name.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove dead agents from tracking
+                    for name in &dead_names {
+                        agents.remove(name);
+                    }
+                    if !dead_names.is_empty() {
+                        manager.persist_state(&agents);
+                    }
+
+                    dead_names
+                };
+
+                // Also check for healthy agents and reset their backoff
+                {
+                    let agents = manager.agents.lock().await;
+                    let mut crash_counts = manager.crash_counts.lock().await;
+                    for (name, agent) in agents.iter() {
+                        let alive = std::path::Path::new(&format!("/proc/{}", agent.info.pid))
+                            .exists();
+                        if alive {
+                            let uptime = Utc::now()
+                                .signed_duration_since(agent.info.started_at)
+                                .num_seconds();
+                            if uptime > HEALTHY_RESET_SECS as i64 && crash_counts.contains_key(name)
+                            {
+                                tracing::info!(
+                                    agent = %name,
+                                    uptime_secs = uptime,
+                                    "agent healthy, resetting crash backoff"
+                                );
+                                crash_counts.remove(name);
+                            }
+                        }
+                    }
+                }
+
+                // Restart each dead agent with backoff
+                for name in to_restart {
+                    let crash_count = {
+                        let mut counts = manager.crash_counts.lock().await;
+                        let count = counts.entry(name.clone()).or_insert(0);
+                        *count += 1;
+                        *count
+                    };
+
+                    // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 60s
+                    let backoff_secs =
+                        (1u64 << (crash_count - 1).min(6)).min(MAX_BACKOFF_SECS);
+
+                    tracing::info!(
+                        agent = %name,
+                        crash_count,
+                        backoff_secs,
+                        "waiting before restart"
+                    );
+
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+
+                    if let Some(cfg) = configs.get(&name) {
+                        match manager.start(&name, cfg).await {
+                            Ok(info) => {
+                                tracing::info!(
+                                    agent = %name,
+                                    pid = info.pid,
+                                    crash_count,
+                                    "agent restarted by watchdog"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    agent = %name,
+                                    error = %e,
+                                    crash_count,
+                                    "watchdog failed to restart agent"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
