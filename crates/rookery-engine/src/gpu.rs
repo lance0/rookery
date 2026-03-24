@@ -32,6 +32,10 @@ impl GpuMonitor {
         Ok(Self { nvml })
     }
 
+    pub fn device(&self, index: u32) -> Result<nvml_wrapper::Device<'_>, nvml_wrapper::error::NvmlError> {
+        self.nvml.device_by_index(index)
+    }
+
     pub fn stats(&self) -> Result<Vec<GpuStats>, nvml_wrapper::error::NvmlError> {
         let count = self.nvml.device_count()?;
         let mut stats = Vec::with_capacity(count as usize);
