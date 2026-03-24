@@ -64,11 +64,11 @@
 - [x] LogBuffer: handle poison recovery (`unwrap_or_else(|e| e.into_inner())`)
 
 ### Backend — Watchdog & Health
-- [ ] Inference canary: periodic minimal completion request (timeout 10s) to detect CUDA zombie state
+- [x] Inference canary: periodic minimal completion request (60s interval, 10s timeout, retry-once) with auto-restart
 - [ ] Restart backoff: exponential delay (1s→2s→4s...60s cap) on repeated crashes, reset on successful health
 - [ ] Enable `--metrics` flag on llama-server, parse KV cache usage ratio + throughput
 - [ ] Stderr pattern matching: detect `CUDA error` / `ggml_cuda_error` lines, trigger immediate canary
-- [ ] Canary after orphan adoption: verify adopted process can actually serve inference
+- [x] Canary after orphan adoption: verify adopted process can actually serve inference
 - [ ] Startup readiness gate: poll /health until 200 before reporting "running" (already exists, verify robustness)
 
 ### Backend — Chat Proxy Hardening

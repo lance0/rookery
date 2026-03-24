@@ -76,17 +76,24 @@ async fn main() {
         } = reconciled
         {
             if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3)).await {
-                tracing::info!(pid = running_pid, port, "adopted process is healthy");
-                process_manager
-                    .adopt(rookery_engine::process::ProcessInfo {
-                        pid: running_pid,
-                        port,
-                        profile: profile.clone(),
-                        started_at: *since,
-                        command_line: command_line.clone(),
-                        exe_path: exe_path.clone().unwrap_or_default(),
-                    })
-                    .await;
+                // Health endpoint responds — now verify inference actually works
+                if rookery_engine::health::check_inference(port, std::time::Duration::from_secs(10)).await {
+                    tracing::info!(pid = running_pid, port, "adopted process is healthy (inference canary passed)");
+                    process_manager
+                        .adopt(rookery_engine::process::ProcessInfo {
+                            pid: running_pid,
+                            port,
+                            profile: profile.clone(),
+                            started_at: *since,
+                            command_line: command_line.clone(),
+                            exe_path: exe_path.clone().unwrap_or_default(),
+                        })
+                        .await;
+                } else {
+                    tracing::warn!(pid = running_pid, port, "adopted process failed inference canary — marking stopped");
+                    let stopped = rookery_core::state::ServerState::Stopped;
+                    let _ = state_persistence.save(&stopped);
+                }
             } else {
                 tracing::warn!(pid = running_pid, port, "adopted process failed health check — marking stopped");
                 let stopped = rookery_core::state::ServerState::Stopped;
@@ -202,6 +209,76 @@ async fn main() {
     });
 
     let shutdown_state = state.clone();
+
+    // Spawn inference canary — periodic minimal completion request to detect
+    // CUDA zombie state where /health responds but inference is broken.
+    let canary_state = state.clone();
+    tokio::spawn(async move {
+        const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        const CANARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+        loop {
+            tokio::time::sleep(CANARY_INTERVAL).await;
+
+            // Only check when server is running and not mid-swap
+            if canary_state.process_manager.is_draining() {
+                continue;
+            }
+            let current = canary_state.process_manager.to_server_state().await;
+            let (profile, port) = match current {
+                rookery_core::state::ServerState::Running { ref profile, port, .. } => {
+                    (profile.clone(), port)
+                }
+                _ => continue,
+            };
+
+            if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
+                tracing::debug!(port, "inference canary passed");
+                continue;
+            }
+
+            // First failure — retry once after 5s to avoid false positives
+            tracing::warn!(port, "inference canary failed, retrying in 5s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
+                tracing::info!(port, "inference canary passed on retry");
+                continue;
+            }
+
+            // Two consecutive failures — server is broken, restart it
+            tracing::error!(port, profile = %profile, "inference canary failed twice, restarting server");
+
+            // Acquire op_lock to serialize with manual start/stop/swap
+            let _op_guard = canary_state.op_lock.lock().await;
+
+            // Re-check state under lock — someone may have stopped/swapped already
+            let current = canary_state.process_manager.to_server_state().await;
+            if !current.is_running() {
+                tracing::info!("server already stopped, skipping canary restart");
+                continue;
+            }
+
+            let _ = canary_state.process_manager.stop().await;
+            let stopped = rookery_core::state::ServerState::Stopped;
+            let _ = canary_state.state_persistence.save(&stopped);
+
+            let config = canary_state.config.read().await;
+            match canary_state.process_manager.start_and_wait(&config, &profile).await {
+                Ok(server_state) => {
+                    let _ = canary_state.state_persistence.save(&server_state);
+                    if server_state.is_running() {
+                        tracing::info!(profile = %profile, "server restarted by inference canary");
+                    } else {
+                        tracing::error!(profile = %profile, "server failed to restart after canary");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, profile = %profile, "canary restart failed");
+                }
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/api/health", get(routes::get_health))

@@ -50,6 +50,32 @@ pub async fn check_health(port: u16, timeout: Duration) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
+/// Inference canary — sends a minimal completion request to verify the CUDA
+/// inference pipeline is functional, not just that the HTTP server responds.
+/// Returns true if the server generates at least one token within the timeout.
+pub async fn check_inference(port: u16, timeout: Duration) -> bool {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let body = serde_json::json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    });
+
+    match client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HealthError {
     #[error("health check timed out after {0:?}")]
