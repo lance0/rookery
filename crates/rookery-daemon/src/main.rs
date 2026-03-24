@@ -64,7 +64,7 @@ async fn main() {
         tracing::info!(state = ?format!("{:?}", reconciled), "reconciled previous state");
         let _ = state_persistence.save(&reconciled);
 
-        // Adopt the running process so stop/swap can kill it
+        // Adopt the running process — but verify it's actually healthy first
         if let rookery_core::state::ServerState::Running {
             ref profile,
             pid: running_pid,
@@ -75,16 +75,23 @@ async fn main() {
             ..
         } = reconciled
         {
-            process_manager
-                .adopt(rookery_engine::process::ProcessInfo {
-                    pid: running_pid,
-                    port,
-                    profile: profile.clone(),
-                    started_at: *since,
-                    command_line: command_line.clone(),
-                    exe_path: exe_path.clone().unwrap_or_default(),
-                })
-                .await;
+            if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3)).await {
+                tracing::info!(pid = running_pid, port, "adopted process is healthy");
+                process_manager
+                    .adopt(rookery_engine::process::ProcessInfo {
+                        pid: running_pid,
+                        port,
+                        profile: profile.clone(),
+                        started_at: *since,
+                        command_line: command_line.clone(),
+                        exe_path: exe_path.clone().unwrap_or_default(),
+                    })
+                    .await;
+            } else {
+                tracing::warn!(pid = running_pid, port, "adopted process failed health check — marking stopped");
+                let stopped = rookery_core::state::ServerState::Stopped;
+                let _ = state_persistence.save(&stopped);
+            }
         }
 
         pid
@@ -144,6 +151,12 @@ async fn main() {
         }
     }
 
+    // Build hardware profile and HF client
+    let hardware_profile =
+        rookery_engine::hardware::build_hardware_profile(gpu_monitor.as_ref());
+    tracing::info!(gpu = ?hardware_profile.gpu.as_ref().map(|g| &g.name), cpu = %hardware_profile.cpu.name, "hardware profile built");
+    let hf_client = rookery_engine::models::HfClient::new();
+
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
         process_manager,
@@ -153,6 +166,8 @@ async fn main() {
         state_persistence,
         state_tx,
         op_lock: Mutex::new(()),
+        hf_client,
+        hardware_profile,
     });
 
     let shutdown_state = state.clone();
@@ -176,6 +191,12 @@ async fn main() {
         .route("/api/model-info", get(routes::get_model_info))
         .route("/api/server-stats", get(routes::get_server_stats))
         .route("/api/chat", post(routes::post_chat))
+        .route("/api/hardware", get(routes::get_hardware))
+        .route("/api/models/search", get(routes::get_models_search))
+        .route("/api/models/quants", get(routes::get_models_quants))
+        .route("/api/models/recommend", get(routes::get_models_recommend))
+        .route("/api/models/cached", get(routes::get_models_cached))
+        .route("/api/models/pull", post(routes::post_models_pull))
         .fallback(routes::get_dashboard)
         .with_state(state);
 

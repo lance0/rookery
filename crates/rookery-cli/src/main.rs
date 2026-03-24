@@ -62,11 +62,47 @@ enum Commands {
         #[command(subcommand)]
         cmd: AgentCommands,
     },
+    /// Browse and manage models
+    Models {
+        #[command(subcommand)]
+        cmd: ModelCommands,
+    },
     /// Generate shell completions
     Completions {
         /// Shell type
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum ModelCommands {
+    /// Search HuggingFace for GGUF models
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// List available quants for a model repo
+    Quants {
+        /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
+        repo: String,
+    },
+    /// Recommend best-fit quant for your hardware
+    Recommend {
+        /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
+        repo: String,
+    },
+    /// List locally cached models
+    List,
+    /// Download a model
+    Pull {
+        /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
+        repo: String,
+        /// Quant to download (auto-picks best fit if omitted)
+        #[arg(long)]
+        quant: Option<String>,
+    },
+    /// Show hardware profile
+    Hardware,
 }
 
 #[derive(Subcommand)]
@@ -171,6 +207,14 @@ async fn main() {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
             AgentCommands::Stop { name } => cmd_agent_stop(&client, &name).await,
             AgentCommands::Status => cmd_agent_status(&client).await,
+        },
+        Commands::Models { cmd } => match cmd {
+            ModelCommands::Search { query } => cmd_models_search(&client, &query).await,
+            ModelCommands::Quants { repo } => cmd_models_quants(&client, &repo).await,
+            ModelCommands::Recommend { repo } => cmd_models_recommend(&client, &repo).await,
+            ModelCommands::List => cmd_models_list(&client).await,
+            ModelCommands::Pull { repo, quant } => cmd_models_pull(&client, &repo, quant).await,
+            ModelCommands::Hardware => cmd_hardware(&client).await,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(
@@ -534,6 +578,197 @@ async fn cmd_logs(client: &DaemonClient, follow: bool, n: usize) -> Result<(), B
     }
 
     Ok(())
+}
+
+async fn cmd_hardware(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get("/api/hardware").await?;
+
+    if let Some(gpu) = resp.get("gpu") {
+        println!("GPU:       {}", gpu["name"].as_str().unwrap_or("unknown"));
+        println!("  VRAM:    {} MB total, {} MB free",
+            gpu["vram_total_mb"].as_u64().unwrap_or(0),
+            gpu["vram_free_mb"].as_u64().unwrap_or(0));
+        if let Some(bw) = gpu["memory_bandwidth_gbps"].as_f64() {
+            println!("  Memory:  {:.0} GB/s bandwidth", bw);
+        }
+        if let (Some(major), Some(minor)) = (
+            gpu["compute_capability"].as_array().and_then(|a| a.first()).and_then(|v| v.as_u64()),
+            gpu["compute_capability"].as_array().and_then(|a| a.get(1)).and_then(|v| v.as_u64()),
+        ) {
+            println!("  Compute: {major}.{minor}");
+        }
+    } else {
+        println!("GPU:       not available");
+    }
+
+    if let Some(cpu) = resp.get("cpu") {
+        println!("CPU:       {}", cpu["name"].as_str().unwrap_or("unknown"));
+        println!("  Cores:   {} cores / {} threads",
+            cpu["cores"].as_u64().unwrap_or(0),
+            cpu["threads"].as_u64().unwrap_or(0));
+        let ram_total = cpu["ram_total_mb"].as_u64().unwrap_or(0);
+        let ram_free = cpu["ram_free_mb"].as_u64().unwrap_or(0);
+        println!("  RAM:     {} MB total, {} MB free",
+            ram_total, ram_free);
+    }
+
+    Ok(())
+}
+
+async fn cmd_models_search(client: &DaemonClient, query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get(&format!("/api/models/search?q={query}")).await?;
+    let results = resp["results"].as_array().ok_or("no results")?;
+
+    if results.is_empty() {
+        println!("no GGUF repos found for '{query}'");
+        return Ok(());
+    }
+
+    println!("{:<50} {:>10} {:>8}", "Repo", "Downloads", "Likes");
+    println!("{}", "-".repeat(70));
+
+    for r in results {
+        println!("{:<50} {:>10} {:>8}",
+            r["id"].as_str().unwrap_or("?"),
+            format_count(r["downloads"].as_u64().unwrap_or(0)),
+            format_count(r["likes"].as_u64().unwrap_or(0)),
+        );
+    }
+
+    Ok(())
+}
+
+async fn cmd_models_quants(client: &DaemonClient, repo: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get(&format!("/api/models/quants?repo={repo}")).await?;
+    let quants = resp["quants"].as_array().ok_or("no quants")?;
+    let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
+
+    println!("{resolved_repo}\n");
+    println!("{:<16} {:>8} {:>6} {:>14} {:>10}", "Quant", "Size", "DL", "Fit", "Est tok/s");
+    println!("{}", "-".repeat(58));
+
+    for q in quants {
+        let label = q["label"].as_str().unwrap_or("?");
+        let size_gb = q["total_bytes"].as_u64().unwrap_or(0) as f64 / 1_073_741_824.0;
+        let downloaded = if q["is_downloaded"].as_bool().unwrap_or(false) { "✓" } else { "" };
+        let fit = q.get("perf_estimate")
+            .and_then(|e| e["fit_mode"].as_str())
+            .unwrap_or("?")
+            .replace('_', " ");
+        let toks = q.get("perf_estimate")
+            .and_then(|e| e["estimated_gen_toks"].as_f64())
+            .map(|t| format!("~{:.0}", t))
+            .unwrap_or_default();
+
+        println!("{:<16} {:>6.1}GB {:>6} {:>14} {:>10}", label, size_gb, downloaded, fit, toks);
+    }
+
+    Ok(())
+}
+
+async fn cmd_models_recommend(client: &DaemonClient, repo: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get(&format!("/api/models/recommend?repo={repo}")).await?;
+    let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
+
+    if resp["recommendation"].is_null() {
+        println!("{resolved_repo}: {}", resp["message"].as_str().unwrap_or("no recommendation"));
+        return Ok(());
+    }
+
+    let rec = &resp["recommendation"];
+    let label = rec["label"].as_str().unwrap_or("?");
+    let size_gb = rec["total_bytes"].as_u64().unwrap_or(0) as f64 / 1_073_741_824.0;
+    let fit = rec.get("perf_estimate")
+        .and_then(|e| e["fit_mode"].as_str())
+        .unwrap_or("?")
+        .replace('_', " ");
+    let toks = rec.get("perf_estimate")
+        .and_then(|e| e["estimated_gen_toks"].as_f64())
+        .unwrap_or(0.0);
+    let reason = rec["reason"].as_str().unwrap_or("");
+
+    println!("{resolved_repo}");
+    println!("  recommended: {label} ({size_gb:.1}GB)");
+    println!("  fit:         {fit}");
+    println!("  est gen:     ~{toks:.0} tok/s");
+    println!("  reason:      {reason}");
+
+    Ok(())
+}
+
+async fn cmd_models_list(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get("/api/models/cached").await?;
+    let models = resp["models"].as_array().ok_or("no cached models")?;
+
+    if models.is_empty() {
+        println!("no cached models in ~/.cache/llama.cpp/");
+        return Ok(());
+    }
+
+    println!("{:<45} {:<16} {:>8}", "Repo", "Quant", "Size");
+    println!("{}", "-".repeat(72));
+
+    for m in models {
+        let repo = m["repo"].as_str().unwrap_or("?");
+        let quant = m["quant_label"].as_str().unwrap_or("?");
+        let size_gb = m["size_bytes"].as_u64().unwrap_or(0) as f64 / 1_073_741_824.0;
+        println!("{:<45} {:<16} {:>6.1}GB", repo, quant, size_gb);
+    }
+
+    Ok(())
+}
+
+async fn cmd_models_pull(client: &DaemonClient, repo: &str, quant: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let body = serde_json::json!({ "repo": repo, "quant": quant });
+    let resp: serde_json::Value = client.post("/api/models/pull", &body).await?;
+
+    if !resp["started"].as_bool().unwrap_or(false) {
+        println!("{}", resp["message"].as_str().unwrap_or("pull failed"));
+        return Ok(());
+    }
+
+    let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
+    let quant_label = resp["quant"].as_str().unwrap_or("?");
+    let files = resp["files"].as_array().map(|a| a.len()).unwrap_or(0);
+
+    println!("downloading {resolved_repo} ({quant_label}, {files} file(s))...");
+    println!("(download runs in background — check `rookery models list` for completion)");
+
+    Ok(())
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 async fn cmd_bench(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {

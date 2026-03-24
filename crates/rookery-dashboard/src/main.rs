@@ -82,6 +82,7 @@ pub enum Tab {
     Chat,
     Bench,
     Logs,
+    Models,
 }
 
 fn get_window() -> Option<web_sys::Window> {
@@ -302,6 +303,7 @@ fn App() -> impl IntoView {
                 "3" => set_tab.set(Tab::Chat),
                 "4" => set_tab.set(Tab::Bench),
                 "5" => set_tab.set(Tab::Logs),
+                "6" => set_tab.set(Tab::Models),
                 "t" => {
                     set_is_light.update(|light| *light = toggle_theme(*light));
                 }
@@ -380,6 +382,7 @@ fn App() -> impl IntoView {
                 {tab_btn(Tab::Chat, "Chat", "3")}
                 {tab_btn(Tab::Bench, "Bench", "4")}
                 {tab_btn(Tab::Logs, "Logs", "5")}
+                {tab_btn(Tab::Models, "Models", "6")}
             </div>
 
             <div class="tab-content">
@@ -420,6 +423,11 @@ fn App() -> impl IntoView {
                     Tab::Logs => view! {
                         <div class="section">
                             <LogViewer logs=logs />
+                        </div>
+                    }.into_any(),
+                    Tab::Models => view! {
+                        <div class="section">
+                            <ModelsPanel set_toasts=set_toasts />
                         </div>
                     }.into_any(),
                 }}

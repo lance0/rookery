@@ -10,6 +10,7 @@ mod settings_panel;
 pub mod toast;
 mod gpu_viz;
 mod chat_panel;
+mod models_panel;
 
 pub use status_card::*;
 pub use gpu_panel::*;
@@ -23,3 +24,4 @@ pub use settings_panel::*;
 pub use toast::*;
 pub use gpu_viz::*;
 pub use chat_panel::*;
+pub use models_panel::*;

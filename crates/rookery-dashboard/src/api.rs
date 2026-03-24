@@ -118,6 +118,59 @@ pub async fn fetch_config() -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+// --- Model discovery ---
+
+pub async fn fetch_hardware() -> Result<serde_json::Value, String> {
+    let resp = Request::get("/api/hardware")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn search_models(query: &str) -> Result<serde_json::Value, String> {
+    let resp = Request::get(&format!("/api/models/search?q={query}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_quants(repo: &str) -> Result<serde_json::Value, String> {
+    let resp = Request::get(&format!("/api/models/quants?repo={repo}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_recommend(repo: &str) -> Result<serde_json::Value, String> {
+    let resp = Request::get(&format!("/api/models/recommend?repo={repo}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn fetch_cached_models() -> Result<serde_json::Value, String> {
+    let resp = Request::get("/api/models/cached")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn pull_model(repo: &str, quant: Option<&str>) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "repo": repo, "quant": quant });
+    let resp = Request::post("/api/models/pull")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 pub async fn update_profile(name: &str, data: &serde_json::Value) -> Result<serde_json::Value, String> {
     let resp = Request::put(&format!("/api/config/profile/{name}"))
         .json(data)

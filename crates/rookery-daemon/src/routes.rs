@@ -807,6 +807,230 @@ pub async fn post_agent_stop(
     }
 }
 
+// --- Hardware ---
+
+pub async fn get_hardware(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let mut profile = serde_json::to_value(&state.hardware_profile).unwrap_or_default();
+
+    // Add live VRAM info
+    if let Some(gpu) = profile.get_mut("gpu").and_then(|g| g.as_object_mut()) {
+        let free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+        gpu.insert("vram_free_mb".into(), serde_json::json!(free));
+    }
+
+    // Add live RAM free
+    let ram_free = rookery_engine::hardware::read_ram_free_mb();
+    if let Some(cpu) = profile.get_mut("cpu").and_then(|c| c.as_object_mut()) {
+        cpu.insert("ram_free_mb".into(), serde_json::json!(ram_free));
+    }
+
+    Json(profile)
+}
+
+// --- Model discovery ---
+
+#[derive(Deserialize)]
+pub struct ModelSearchQuery {
+    pub q: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    20
+}
+
+pub async fn get_models_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ModelSearchQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.hf_client.search(&q.q, q.limit).await {
+        Ok(results) => Ok(Json(serde_json::json!({ "results": results }))),
+        Err(e) => {
+            tracing::error!(error = %e, "model search failed");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RepoQuery {
+    pub repo: String,
+}
+
+pub async fn get_models_quants(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let repo = rookery_engine::models::normalize_repo(&q.repo);
+
+    let files = state
+        .hf_client
+        .list_files(&repo)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, repo = %repo, "failed to list files");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let mut quants = rookery_engine::models::extract_quants(&files);
+    rookery_engine::models::mark_downloaded(&mut quants);
+
+    // Attach performance estimates
+    let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+    let ram_free = rookery_engine::hardware::read_ram_free_mb();
+    rookery_engine::models::attach_estimates(&mut quants, &state.hardware_profile, vram_free, ram_free);
+
+    Ok(Json(serde_json::json!({ "repo": repo, "quants": quants })))
+}
+
+pub async fn get_models_recommend(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RepoQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let repo = rookery_engine::models::normalize_repo(&q.repo);
+
+    let files = state
+        .hf_client
+        .list_files(&repo)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, repo = %repo, "failed to list files");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let quants = rookery_engine::models::extract_quants(&files);
+    let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+    let ram_free = rookery_engine::hardware::read_ram_free_mb();
+
+    match rookery_engine::models::recommend_quant(&quants, &state.hardware_profile, vram_free, ram_free) {
+        Some(rec) => Ok(Json(serde_json::json!({ "repo": repo, "recommendation": rec }))),
+        None => Ok(Json(serde_json::json!({ "repo": repo, "recommendation": null, "message": "no quant fits in available memory" }))),
+    }
+}
+
+pub async fn get_models_cached(
+    State(_state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let cached = rookery_engine::models::scan_cache();
+    Json(serde_json::json!({ "models": cached }))
+}
+
+#[derive(Deserialize)]
+pub struct PullRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub quant: Option<String>,
+}
+
+pub async fn post_models_pull(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PullRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let repo = rookery_engine::models::normalize_repo(&req.repo);
+
+    let files = state
+        .hf_client
+        .list_files(&repo)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to list files for pull");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let quants = rookery_engine::models::extract_quants(&files);
+
+    // Pick quant: explicit or recommend
+    let quant_label = if let Some(q) = req.quant {
+        q
+    } else {
+        let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+        let ram_free = rookery_engine::hardware::read_ram_free_mb();
+        match rookery_engine::models::recommend_quant(&quants, &state.hardware_profile, vram_free, ram_free) {
+            Some(rec) => rec.label,
+            None => {
+                return Ok(Json(serde_json::json!({
+                    "started": false,
+                    "message": "no quant fits in available memory"
+                })));
+            }
+        }
+    };
+
+    let quant = quants
+        .iter()
+        .find(|q| q.label == quant_label)
+        .ok_or_else(|| {
+            tracing::error!(quant = %quant_label, "quant not found");
+            StatusCode::NOT_FOUND
+        })?;
+
+    let download_files: Vec<(String, String)> = quant
+        .files
+        .iter()
+        .map(|f| {
+            let dest = rookery_engine::models::cache_path(&repo, &f.path);
+            (f.path.clone(), dest.to_string_lossy().to_string())
+        })
+        .collect();
+
+    let repo_clone = repo.clone();
+    let label_clone = quant_label.clone();
+    let state_tx = state.state_tx.clone();
+    let files_for_response: Vec<String> = download_files.iter().map(|(f, _)| f.clone()).collect();
+
+    // Spawn background download
+    tokio::spawn(async move {
+        let client = rookery_engine::models::HfClient::new();
+        let (progress_tx, _) = tokio::sync::watch::channel(rookery_engine::models::DownloadProgress {
+            repo: repo_clone.clone(),
+            file: String::new(),
+            bytes_downloaded: 0,
+            bytes_total: 0,
+            done: false,
+        });
+
+        for (filename, dest_str) in &download_files {
+            let dest = std::path::PathBuf::from(dest_str);
+            if dest.exists() {
+                tracing::info!(file = %filename, "already cached, skipping");
+                continue;
+            }
+
+            tracing::info!(repo = %repo_clone, file = %filename, "downloading");
+            match client.download_file(&repo_clone, filename, &dest, Some(&progress_tx)).await {
+                Ok(()) => {
+                    tracing::info!(file = %filename, "download complete");
+                    let _ = state_tx.send(serde_json::json!({
+                        "event": "download",
+                        "repo": repo_clone,
+                        "file": filename,
+                        "done": true,
+                    }));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, file = %filename, "download failed");
+                    let _ = state_tx.send(serde_json::json!({
+                        "event": "download",
+                        "repo": repo_clone,
+                        "file": filename,
+                        "error": e,
+                    }));
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "started": true,
+        "repo": repo,
+        "quant": label_clone,
+        "files": files_for_response,
+    })))
+}
+
 fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse {
     match state {
         rookery_core::state::ServerState::Stopped => StatusResponse {
