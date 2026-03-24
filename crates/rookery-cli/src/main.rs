@@ -21,9 +21,16 @@ enum Commands {
     Start {
         /// Profile name (uses default if omitted)
         profile: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Stop inference server
-    Stop,
+    Stop {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show server status
     Status {
         /// Output as JSON
@@ -40,9 +47,16 @@ enum Commands {
     Swap {
         /// Profile name to swap to
         profile: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List available profiles
-    Profiles,
+    Profiles {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// View server logs
     Logs {
         /// Follow mode — stream new lines
@@ -53,10 +67,18 @@ enum Commands {
         n: usize,
     },
     /// Run a quick benchmark
-    Bench,
+    Bench {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate config file
     #[command(name = "config")]
-    ConfigValidate,
+    ConfigValidate {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage agents
     Agent {
         #[command(subcommand)]
@@ -80,19 +102,32 @@ enum ModelCommands {
     Search {
         /// Search query
         query: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List available quants for a model repo
     Quants {
         /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
         repo: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Recommend best-fit quant for your hardware
     Recommend {
         /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
         repo: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List locally cached models
-    List,
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Download a model
     Pull {
         /// Repo (e.g., unsloth/Qwen3-8B-GGUF or just Qwen3-8B)
@@ -102,7 +137,11 @@ enum ModelCommands {
         quant: Option<String>,
     },
     /// Show hardware profile
-    Hardware,
+    Hardware {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -118,7 +157,11 @@ enum AgentCommands {
         name: String,
     },
     /// List agents and their status
-    Status,
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // Response types matching daemon API
@@ -146,13 +189,6 @@ struct GpuStats {
     utilization_pct: u32,
     power_watts: f32,
     power_limit_watts: f32,
-}
-
-#[derive(Deserialize)]
-struct ActionResponse {
-    success: bool,
-    message: String,
-    status: StatusResponse,
 }
 
 #[derive(Serialize)]
@@ -194,27 +230,27 @@ async fn main() {
     let client = DaemonClient::new(&cli.daemon);
 
     let result = match cli.command {
-        Commands::Start { profile } => cmd_start(&client, profile).await,
-        Commands::Stop => cmd_stop(&client).await,
+        Commands::Start { profile, json } => cmd_start(&client, profile, json).await,
+        Commands::Stop { json } => cmd_stop(&client, json).await,
         Commands::Status { json } => cmd_status(&client, json).await,
         Commands::Gpu { json } => cmd_gpu(&client, json).await,
-        Commands::Swap { profile } => cmd_swap(&client, &profile).await,
-        Commands::Profiles => cmd_profiles(&client).await,
+        Commands::Swap { profile, json } => cmd_swap(&client, &profile, json).await,
+        Commands::Profiles { json } => cmd_profiles(&client, json).await,
         Commands::Logs { follow, n } => cmd_logs(&client, follow, n).await,
-        Commands::Bench => cmd_bench(&client).await,
-        Commands::ConfigValidate => cmd_config_validate().await,
+        Commands::Bench { json } => cmd_bench(&client, json).await,
+        Commands::ConfigValidate { json } => cmd_config_validate(json).await,
         Commands::Agent { cmd } => match cmd {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
             AgentCommands::Stop { name } => cmd_agent_stop(&client, &name).await,
-            AgentCommands::Status => cmd_agent_status(&client).await,
+            AgentCommands::Status { json } => cmd_agent_status(&client, json).await,
         },
         Commands::Models { cmd } => match cmd {
-            ModelCommands::Search { query } => cmd_models_search(&client, &query).await,
-            ModelCommands::Quants { repo } => cmd_models_quants(&client, &repo).await,
-            ModelCommands::Recommend { repo } => cmd_models_recommend(&client, &repo).await,
-            ModelCommands::List => cmd_models_list(&client).await,
+            ModelCommands::Search { query, json } => cmd_models_search(&client, &query, json).await,
+            ModelCommands::Quants { repo, json } => cmd_models_quants(&client, &repo, json).await,
+            ModelCommands::Recommend { repo, json } => cmd_models_recommend(&client, &repo, json).await,
+            ModelCommands::List { json } => cmd_models_list(&client, json).await,
             ModelCommands::Pull { repo, quant } => cmd_models_pull(&client, &repo, quant).await,
-            ModelCommands::Hardware => cmd_hardware(&client).await,
+            ModelCommands::Hardware { json } => cmd_hardware(&client, json).await,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(
@@ -233,41 +269,53 @@ async fn main() {
     }
 }
 
-async fn cmd_start(client: &DaemonClient, profile: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_start(client: &DaemonClient, profile: Option<String>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running (start it with `rookeryd`)".into());
     }
 
-    let label = profile.as_deref().unwrap_or("default");
-    println!("starting profile '{label}'...");
+    if !json {
+        let label = profile.as_deref().unwrap_or("default");
+        println!("starting profile '{label}'...");
+    }
 
-    let resp: ActionResponse = client
+    let resp: serde_json::Value = client
         .post("/api/start", &StartRequest { profile })
         .await?;
 
-    if resp.success {
-        println!("{}", resp.message);
-        if let Some(pid) = resp.status.pid {
-            println!("  PID:  {pid}");
-        }
-        if let Some(port) = resp.status.port {
-            println!("  API:  http://localhost:{port}/v1");
-        }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
-        eprintln!("{}", resp.message);
+        let success = resp["success"].as_bool().unwrap_or(false);
+        let message = resp["message"].as_str().unwrap_or("");
+        if success {
+            println!("{message}");
+            if let Some(pid) = resp["status"]["pid"].as_u64() {
+                println!("  PID:  {pid}");
+            }
+            if let Some(port) = resp["status"]["port"].as_u64() {
+                println!("  API:  http://localhost:{port}/v1");
+            }
+        } else {
+            eprintln!("{message}");
+        }
     }
 
     Ok(())
 }
 
-async fn cmd_stop(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_stop(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    println!("stopping server...");
-    let resp: ActionResponse = client.post("/api/stop", &EmptyBody {}).await?;
-    println!("{}", resp.message);
+    if !json { println!("stopping server..."); }
+    let resp: serde_json::Value = client.post("/api/stop", &EmptyBody {}).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("{}", resp["message"].as_str().unwrap_or(""));
+    }
     Ok(())
 }
 
@@ -353,8 +401,19 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-async fn cmd_config_validate() -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = rookery_core::config::Config::load()?;
+
+    if json {
+        match config.validate() {
+            Ok(()) => println!("{}", serde_json::json!({"valid": true, "path": rookery_core::config::Config::config_path().display().to_string()})),
+            Err(e) => {
+                println!("{}", serde_json::json!({"valid": false, "error": e.to_string()}));
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
 
     match config.validate() {
         Ok(()) => println!("config OK: {}", rookery_core::config::Config::config_path().display()),
@@ -428,9 +487,15 @@ async fn cmd_agent_stop(client: &DaemonClient, name: &str) -> Result<(), Box<dyn
     Ok(())
 }
 
-async fn cmd_agent_status(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_agent_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
+    }
+
+    if json {
+        let resp: serde_json::Value = client.get("/api/agents").await?;
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
     }
 
     let resp: AgentsResponse = client.get("/api/agents").await?;
@@ -465,37 +530,49 @@ async fn cmd_agent_status(client: &DaemonClient) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-async fn cmd_swap(client: &DaemonClient, profile: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_swap(client: &DaemonClient, profile: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    println!("swapping to '{profile}'...");
-    let resp: ActionResponse = client
+    if !json { println!("swapping to '{profile}'..."); }
+    let resp: serde_json::Value = client
         .post("/api/swap", &serde_json::json!({ "profile": profile }))
         .await?;
 
-    if resp.success {
-        println!("{}", resp.message);
-        if let Some(pid) = resp.status.pid {
-            println!("  PID:  {pid}");
-        }
-        if let Some(port) = resp.status.port {
-            println!("  API:  http://localhost:{port}/v1");
-        }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
     } else {
-        eprintln!("{}", resp.message);
+        let success = resp["success"].as_bool().unwrap_or(false);
+        let message = resp["message"].as_str().unwrap_or("");
+        if success {
+            println!("{message}");
+            if let Some(pid) = resp["status"]["pid"].as_u64() {
+                println!("  PID:  {pid}");
+            }
+            if let Some(port) = resp["status"]["port"].as_u64() {
+                println!("  API:  http://localhost:{port}/v1");
+            }
+        } else {
+            eprintln!("{message}");
+        }
     }
 
     Ok(())
 }
 
-async fn cmd_profiles(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_profiles(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get("/api/profiles").await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
     let profiles = resp["profiles"].as_array().unwrap();
 
     for p in profiles {
@@ -580,12 +657,17 @@ async fn cmd_logs(client: &DaemonClient, follow: bool, n: usize) -> Result<(), B
     Ok(())
 }
 
-async fn cmd_hardware(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_hardware(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get("/api/hardware").await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
 
     if let Some(gpu) = resp.get("gpu") {
         println!("GPU:       {}", gpu["name"].as_str().unwrap_or("unknown"));
@@ -619,12 +701,18 @@ async fn cmd_hardware(client: &DaemonClient) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-async fn cmd_models_search(client: &DaemonClient, query: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_search(client: &DaemonClient, query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get(&format!("/api/models/search?q={query}")).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
     let results = resp["results"].as_array().ok_or("no results")?;
 
     if results.is_empty() {
@@ -646,12 +734,18 @@ async fn cmd_models_search(client: &DaemonClient, query: &str) -> Result<(), Box
     Ok(())
 }
 
-async fn cmd_models_quants(client: &DaemonClient, repo: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_quants(client: &DaemonClient, repo: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get(&format!("/api/models/quants?repo={repo}")).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
     let quants = resp["quants"].as_array().ok_or("no quants")?;
     let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
 
@@ -678,12 +772,17 @@ async fn cmd_models_quants(client: &DaemonClient, repo: &str) -> Result<(), Box<
     Ok(())
 }
 
-async fn cmd_models_recommend(client: &DaemonClient, repo: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_recommend(client: &DaemonClient, repo: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get(&format!("/api/models/recommend?repo={repo}")).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
     let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
 
     if resp["recommendation"].is_null() {
@@ -712,12 +811,18 @@ async fn cmd_models_recommend(client: &DaemonClient, repo: &str) -> Result<(), B
     Ok(())
 }
 
-async fn cmd_models_list(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_list(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     let resp: serde_json::Value = client.get("/api/models/cached").await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
     let models = resp["models"].as_array().ok_or("no cached models")?;
 
     if models.is_empty() {
@@ -771,14 +876,20 @@ fn format_count(n: u64) -> String {
     }
 }
 
-async fn cmd_bench(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    println!("running benchmark...\n");
+    if !json { println!("running benchmark...\n"); }
 
     let resp: serde_json::Value = client.get("/api/bench").await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
     let tests = resp["tests"].as_array().ok_or("no bench results")?;
 
     if tests.is_empty() {

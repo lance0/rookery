@@ -212,13 +212,21 @@ async fn main() {
 
     // Spawn inference canary — periodic minimal completion request to detect
     // CUDA zombie state where /health responds but inference is broken.
+    // Also triggers immediately on CUDA error patterns in llama-server stderr.
     let canary_state = state.clone();
+    let mut cuda_error_rx = state.process_manager.subscribe_cuda_errors();
     tokio::spawn(async move {
         const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         const CANARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         loop {
-            tokio::time::sleep(CANARY_INTERVAL).await;
+            // Wait for either the regular interval or a CUDA error trigger
+            tokio::select! {
+                _ = tokio::time::sleep(CANARY_INTERVAL) => {}
+                _ = cuda_error_rx.changed() => {
+                    tracing::warn!("CUDA error detected, running immediate inference canary");
+                }
+            }
 
             // Only check when server is running and not mid-swap
             if canary_state.process_manager.is_draining() {

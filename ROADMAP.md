@@ -67,12 +67,12 @@
 - [x] Inference canary: periodic minimal completion request (60s interval, 10s timeout, retry-once) with auto-restart
 - [ ] Restart backoff: exponential delay (1s→2s→4s...60s cap) on repeated crashes, reset on successful health
 - [ ] Enable `--metrics` flag on llama-server, parse KV cache usage ratio + throughput
-- [ ] Stderr pattern matching: detect `CUDA error` / `ggml_cuda_error` lines, trigger immediate canary
+- [x] Stderr pattern matching: detect `CUDA error` / `ggml_cuda_error` lines, trigger immediate canary
 - [x] Canary after orphan adoption: verify adopted process can actually serve inference
 - [ ] Startup readiness gate: poll /health until 200 before reporting "running" (already exists, verify robustness)
 
 ### Backend — Chat Proxy Hardening
-- [ ] Stream timeout: kill proxy connection if llama-server hangs mid-stream
+- [x] Stream timeout: 60s per-chunk timeout on chat proxy SSE stream
 - [ ] Request body size limit: cap message payload size
 - [ ] SSE connection limit: bound max concurrent /api/events connections
 
@@ -131,6 +131,6 @@
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
 - Custom agent framework (build/test agents against local models)
-- `--json` flag on all remaining commands
+- ~~`--json` flag on all remaining commands~~ (done)
 - KV cache usage gauge in dashboard (requires --metrics)
 - Auto-sleep (unload model after idle timeout, reload on request)

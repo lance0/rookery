@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use crate::health;
 use crate::logs::LogBuffer;
@@ -18,6 +18,7 @@ pub struct ProcessManager {
     info: Arc<Mutex<Option<ProcessInfo>>>,
     log_buffer: Arc<LogBuffer>,
     draining: AtomicBool,
+    cuda_error_tx: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,12 +33,19 @@ pub struct ProcessInfo {
 
 impl ProcessManager {
     pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        let (cuda_error_tx, _) = watch::channel(false);
         Self {
             child: Arc::new(Mutex::new(None)),
             info: Arc::new(Mutex::new(None)),
             log_buffer,
             draining: AtomicBool::new(false),
+            cuda_error_tx,
         }
+    }
+
+    /// Subscribe to CUDA error notifications from llama-server stderr.
+    pub fn subscribe_cuda_errors(&self) -> watch::Receiver<bool> {
+        self.cuda_error_tx.subscribe()
     }
 
     pub fn is_draining(&self) -> bool {
@@ -106,10 +114,17 @@ impl ProcessManager {
         let log_buf = self.log_buffer.clone();
         if let Some(stderr) = child.stderr.take() {
             let buf = log_buf.clone();
+            let cuda_tx = self.cuda_error_tx.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    // Detect CUDA errors to trigger immediate canary
+                    let lower = line.to_ascii_lowercase();
+                    if lower.contains("cuda error") || lower.contains("ggml_cuda_error") {
+                        tracing::error!("CUDA error detected in stderr: {line}");
+                        let _ = cuda_tx.send(true);
+                    }
                     buf.push(line);
                 }
             });

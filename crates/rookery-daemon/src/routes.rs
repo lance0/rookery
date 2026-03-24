@@ -548,7 +548,23 @@ pub async fn post_chat(
             StatusCode::BAD_GATEWAY
         })?;
 
-    let stream = resp.bytes_stream();
+    // Wrap the stream with a per-chunk timeout — if llama-server hangs
+    // mid-generation with no data for 60s, terminate the stream.
+    use tokio_stream::StreamExt as _;
+    let stream = resp
+        .bytes_stream()
+        .timeout(std::time::Duration::from_secs(60))
+        .map(|item| match item {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            Err(_elapsed) => {
+                tracing::warn!("chat stream timed out (no data for 60s)");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "stream timeout",
+                ))
+            }
+        });
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
