@@ -59,6 +59,8 @@ pub struct AgentInfo {
     pub name: String,
     pub pid: u32,
     pub status: serde_json::Value,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

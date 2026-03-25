@@ -142,6 +142,10 @@ pub struct AgentConfig {
     /// on this port restarts (down→up transition), the watchdog bounces the agent.
     #[serde(default)]
     pub depends_on_port: Option<u16>,
+
+    /// Path to a pyproject.toml or Cargo.toml to extract the agent's version.
+    #[serde(default)]
+    pub version_file: Option<PathBuf>,
 }
 
 fn default_port() -> u16 {

@@ -142,7 +142,7 @@ async fn main() {
     if let Ok(agent_state) = agent_persistence.load() {
         let reconciled = agent_persistence.reconcile(agent_state);
         for (name, entry) in &reconciled.agents {
-            agent_manager.adopt(name, entry).await;
+            agent_manager.adopt(name, entry, config.agents.get(name)).await;
         }
         let _ = agent_persistence.save(&reconciled);
 

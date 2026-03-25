@@ -241,6 +241,7 @@ body {
 .agent-dot.running { background: var(--green); }
 .agent-dot.stopped { background: var(--muted); }
 .agent-name { flex: 1; font-size: 12px; }
+.agent-version { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-right: 8px; }
 
 /* Logs */
 .log-viewer {

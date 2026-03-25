@@ -17,15 +17,16 @@ pub fn AgentPanel(
                     return view! { <div class="empty">"no agents configured"</div> }.into_any();
                 }
 
-                let running_names: std::collections::HashSet<String> = data.agents.iter()
+                let running_map: std::collections::HashMap<String, Option<String>> = data.agents.iter()
                     .filter(|a| a.status == serde_json::json!("running"))
-                    .map(|a| a.name.clone())
+                    .map(|a| (a.name.clone(), a.version.clone()))
                     .collect();
 
                 view! {
                     <div>
                         {data.configured.into_iter().map(|name| {
-                            let is_running = running_names.contains(&name);
+                            let is_running = running_map.contains_key(&name);
+                            let version = running_map.get(&name).and_then(|v| v.clone());
                             let dot_class = if is_running { "agent-dot running" } else { "agent-dot stopped" };
                             let btn_text = if is_running { "Stop" } else { "Start" };
 
@@ -60,6 +61,7 @@ pub fn AgentPanel(
                                 <div class="agent-row">
                                     <div class=dot_class></div>
                                     <span class="agent-name">{name}</span>
+                                    {version.map(|v| view! { <span class="agent-version">"v"{v}</span> })}
                                     <button class="btn" on:click=on_click>{btn_text}</button>
                                 </div>
                             }

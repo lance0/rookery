@@ -17,6 +17,8 @@ pub struct AgentInfo {
     pub pid: u32,
     pub started_at: chrono::DateTime<Utc>,
     pub status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -53,13 +55,15 @@ impl AgentManager {
     }
 
     /// Adopt a previously-running agent by PID (used after daemon restart).
-    pub async fn adopt(&self, name: &str, entry: &AgentEntry) {
+    pub async fn adopt(&self, name: &str, entry: &AgentEntry, config: Option<&AgentConfig>) {
         tracing::info!(agent = name, pid = entry.pid, "adopting existing agent");
+        let version = config.and_then(|c| c.version_file.as_ref()).and_then(read_version_file);
         let info = AgentInfo {
             name: name.to_string(),
             pid: entry.pid,
             started_at: entry.started_at,
             status: AgentStatus::Running,
+            version,
         };
         let mut agents = self.agents.lock().await;
         agents.insert(
@@ -165,11 +169,13 @@ impl AgentManager {
             });
         }
 
+        let version = config.version_file.as_ref().and_then(read_version_file);
         let info = AgentInfo {
             name: name.to_string(),
             pid,
             started_at: Utc::now(),
             status: AgentStatus::Running,
+            version,
         };
 
         agents.insert(
@@ -537,6 +543,38 @@ impl AgentManager {
             }
         })
     }
+}
+
+/// Read a version string from a pyproject.toml or Cargo.toml file.
+fn read_version_file(path: &std::path::PathBuf) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    // Parse as TOML and look for version in common locations
+    let table: toml::Table = content.parse().ok()?;
+    // pyproject.toml: [project].version or [tool.poetry].version
+    if let Some(ver) = table
+        .get("project")
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(ver.to_string());
+    }
+    if let Some(ver) = table
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(ver.to_string());
+    }
+    // Cargo.toml: [package].version
+    if let Some(ver) = table
+        .get("package")
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(ver.to_string());
+    }
+    None
 }
 
 #[derive(Debug, thiserror::Error)]
