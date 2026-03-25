@@ -275,15 +275,23 @@ pub async fn post_swap(
             let is_running = server_state.is_running();
             let status = status_from_state(&server_state);
 
-            // Restart agents that have restart_on_swap = true
-            // Re-acquire config lock only for the agent restart loop
+            // Restart agents that have restart_on_swap = true.
+            // Brief delay between stop and start to let the agent fully exit,
+            // and retry once on failure (agent may have been mid-request during swap).
             if is_running {
                 let config = state.config.read().await;
                 for (name, agent_config) in &config.agents {
                     if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
                         tracing::info!(agent = %name, "restarting agent after swap");
                         let _ = state.agent_manager.stop(name).await;
-                        let _ = state.agent_manager.start(name, agent_config).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if let Err(e) = state.agent_manager.start(name, agent_config).await {
+                            tracing::warn!(agent = %name, error = %e, "agent restart failed after swap, retrying");
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            if let Err(e) = state.agent_manager.start(name, agent_config).await {
+                                tracing::error!(agent = %name, error = %e, "agent restart failed after swap retry");
+                            }
+                        }
                     }
                 }
             }
