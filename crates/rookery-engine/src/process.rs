@@ -13,6 +13,27 @@ use tokio::sync::{watch, Mutex};
 use crate::health;
 use crate::logs::LogBuffer;
 
+/// Check if a PID is alive and not a zombie.
+/// Reads /proc/{pid}/stat and checks the state field (3rd field).
+/// Returns false for zombies (state 'Z') and non-existent processes.
+pub fn is_pid_alive(pid: u32) -> bool {
+    let stat_path = format!("/proc/{pid}/stat");
+    match std::fs::read_to_string(&stat_path) {
+        Ok(content) => {
+            // Format: "pid (comm) state ..."
+            // The comm field can contain spaces and parens, so find the last ')' first
+            if let Some(pos) = content.rfind(')') {
+                let after_comm = &content[pos + 1..];
+                let state = after_comm.trim().chars().next().unwrap_or('?');
+                state != 'Z'
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
 pub struct ProcessManager {
     child: Arc<Mutex<Option<Child>>>,
     info: Arc<Mutex<Option<ProcessInfo>>>,
@@ -227,9 +248,9 @@ impl ProcessManager {
         if let Some(ref mut child) = *child_lock {
             matches!(child.try_wait(), Ok(None))
         } else {
-            // No child handle — check by PID (adopted process)
+            // No child handle — check by PID (adopted process), excluding zombies
             if let Some(info) = self.info.lock().await.as_ref() {
-                std::path::PathBuf::from(format!("/proc/{}", info.pid)).exists()
+                is_pid_alive(info.pid)
             } else {
                 false
             }

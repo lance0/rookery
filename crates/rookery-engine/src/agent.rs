@@ -10,6 +10,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use crate::logs::LogBuffer;
+use crate::process::is_pid_alive;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,7 +131,7 @@ impl AgentManager {
         if let Some(agent) = agents.get_mut(name) {
             let alive = match &mut agent.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+                None => is_pid_alive(agent.info.pid),
             };
             if alive {
                 return Err(AgentError::AlreadyRunning(name.to_string()));
@@ -320,7 +321,7 @@ impl AgentManager {
         for (name, agent) in agents.iter_mut() {
             let alive = match &mut agent.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+                None => is_pid_alive(agent.info.pid),
             };
 
             if alive {
@@ -383,7 +384,7 @@ impl AgentManager {
         if let Some(agent) = agents.get_mut(name) {
             match &mut agent.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => std::path::Path::new(&format!("/proc/{}", agent.info.pid)).exists(),
+                None => is_pid_alive(agent.info.pid),
             }
         } else {
             false
@@ -514,10 +515,7 @@ impl AgentManager {
                     for (name, agent) in agents.iter_mut() {
                         let alive = match &mut agent.child {
                             Some(child) => matches!(child.try_wait(), Ok(None)),
-                            None => {
-                                std::path::Path::new(&format!("/proc/{}", agent.info.pid))
-                                    .exists()
-                            }
+                            None => is_pid_alive(agent.info.pid),
                         };
 
                         if !alive && !agent.intentional_stop {
@@ -552,8 +550,7 @@ impl AgentManager {
                     let agents = manager.agents.lock().await;
                     let mut crash_counts = manager.crash_counts.lock().await;
                     for (name, agent) in agents.iter() {
-                        let alive = std::path::Path::new(&format!("/proc/{}", agent.info.pid))
-                            .exists();
+                        let alive = is_pid_alive(agent.info.pid);
                         if alive {
                             let uptime = Utc::now()
                                 .signed_duration_since(agent.info.started_at)

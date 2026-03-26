@@ -75,7 +75,11 @@ async fn main() {
             ..
         } = reconciled
         {
-            if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3)).await {
+            if !rookery_engine::process::is_pid_alive(running_pid) {
+                tracing::warn!(pid = running_pid, "adopted process is a zombie — marking stopped");
+                let stopped = rookery_core::state::ServerState::Stopped;
+                let _ = state_persistence.save(&stopped);
+            } else if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3)).await {
                 // Health endpoint responds — now verify inference actually works
                 if rookery_engine::health::check_inference(port, std::time::Duration::from_secs(10)).await {
                     tracing::info!(pid = running_pid, port, "adopted process is healthy (inference canary passed)");
