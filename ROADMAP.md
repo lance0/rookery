@@ -132,6 +132,8 @@
 - [x] Agent metrics in dashboard: uptime, restart count, error count with color indicators
 - [x] Agent stderr error counting: atomic counter shared with stderr capture task
 - [x] Restart reason tracking: "crash", "swap", "port_recovery", "daemon_restart"
+- [x] Enriched `/api/agents` list: includes health metrics for all running agents (no N+1 calls needed)
+- [ ] Error count reset on restart: track "errors since last restart" vs "lifetime errors"
 - [ ] Agent chat timeout config: kill hung requests after configurable timeout
 - [ ] Agent restart on specific error patterns (e.g., telegram.error.TimedOut → immediate restart vs waiting for watchdog poll)
 

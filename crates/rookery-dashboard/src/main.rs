@@ -405,6 +405,9 @@ fn App() -> impl IntoView {
                                 <ModelInfo model_info=model_info />
                                 <ServerStats stats=server_stats />
                             </div>
+                            <div class="grid">
+                                <AgentPanel agents=agents set_agents=set_agents set_toasts=set_toasts />
+                            </div>
                         </div>
                     }.into_any(),
                     Tab::Settings => view! {
