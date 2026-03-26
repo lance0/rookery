@@ -127,6 +127,12 @@
 - [x] Agent watchdog loop: background task polling agent liveness every 30s, kill+restart stuck agents
 - [x] Restart agents on daemon restart: adopted agents with restart_on_swap bounced for fresh connections
 
+## Agent Observability
+- [ ] Agent health endpoint: `/api/agents/{name}/health` — uptime, last request time, error count, version
+- [ ] Agent metrics in dashboard: requests/sec, error rate, avg response time
+- [ ] Agent chat timeout config: kill hung requests after configurable timeout
+- [ ] Agent restart on specific error patterns (e.g., telegram.error.TimedOut → immediate restart vs waiting for watchdog poll)
+
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
