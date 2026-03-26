@@ -154,12 +154,23 @@ async fn main() {
                 if agent_config.restart_on_swap {
                     tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
                     let _ = agent_manager.stop(name).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     match agent_manager.start(name, agent_config).await {
                         Ok(info) => {
                             agent_manager.record_restart(name, "daemon_restart", 0).await;
                             tracing::info!(agent = %name, pid = info.pid, "agent restarted");
                         }
-                        Err(e) => tracing::warn!(agent = %name, error = %e, "failed to restart adopted agent"),
+                        Err(e) => {
+                            tracing::warn!(agent = %name, error = %e, "agent restart failed on daemon startup, retrying");
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            match agent_manager.start(name, agent_config).await {
+                                Ok(info) => {
+                                    agent_manager.record_restart(name, "daemon_restart", 0).await;
+                                    tracing::info!(agent = %name, pid = info.pid, "agent restarted on retry");
+                                }
+                                Err(e) => tracing::error!(agent = %name, error = %e, "agent restart failed after retry"),
+                            }
+                        }
                     }
                 }
             }
