@@ -77,3 +77,6 @@ command = "/home/lance/.local/bin/hermes"
 args = ["gateway", "run", "--replace"]
 auto_start = false
 restart_on_swap = true
+restart_on_crash = true
+depends_on_port = 8081
+version_file = "/home/lance/.hermes/hermes-agent/pyproject.toml"
