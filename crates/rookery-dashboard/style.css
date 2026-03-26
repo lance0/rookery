@@ -242,6 +242,9 @@ body {
 .agent-dot.stopped { background: var(--muted); }
 .agent-name { flex: 1; font-size: 12px; }
 .agent-version { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-right: 8px; }
+.agent-uptime { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-right: 8px; }
+.agent-restarts { font-size: 10px; color: #f0c040; font-family: var(--mono); margin-right: 8px; }
+.agent-errors { font-size: 10px; color: #f04040; font-weight: 600; font-family: var(--mono); margin-right: 8px; }
 
 /* Logs */
 .log-viewer {

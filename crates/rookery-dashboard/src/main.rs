@@ -61,6 +61,12 @@ pub struct AgentInfo {
     pub status: serde_json::Value,
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default)]
+    pub uptime_secs: Option<i64>,
+    #[serde(default)]
+    pub total_restarts: Option<u32>,
+    #[serde(default)]
+    pub error_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

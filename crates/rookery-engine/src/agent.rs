@@ -4,6 +4,7 @@ use rookery_core::state::{AgentEntry, AgentPersistence, AgentState};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -19,6 +20,14 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_restarts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restart_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -34,6 +43,12 @@ struct ManagedAgent {
     info: AgentInfo,
     /// Whether this agent was intentionally stopped (not a crash).
     intentional_stop: bool,
+    // Observability metrics
+    total_restarts: u32,
+    last_restart_reason: Option<String>,
+    last_restart_at: Option<chrono::DateTime<Utc>>,
+    /// Shared with stderr capture task — incremented on error lines.
+    error_count: Arc<AtomicU32>,
 }
 
 pub struct AgentManager {
@@ -64,6 +79,10 @@ impl AgentManager {
             started_at: entry.started_at,
             status: AgentStatus::Running,
             version,
+            uptime_secs: None,
+            total_restarts: None,
+            last_restart_reason: None,
+            error_count: None,
         };
         let mut agents = self.agents.lock().await;
         agents.insert(
@@ -72,6 +91,10 @@ impl AgentManager {
                 child: None,
                 info,
                 intentional_stop: false,
+                total_restarts: 0,
+                last_restart_reason: None,
+                last_restart_at: None,
+                error_count: Arc::new(AtomicU32::new(0)),
             },
         );
     }
@@ -144,15 +167,22 @@ impl AgentManager {
             error: "failed to get PID".into(),
         })?;
 
+        // Shared error counter for stderr capture
+        let error_count = Arc::new(AtomicU32::new(0));
+
         // Capture output into log buffer with agent prefix
         let prefix = format!("[agent:{name}]");
         if let Some(stderr) = child.stderr.take() {
             let buf = self.log_buffer.clone();
             let p = prefix.clone();
+            let err_count = error_count.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    if line.to_ascii_lowercase().contains("error") {
+                        err_count.fetch_add(1, Ordering::Relaxed);
+                    }
                     buf.push(format!("{p} {line}"));
                 }
             });
@@ -176,6 +206,10 @@ impl AgentManager {
             started_at: Utc::now(),
             status: AgentStatus::Running,
             version,
+            uptime_secs: None,
+            total_restarts: None,
+            last_restart_reason: None,
+            error_count: None,
         };
 
         agents.insert(
@@ -184,6 +218,10 @@ impl AgentManager {
                 child: Some(child),
                 info: info.clone(),
                 intentional_stop: false,
+                total_restarts: 0,
+                last_restart_reason: None,
+                last_restart_at: None,
+                error_count,
             },
         );
 
@@ -306,6 +344,40 @@ impl AgentManager {
         result
     }
 
+    /// Get health/metrics for a specific agent.
+    pub async fn get_health(&self, name: &str) -> Option<AgentInfo> {
+        let agents = self.agents.lock().await;
+        let agent = agents.get(name)?;
+
+        let uptime_secs = if agent.info.status == AgentStatus::Running {
+            Some(Utc::now().signed_duration_since(agent.info.started_at).num_seconds())
+        } else {
+            None
+        };
+
+        Some(AgentInfo {
+            name: agent.info.name.clone(),
+            pid: agent.info.pid,
+            started_at: agent.info.started_at,
+            status: agent.info.status.clone(),
+            version: agent.info.version.clone(),
+            uptime_secs,
+            total_restarts: Some(agent.total_restarts),
+            last_restart_reason: agent.last_restart_reason.clone(),
+            error_count: Some(agent.error_count.load(Ordering::Relaxed)),
+        })
+    }
+
+    /// Record restart metrics on a newly-started agent.
+    pub async fn record_restart(&self, name: &str, reason: &str, prev_restarts: u32) {
+        let mut agents = self.agents.lock().await;
+        if let Some(agent) = agents.get_mut(name) {
+            agent.total_restarts = prev_restarts + 1;
+            agent.last_restart_reason = Some(reason.to_string());
+            agent.last_restart_at = Some(Utc::now());
+        }
+    }
+
     pub async fn is_running(&self, name: &str) -> bool {
         let mut agents = self.agents.lock().await;
         if let Some(agent) = agents.get_mut(name) {
@@ -382,7 +454,7 @@ impl AgentManager {
 
                     // Bounce running agents whose dependency port just recovered
                     if !ports_recovered.is_empty() {
-                        let bounce_names: Vec<String> = {
+                        let bounce_info: Vec<(String, u32)> = {
                             let agents = manager.agents.lock().await;
                             agents
                                 .iter()
@@ -400,11 +472,11 @@ impl AgentManager {
                                     }
                                     false
                                 })
-                                .map(|(name, _)| name.clone())
+                                .map(|(name, agent)| (name.clone(), agent.total_restarts))
                                 .collect()
                         };
 
-                        for name in bounce_names {
+                        for (name, prev_restarts) in bounce_info {
                             if let Some(cfg) = configs.get(&name) {
                                 tracing::info!(
                                     agent = %name,
@@ -414,6 +486,7 @@ impl AgentManager {
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 match manager.start(&name, cfg).await {
                                     Ok(info) => {
+                                        manager.record_restart(&name, "port_recovery", prev_restarts).await;
                                         tracing::info!(
                                             agent = %name,
                                             pid = info.pid,
@@ -434,9 +507,9 @@ impl AgentManager {
                 }
 
                 // Collect dead agents that need restarting
-                let to_restart: Vec<String> = {
+                let to_restart: Vec<(String, u32)> = {
                     let mut agents = manager.agents.lock().await;
-                    let mut dead_names = Vec::new();
+                    let mut dead_entries = Vec::new();
 
                     for (name, agent) in agents.iter_mut() {
                         let alive = match &mut agent.child {
@@ -456,13 +529,14 @@ impl AgentManager {
                                         pid = agent.info.pid,
                                         "agent exited unexpectedly, scheduling restart"
                                     );
-                                    dead_names.push(name.clone());
+                                    dead_entries.push((name.clone(), agent.total_restarts));
                                 }
                             }
                         }
                     }
 
                     // Remove dead agents from tracking
+                    let dead_names: Vec<String> = dead_entries.iter().map(|(n, _)| n.clone()).collect();
                     for name in &dead_names {
                         agents.remove(name);
                     }
@@ -470,7 +544,7 @@ impl AgentManager {
                         manager.persist_state(&agents);
                     }
 
-                    dead_names
+                    dead_entries
                 };
 
                 // Also check for healthy agents and reset their backoff
@@ -498,7 +572,7 @@ impl AgentManager {
                 }
 
                 // Restart each dead agent with backoff
-                for name in to_restart {
+                for (name, prev_restarts) in to_restart {
                     let crash_count = {
                         let mut counts = manager.crash_counts.lock().await;
                         let count = counts.entry(name.clone()).or_insert(0);
@@ -522,6 +596,7 @@ impl AgentManager {
                     if let Some(cfg) = configs.get(&name) {
                         match manager.start(&name, cfg).await {
                             Ok(info) => {
+                                manager.record_restart(&name, "crash", prev_restarts).await;
                                 tracing::info!(
                                     agent = %name,
                                     pid = info.pid,

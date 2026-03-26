@@ -1,6 +1,18 @@
 use leptos::prelude::*;
-use crate::{AgentsData, api};
+use crate::{AgentsData, AgentInfo, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+
+fn format_uptime(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
 
 #[component]
 pub fn AgentPanel(
@@ -17,16 +29,20 @@ pub fn AgentPanel(
                     return view! { <div class="empty">"no agents configured"</div> }.into_any();
                 }
 
-                let running_map: std::collections::HashMap<String, Option<String>> = data.agents.iter()
+                let running_map: std::collections::HashMap<String, AgentInfo> = data.agents.iter()
                     .filter(|a| a.status == serde_json::json!("running"))
-                    .map(|a| (a.name.clone(), a.version.clone()))
+                    .map(|a| (a.name.clone(), a.clone()))
                     .collect();
 
                 view! {
                     <div>
                         {data.configured.into_iter().map(|name| {
-                            let is_running = running_map.contains_key(&name);
-                            let version = running_map.get(&name).and_then(|v| v.clone());
+                            let agent = running_map.get(&name);
+                            let is_running = agent.is_some();
+                            let version = agent.and_then(|a| a.version.clone());
+                            let uptime = agent.and_then(|a| a.uptime_secs);
+                            let restarts = agent.and_then(|a| a.total_restarts).unwrap_or(0);
+                            let errors = agent.and_then(|a| a.error_count).unwrap_or(0);
                             let dot_class = if is_running { "agent-dot running" } else { "agent-dot stopped" };
                             let btn_text = if is_running { "Stop" } else { "Start" };
 
@@ -62,6 +78,13 @@ pub fn AgentPanel(
                                     <div class=dot_class></div>
                                     <span class="agent-name">{name}</span>
                                     {version.map(|v| view! { <span class="agent-version">"v"{v}</span> })}
+                                    {uptime.map(|s| view! { <span class="agent-uptime">{format_uptime(s)}</span> })}
+                                    {(restarts > 0).then(|| view! {
+                                        <span class="agent-restarts">{format!("{restarts} restart{}", if restarts == 1 { "" } else { "s" })}</span>
+                                    })}
+                                    {(errors > 0).then(|| view! {
+                                        <span class="agent-errors">{format!("{errors} err{}", if errors == 1 { "" } else { "s" })}</span>
+                                    })}
                                     <button class="btn" on:click=on_click>{btn_text}</button>
                                 </div>
                             }

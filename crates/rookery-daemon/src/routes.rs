@@ -282,6 +282,9 @@ pub async fn post_swap(
                 let config = state.config.read().await;
                 for (name, agent_config) in &config.agents {
                     if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
+                        // Capture prev restarts before stop
+                        let prev = state.agent_manager.get_health(name).await
+                            .and_then(|h| h.total_restarts).unwrap_or(0);
                         tracing::info!(agent = %name, "restarting agent after swap");
                         let _ = state.agent_manager.stop(name).await;
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -292,6 +295,7 @@ pub async fn post_swap(
                                 tracing::error!(agent = %name, error = %e, "agent restart failed after swap retry");
                             }
                         }
+                        state.agent_manager.record_restart(name, "swap", prev).await;
                     }
                 }
             }
@@ -774,12 +778,31 @@ pub struct AgentsResponse {
 
 pub async fn get_agents(State(state): State<Arc<AppState>>) -> Json<AgentsResponse> {
     let config = state.config.read().await;
-    let running = state.agent_manager.list().await;
     let configured: Vec<String> = config.agents.keys().cloned().collect();
-    Json(AgentsResponse {
-        agents: running,
-        configured,
-    })
+
+    // Enrich agent list with health metrics
+    let mut agents = Vec::new();
+    for info in state.agent_manager.list().await {
+        if let Some(health) = state.agent_manager.get_health(&info.name).await {
+            agents.push(health);
+        } else {
+            agents.push(info);
+        }
+    }
+
+    Json(AgentsResponse { agents, configured })
+}
+
+pub async fn get_agent_health(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<rookery_engine::agent::AgentInfo>, StatusCode> {
+    state
+        .agent_manager
+        .get_health(&name)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 #[derive(Deserialize)]

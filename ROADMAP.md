@@ -128,10 +128,45 @@
 - [x] Restart agents on daemon restart: adopted agents with restart_on_swap bounced for fresh connections
 
 ## Agent Observability
-- [ ] Agent health endpoint: `/api/agents/{name}/health` — uptime, last request time, error count, version
-- [ ] Agent metrics in dashboard: requests/sec, error rate, avg response time
+- [x] Agent health endpoint: `/api/agents/{name}/health` — uptime, restart count/reason, error count, version
+- [x] Agent metrics in dashboard: uptime, restart count, error count with color indicators
+- [x] Agent stderr error counting: atomic counter shared with stderr capture task
+- [x] Restart reason tracking: "crash", "swap", "port_recovery", "daemon_restart"
 - [ ] Agent chat timeout config: kill hung requests after configurable timeout
 - [ ] Agent restart on specific error patterns (e.g., telegram.error.TimedOut → immediate restart vs waiting for watchdog poll)
+
+## Phase 9: Hermes Management Plane (Kubernetes-Style Control)
+### Vision
+Rookery as the control plane for Hermes: Hermes manages itself (self-update, self-heal), Rookery ensures desired state matches actual state.
+
+### Desired State Declaration
+- [ ] Config: `desired_version` field (e.g., "1.3.0" or "latest")
+- [ ] Config: `desired_state` field ("running" | "stopped")
+- [ ] Config: `restart_policy` ("on-failure" | "on-config-change" | "never")
+
+### Reconciliation Loop (Enhanced Watchdog)
+- [ ] Version drift detection: compare actual vs desired version, trigger update if mismatch
+- [ ] State reconciliation: ensure running/stopped matches desired state
+- [ ] Config sync: detect external config changes, reload if needed
+- [ ] Error pattern analysis: classify crashes (OOM, timeout, connection) vs normal restarts
+
+### CLI — Update Coordination
+- [ ] `rookery agent update hermes --to <version>` — set desired version, trigger hermes update, restart
+- [ ] `rookery agent update hermes --latest` — update to latest available version
+- [ ] `rookery agent version hermes` — show desired vs actual version, update available
+- [ ] `rookery agent describe hermes` — full status (PID, uptime, version, restart count, health, errors)
+
+### Observability — "kubectl describe" for Hermes
+- [ ] `/api/agents/{name}/describe` — detailed agent status endpoint
+- [ ] Track: restart count with reasons, last update timestamp, uptime history
+- [ ] Health depth: not just "alive" but "telegram connected", "port listening", "no recent errors"
+- [ ] Error aggregation: count errors by type in last N hours
+
+### Dashboard — Hermes Control Panel
+- [ ] Hermes status card: version, uptime, health indicators (telegram, port, errors)
+- [ ] One-click update button with version selector
+- [ ] Restart history timeline (when, why)
+- [ ] Quick actions: "flush state", "reconnect telegram", "view errors"
 
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)

@@ -155,7 +155,10 @@ async fn main() {
                     tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
                     let _ = agent_manager.stop(name).await;
                     match agent_manager.start(name, agent_config).await {
-                        Ok(info) => tracing::info!(agent = %name, pid = info.pid, "agent restarted"),
+                        Ok(info) => {
+                            agent_manager.record_restart(name, "daemon_restart", 0).await;
+                            tracing::info!(agent = %name, pid = info.pid, "agent restarted");
+                        }
                         Err(e) => tracing::warn!(agent = %name, error = %e, "failed to restart adopted agent"),
                     }
                 }
@@ -302,6 +305,7 @@ async fn main() {
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))
+        .route("/api/agents/{name}/health", get(routes::get_agent_health))
         .route("/api/config", get(routes::get_config))
         .route("/api/config/profile/{name}", put(routes::put_profile))
         .route("/api/model-info", get(routes::get_model_info))
