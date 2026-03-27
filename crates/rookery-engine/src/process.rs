@@ -4,11 +4,11 @@ use rookery_core::error::{Error, Result};
 use rookery_core::state::ServerState;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 use crate::health;
 use crate::logs::LogBuffer;
@@ -183,11 +183,8 @@ impl ProcessManager {
             }
 
             // Wait up to 10 seconds for graceful exit
-            let wait_result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                child.wait(),
-            )
-            .await;
+            let wait_result =
+                tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await;
 
             match wait_result {
                 Ok(Ok(status)) => {
@@ -279,11 +276,7 @@ impl ProcessManager {
     }
 
     /// Hot-swap: drain in-flight requests, stop current server, start new profile, health check.
-    pub async fn swap(
-        &self,
-        config: &Config,
-        new_profile: &str,
-    ) -> Result<ServerState> {
+    pub async fn swap(&self, config: &Config, new_profile: &str) -> Result<ServerState> {
         let old_profile = self.process_info().await.map(|i| i.profile.clone());
 
         tracing::info!(
@@ -306,11 +299,7 @@ impl ProcessManager {
     }
 
     /// Start and wait for health check, returning the final state.
-    pub async fn start_and_wait(
-        &self,
-        config: &Config,
-        profile_name: &str,
-    ) -> Result<ServerState> {
+    pub async fn start_and_wait(&self, config: &Config, profile_name: &str) -> Result<ServerState> {
         let info = self.start(config, profile_name).await?;
 
         // Wait for health with 120s timeout (model download can take a while)
@@ -326,5 +315,36 @@ impl ProcessManager {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_pid_alive_current_process() {
+        let pid = std::process::id();
+        assert!(is_pid_alive(pid), "current process should be alive");
+    }
+
+    #[test]
+    fn test_is_pid_alive_nonexistent() {
+        assert!(!is_pid_alive(999_999_999));
+    }
+
+    #[test]
+    fn test_is_pid_alive_pid_1() {
+        assert!(is_pid_alive(1));
+    }
+
+    #[test]
+    fn test_is_pid_alive_parses_stat() {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", std::process::id()));
+        assert!(stat.is_ok());
+        let content = stat.unwrap();
+        let pos = content.rfind(')').unwrap();
+        let state = content[pos + 1..].trim().chars().next().unwrap();
+        assert_eq!(state, 'R', "test process should be Running");
     }
 }

@@ -7,7 +7,7 @@ use rookery_engine::logs::LogBuffer;
 use rookery_engine::models::HfClient;
 use rookery_engine::process::ProcessManager;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,

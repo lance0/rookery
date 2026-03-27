@@ -25,7 +25,11 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusRespon
             Some(profile.clone()),
             None,
             None,
-            Some(chrono::Utc::now().signed_duration_since(*since).num_seconds()),
+            Some(
+                chrono::Utc::now()
+                    .signed_duration_since(*since)
+                    .num_seconds(),
+            ),
         ),
         rookery_core::state::ServerState::Running {
             profile,
@@ -38,14 +42,22 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusRespon
             Some(profile.clone()),
             Some(*pid),
             Some(*port),
-            Some(chrono::Utc::now().signed_duration_since(*since).num_seconds()),
+            Some(
+                chrono::Utc::now()
+                    .signed_duration_since(*since)
+                    .num_seconds(),
+            ),
         ),
         rookery_core::state::ServerState::Stopping { since } => (
             "stopping".into(),
             None,
             None,
             None,
-            Some(chrono::Utc::now().signed_duration_since(*since).num_seconds()),
+            Some(
+                chrono::Utc::now()
+                    .signed_duration_since(*since)
+                    .num_seconds(),
+            ),
         ),
         rookery_core::state::ServerState::Failed {
             last_error,
@@ -284,8 +296,10 @@ pub async fn post_swap(
                     if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
                         // Capture prev restarts before stop
                         let health = state.agent_manager.get_health(name).await;
-                        let prev_restarts = health.as_ref().and_then(|h| h.total_restarts).unwrap_or(0);
-                        let prev_errors = health.as_ref().and_then(|h| h.lifetime_errors).unwrap_or(0);
+                        let prev_restarts =
+                            health.as_ref().and_then(|h| h.total_restarts).unwrap_or(0);
+                        let prev_errors =
+                            health.as_ref().and_then(|h| h.lifetime_errors).unwrap_or(0);
                         tracing::info!(agent = %name, "restarting agent after swap");
                         let _ = state.agent_manager.stop(name).await;
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -296,7 +310,10 @@ pub async fn post_swap(
                                 tracing::error!(agent = %name, error = %e, "agent restart failed after swap retry");
                             }
                         }
-                        state.agent_manager.record_restart(name, "swap", prev_restarts, prev_errors).await;
+                        state
+                            .agent_manager
+                            .record_restart(name, "swap", prev_restarts, prev_errors)
+                            .await;
                     }
                 }
             }
@@ -412,19 +429,45 @@ pub async fn put_profile(
         .get_mut(&name)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if let Some(v) = update.temp { profile.temp = v; }
-    if let Some(v) = update.top_p { profile.top_p = v; }
-    if let Some(v) = update.top_k { profile.top_k = v; }
-    if let Some(v) = update.min_p { profile.min_p = v; }
-    if let Some(v) = update.ctx_size { profile.ctx_size = v; }
-    if let Some(v) = update.threads { profile.threads = v; }
-    if let Some(v) = update.threads_batch { profile.threads_batch = v; }
-    if let Some(v) = update.batch_size { profile.batch_size = v; }
-    if let Some(v) = update.ubatch_size { profile.ubatch_size = v; }
-    if let Some(v) = update.reasoning_budget { profile.reasoning_budget = v; }
-    if let Some(v) = update.flash_attention { profile.flash_attention = v; }
-    if let Some(v) = update.cache_type_k { profile.cache_type_k = v; }
-    if let Some(v) = update.cache_type_v { profile.cache_type_v = v; }
+    if let Some(v) = update.temp {
+        profile.temp = v;
+    }
+    if let Some(v) = update.top_p {
+        profile.top_p = v;
+    }
+    if let Some(v) = update.top_k {
+        profile.top_k = v;
+    }
+    if let Some(v) = update.min_p {
+        profile.min_p = v;
+    }
+    if let Some(v) = update.ctx_size {
+        profile.ctx_size = v;
+    }
+    if let Some(v) = update.threads {
+        profile.threads = v;
+    }
+    if let Some(v) = update.threads_batch {
+        profile.threads_batch = v;
+    }
+    if let Some(v) = update.batch_size {
+        profile.batch_size = v;
+    }
+    if let Some(v) = update.ubatch_size {
+        profile.ubatch_size = v;
+    }
+    if let Some(v) = update.reasoning_budget {
+        profile.reasoning_budget = v;
+    }
+    if let Some(v) = update.flash_attention {
+        profile.flash_attention = v;
+    }
+    if let Some(v) = update.cache_type_k {
+        profile.cache_type_k = v;
+    }
+    if let Some(v) = update.cache_type_v {
+        profile.cache_type_v = v;
+    }
 
     if let Err(e) = config.save() {
         tracing::error!(error = %e, "failed to save config");
@@ -464,7 +507,7 @@ pub async fn get_model_info(
                 model_id: None,
                 owned_by: None,
                 props: None,
-            }))
+            }));
         }
     };
 
@@ -642,7 +685,7 @@ pub async fn get_logs(
 
 // --- Dashboard ---
 
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 
 static DASHBOARD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../rookery-dashboard/dist");
 
@@ -711,8 +754,14 @@ pub async fn get_bench(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let prompts = vec![
-        ("short", "Write a Python function that checks if a number is prime. Just the function."),
-        ("medium", "Explain the difference between a mutex, semaphore, and condition variable. Give a code example for each in Rust."),
+        (
+            "short",
+            "Write a Python function that checks if a number is prime. Just the function.",
+        ),
+        (
+            "medium",
+            "Explain the difference between a mutex, semaphore, and condition variable. Give a code example for each in Rust.",
+        ),
     ];
 
     let mut tests = Vec::new();
@@ -822,10 +871,7 @@ pub async fn post_agent_start(
     Json(req): Json<AgentActionRequest>,
 ) -> Result<Json<AgentActionResponse>, StatusCode> {
     let config = state.config.read().await;
-    let agent_config = config
-        .agents
-        .get(&req.name)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let agent_config = config.agents.get(&req.name).ok_or(StatusCode::NOT_FOUND)?;
 
     match state.agent_manager.start(&req.name, agent_config).await {
         Ok(info) => Ok(Json(AgentActionResponse {
@@ -857,9 +903,7 @@ pub async fn post_agent_stop(
 
 // --- Hardware ---
 
-pub async fn get_hardware(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+pub async fn get_hardware(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut profile = serde_json::to_value(&state.hardware_profile).unwrap_or_default();
 
     // Add live VRAM info
@@ -914,14 +958,10 @@ pub async fn get_models_quants(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let repo = rookery_engine::models::normalize_repo(&q.repo);
 
-    let files = state
-        .hf_client
-        .list_files(&repo)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, repo = %repo, "failed to list files");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let files = state.hf_client.list_files(&repo).await.map_err(|e| {
+        tracing::error!(error = %e, repo = %repo, "failed to list files");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     let mut quants = rookery_engine::models::extract_quants(&files);
     rookery_engine::models::mark_downloaded(&mut quants);
@@ -929,7 +969,12 @@ pub async fn get_models_quants(
     // Attach performance estimates
     let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
     let ram_free = rookery_engine::hardware::read_ram_free_mb();
-    rookery_engine::models::attach_estimates(&mut quants, &state.hardware_profile, vram_free, ram_free);
+    rookery_engine::models::attach_estimates(
+        &mut quants,
+        &state.hardware_profile,
+        vram_free,
+        ram_free,
+    );
 
     Ok(Json(serde_json::json!({ "repo": repo, "quants": quants })))
 }
@@ -940,28 +985,31 @@ pub async fn get_models_recommend(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let repo = rookery_engine::models::normalize_repo(&q.repo);
 
-    let files = state
-        .hf_client
-        .list_files(&repo)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, repo = %repo, "failed to list files");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let files = state.hf_client.list_files(&repo).await.map_err(|e| {
+        tracing::error!(error = %e, repo = %repo, "failed to list files");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     let quants = rookery_engine::models::extract_quants(&files);
     let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
     let ram_free = rookery_engine::hardware::read_ram_free_mb();
 
-    match rookery_engine::models::recommend_quant(&quants, &state.hardware_profile, vram_free, ram_free) {
-        Some(rec) => Ok(Json(serde_json::json!({ "repo": repo, "recommendation": rec }))),
-        None => Ok(Json(serde_json::json!({ "repo": repo, "recommendation": null, "message": "no quant fits in available memory" }))),
+    match rookery_engine::models::recommend_quant(
+        &quants,
+        &state.hardware_profile,
+        vram_free,
+        ram_free,
+    ) {
+        Some(rec) => Ok(Json(
+            serde_json::json!({ "repo": repo, "recommendation": rec }),
+        )),
+        None => Ok(Json(
+            serde_json::json!({ "repo": repo, "recommendation": null, "message": "no quant fits in available memory" }),
+        )),
     }
 }
 
-pub async fn get_models_cached(
-    State(_state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+pub async fn get_models_cached(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cached = rookery_engine::models::scan_cache();
     Json(serde_json::json!({ "models": cached }))
 }
@@ -979,14 +1027,10 @@ pub async fn post_models_pull(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let repo = rookery_engine::models::normalize_repo(&req.repo);
 
-    let files = state
-        .hf_client
-        .list_files(&repo)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to list files for pull");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let files = state.hf_client.list_files(&repo).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to list files for pull");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     let quants = rookery_engine::models::extract_quants(&files);
 
@@ -996,7 +1040,12 @@ pub async fn post_models_pull(
     } else {
         let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
         let ram_free = rookery_engine::hardware::read_ram_free_mb();
-        match rookery_engine::models::recommend_quant(&quants, &state.hardware_profile, vram_free, ram_free) {
+        match rookery_engine::models::recommend_quant(
+            &quants,
+            &state.hardware_profile,
+            vram_free,
+            ram_free,
+        ) {
             Some(rec) => rec.label,
             None => {
                 return Ok(Json(serde_json::json!({
@@ -1032,13 +1081,14 @@ pub async fn post_models_pull(
     // Spawn background download
     tokio::spawn(async move {
         let client = rookery_engine::models::HfClient::new();
-        let (progress_tx, _) = tokio::sync::watch::channel(rookery_engine::models::DownloadProgress {
-            repo: repo_clone.clone(),
-            file: String::new(),
-            bytes_downloaded: 0,
-            bytes_total: 0,
-            done: false,
-        });
+        let (progress_tx, _) =
+            tokio::sync::watch::channel(rookery_engine::models::DownloadProgress {
+                repo: repo_clone.clone(),
+                file: String::new(),
+                bytes_downloaded: 0,
+                bytes_total: 0,
+                done: false,
+            });
 
         for (filename, dest_str) in &download_files {
             let dest = std::path::PathBuf::from(dest_str);
@@ -1048,7 +1098,10 @@ pub async fn post_models_pull(
             }
 
             tracing::info!(repo = %repo_clone, file = %filename, "downloading");
-            match client.download_file(&repo_clone, filename, &dest, Some(&progress_tx)).await {
+            match client
+                .download_file(&repo_clone, filename, &dest, Some(&progress_tx))
+                .await
+            {
                 Ok(()) => {
                     tracing::info!(file = %filename, "download complete");
                     let _ = state_tx.send(serde_json::json!({
@@ -1099,7 +1152,11 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             profile: Some(profile.clone()),
             pid: Some(*pid),
             port: Some(*port),
-            uptime_secs: Some(chrono::Utc::now().signed_duration_since(*since).num_seconds()),
+            uptime_secs: Some(
+                chrono::Utc::now()
+                    .signed_duration_since(*since)
+                    .num_seconds(),
+            ),
         },
         rookery_core::state::ServerState::Failed {
             last_error,

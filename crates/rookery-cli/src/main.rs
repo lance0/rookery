@@ -247,7 +247,9 @@ async fn main() {
         Commands::Models { cmd } => match cmd {
             ModelCommands::Search { query, json } => cmd_models_search(&client, &query, json).await,
             ModelCommands::Quants { repo, json } => cmd_models_quants(&client, &repo, json).await,
-            ModelCommands::Recommend { repo, json } => cmd_models_recommend(&client, &repo, json).await,
+            ModelCommands::Recommend { repo, json } => {
+                cmd_models_recommend(&client, &repo, json).await
+            }
             ModelCommands::List { json } => cmd_models_list(&client, json).await,
             ModelCommands::Pull { repo, quant } => cmd_models_pull(&client, &repo, quant).await,
             ModelCommands::Hardware { json } => cmd_hardware(&client, json).await,
@@ -260,7 +262,7 @@ async fn main() {
                 &mut std::io::stdout(),
             );
             Ok(())
-        },
+        }
     };
 
     if let Err(e) = result {
@@ -269,7 +271,11 @@ async fn main() {
     }
 }
 
-async fn cmd_start(client: &DaemonClient, profile: Option<String>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_start(
+    client: &DaemonClient,
+    profile: Option<String>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running (start it with `rookeryd`)".into());
     }
@@ -279,9 +285,7 @@ async fn cmd_start(client: &DaemonClient, profile: Option<String>, json: bool) -
         println!("starting profile '{label}'...");
     }
 
-    let resp: serde_json::Value = client
-        .post("/api/start", &StartRequest { profile })
-        .await?;
+    let resp: serde_json::Value = client.post("/api/start", &StartRequest { profile }).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -309,7 +313,9 @@ async fn cmd_stop(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
         return Err("rookeryd is not running".into());
     }
 
-    if !json { println!("stopping server..."); }
+    if !json {
+        println!("stopping server...");
+    }
     let resp: serde_json::Value = client.post("/api/stop", &EmptyBody {}).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -332,13 +338,16 @@ async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std
     let resp: StatusResponse = client.get("/api/status").await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "state": resp.state,
-            "profile": resp.profile,
-            "pid": resp.pid,
-            "port": resp.port,
-            "uptime_secs": resp.uptime_secs,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "state": resp.state,
+                "profile": resp.profile,
+                "pid": resp.pid,
+                "port": resp.port,
+                "uptime_secs": resp.uptime_secs,
+            }))?
+        );
     } else {
         println!("state:   {}", resp.state);
         if let Some(profile) = &resp.profile {
@@ -370,7 +379,10 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
     let resp: GpuResponse = client.get("/api/gpu").await?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "gpus": resp.gpus.iter().map(|g| serde_json::json!({
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "gpus": resp.gpus.iter().map(|g| serde_json::json!({
             "index": g.index,
             "name": g.name,
             "vram_used_mb": g.vram_used_mb,
@@ -379,7 +391,9 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
             "utilization_pct": g.utilization_pct,
             "power_watts": g.power_watts,
             "power_limit_watts": g.power_limit_watts,
-        })).collect::<Vec<_>>() }))?);
+        })).collect::<Vec<_>>() })
+            )?
+        );
     } else {
         for gpu in &resp.gpus {
             println!("GPU {}: {}", gpu.index, gpu.name);
@@ -406,9 +420,15 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
 
     if json {
         match config.validate() {
-            Ok(()) => println!("{}", serde_json::json!({"valid": true, "path": rookery_core::config::Config::config_path().display().to_string()})),
+            Ok(()) => println!(
+                "{}",
+                serde_json::json!({"valid": true, "path": rookery_core::config::Config::config_path().display().to_string()})
+            ),
             Err(e) => {
-                println!("{}", serde_json::json!({"valid": false, "error": e.to_string()}));
+                println!(
+                    "{}",
+                    serde_json::json!({"valid": false, "error": e.to_string()})
+                );
                 std::process::exit(1);
             }
         }
@@ -416,7 +436,10 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
     }
 
     match config.validate() {
-        Ok(()) => println!("config OK: {}", rookery_core::config::Config::config_path().display()),
+        Ok(()) => println!(
+            "config OK: {}",
+            rookery_core::config::Config::config_path().display()
+        ),
         Err(e) => {
             eprintln!("config error: {e}");
             std::process::exit(1);
@@ -439,7 +462,11 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
     if !config.agents.is_empty() {
         println!("agents:");
         for (name, agent) in &config.agents {
-            let auto = if agent.auto_start { " (auto-start)" } else { "" };
+            let auto = if agent.auto_start {
+                " (auto-start)"
+            } else {
+                ""
+            };
             println!("  {name}{auto}");
             println!("    {} {}", agent.command, agent.args.join(" "));
             println!();
@@ -449,14 +476,22 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-async fn cmd_agent_start(client: &DaemonClient, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_agent_start(
+    client: &DaemonClient,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     println!("starting agent '{name}'...");
     let resp: AgentActionResponse = client
-        .post("/api/agents/start", &AgentActionRequest { name: name.to_string() })
+        .post(
+            "/api/agents/start",
+            &AgentActionRequest {
+                name: name.to_string(),
+            },
+        )
         .await?;
 
     if resp.success {
@@ -468,14 +503,22 @@ async fn cmd_agent_start(client: &DaemonClient, name: &str) -> Result<(), Box<dy
     Ok(())
 }
 
-async fn cmd_agent_stop(client: &DaemonClient, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_agent_stop(
+    client: &DaemonClient,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
     println!("stopping agent '{name}'...");
     let resp: AgentActionResponse = client
-        .post("/api/agents/stop", &AgentActionRequest { name: name.to_string() })
+        .post(
+            "/api/agents/stop",
+            &AgentActionRequest {
+                name: name.to_string(),
+            },
+        )
         .await?;
 
     if resp.success {
@@ -487,7 +530,10 @@ async fn cmd_agent_stop(client: &DaemonClient, name: &str) -> Result<(), Box<dyn
     Ok(())
 }
 
-async fn cmd_agent_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_agent_status(
+    client: &DaemonClient,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
@@ -530,12 +576,18 @@ async fn cmd_agent_status(client: &DaemonClient, json: bool) -> Result<(), Box<d
     Ok(())
 }
 
-async fn cmd_swap(client: &DaemonClient, profile: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_swap(
+    client: &DaemonClient,
+    profile: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    if !json { println!("swapping to '{profile}'..."); }
+    if !json {
+        println!("swapping to '{profile}'...");
+    }
     let resp: serde_json::Value = client
         .post("/api/swap", &serde_json::json!({ "profile": profile }))
         .await?;
@@ -601,7 +653,11 @@ async fn cmd_profiles(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
     Ok(())
 }
 
-async fn cmd_logs(client: &DaemonClient, follow: bool, n: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_logs(
+    client: &DaemonClient,
+    follow: bool,
+    n: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
@@ -671,15 +727,23 @@ async fn cmd_hardware(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
 
     if let Some(gpu) = resp.get("gpu") {
         println!("GPU:       {}", gpu["name"].as_str().unwrap_or("unknown"));
-        println!("  VRAM:    {} MB total, {} MB free",
+        println!(
+            "  VRAM:    {} MB total, {} MB free",
             gpu["vram_total_mb"].as_u64().unwrap_or(0),
-            gpu["vram_free_mb"].as_u64().unwrap_or(0));
+            gpu["vram_free_mb"].as_u64().unwrap_or(0)
+        );
         if let Some(bw) = gpu["memory_bandwidth_gbps"].as_f64() {
             println!("  Memory:  {:.0} GB/s bandwidth", bw);
         }
         if let (Some(major), Some(minor)) = (
-            gpu["compute_capability"].as_array().and_then(|a| a.first()).and_then(|v| v.as_u64()),
-            gpu["compute_capability"].as_array().and_then(|a| a.get(1)).and_then(|v| v.as_u64()),
+            gpu["compute_capability"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_u64()),
+            gpu["compute_capability"]
+                .as_array()
+                .and_then(|a| a.get(1))
+                .and_then(|v| v.as_u64()),
         ) {
             println!("  Compute: {major}.{minor}");
         }
@@ -689,19 +753,24 @@ async fn cmd_hardware(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
 
     if let Some(cpu) = resp.get("cpu") {
         println!("CPU:       {}", cpu["name"].as_str().unwrap_or("unknown"));
-        println!("  Cores:   {} cores / {} threads",
+        println!(
+            "  Cores:   {} cores / {} threads",
             cpu["cores"].as_u64().unwrap_or(0),
-            cpu["threads"].as_u64().unwrap_or(0));
+            cpu["threads"].as_u64().unwrap_or(0)
+        );
         let ram_total = cpu["ram_total_mb"].as_u64().unwrap_or(0);
         let ram_free = cpu["ram_free_mb"].as_u64().unwrap_or(0);
-        println!("  RAM:     {} MB total, {} MB free",
-            ram_total, ram_free);
+        println!("  RAM:     {} MB total, {} MB free", ram_total, ram_free);
     }
 
     Ok(())
 }
 
-async fn cmd_models_search(client: &DaemonClient, query: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_search(
+    client: &DaemonClient,
+    query: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
@@ -724,7 +793,8 @@ async fn cmd_models_search(client: &DaemonClient, query: &str, json: bool) -> Re
     println!("{}", "-".repeat(70));
 
     for r in results {
-        println!("{:<50} {:>10} {:>8}",
+        println!(
+            "{:<50} {:>10} {:>8}",
             r["id"].as_str().unwrap_or("?"),
             format_count(r["downloads"].as_u64().unwrap_or(0)),
             format_count(r["likes"].as_u64().unwrap_or(0)),
@@ -734,12 +804,18 @@ async fn cmd_models_search(client: &DaemonClient, query: &str, json: bool) -> Re
     Ok(())
 }
 
-async fn cmd_models_quants(client: &DaemonClient, repo: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_quants(
+    client: &DaemonClient,
+    repo: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    let resp: serde_json::Value = client.get(&format!("/api/models/quants?repo={repo}")).await?;
+    let resp: serde_json::Value = client
+        .get(&format!("/api/models/quants?repo={repo}"))
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -750,34 +826,52 @@ async fn cmd_models_quants(client: &DaemonClient, repo: &str, json: bool) -> Res
     let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
 
     println!("{resolved_repo}\n");
-    println!("{:<16} {:>8} {:>6} {:>14} {:>10}", "Quant", "Size", "DL", "Fit", "Est tok/s");
+    println!(
+        "{:<16} {:>8} {:>6} {:>14} {:>10}",
+        "Quant", "Size", "DL", "Fit", "Est tok/s"
+    );
     println!("{}", "-".repeat(58));
 
     for q in quants {
         let label = q["label"].as_str().unwrap_or("?");
         let size_gb = q["total_bytes"].as_u64().unwrap_or(0) as f64 / 1_073_741_824.0;
-        let downloaded = if q["is_downloaded"].as_bool().unwrap_or(false) { "✓" } else { "" };
-        let fit = q.get("perf_estimate")
+        let downloaded = if q["is_downloaded"].as_bool().unwrap_or(false) {
+            "✓"
+        } else {
+            ""
+        };
+        let fit = q
+            .get("perf_estimate")
             .and_then(|e| e["fit_mode"].as_str())
             .unwrap_or("?")
             .replace('_', " ");
-        let toks = q.get("perf_estimate")
+        let toks = q
+            .get("perf_estimate")
             .and_then(|e| e["estimated_gen_toks"].as_f64())
             .map(|t| format!("~{:.0}", t))
             .unwrap_or_default();
 
-        println!("{:<16} {:>6.1}GB {:>6} {:>14} {:>10}", label, size_gb, downloaded, fit, toks);
+        println!(
+            "{:<16} {:>6.1}GB {:>6} {:>14} {:>10}",
+            label, size_gb, downloaded, fit, toks
+        );
     }
 
     Ok(())
 }
 
-async fn cmd_models_recommend(client: &DaemonClient, repo: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_recommend(
+    client: &DaemonClient,
+    repo: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
 
-    let resp: serde_json::Value = client.get(&format!("/api/models/recommend?repo={repo}")).await?;
+    let resp: serde_json::Value = client
+        .get(&format!("/api/models/recommend?repo={repo}"))
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -786,18 +880,23 @@ async fn cmd_models_recommend(client: &DaemonClient, repo: &str, json: bool) -> 
     let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
 
     if resp["recommendation"].is_null() {
-        println!("{resolved_repo}: {}", resp["message"].as_str().unwrap_or("no recommendation"));
+        println!(
+            "{resolved_repo}: {}",
+            resp["message"].as_str().unwrap_or("no recommendation")
+        );
         return Ok(());
     }
 
     let rec = &resp["recommendation"];
     let label = rec["label"].as_str().unwrap_or("?");
     let size_gb = rec["total_bytes"].as_u64().unwrap_or(0) as f64 / 1_073_741_824.0;
-    let fit = rec.get("perf_estimate")
+    let fit = rec
+        .get("perf_estimate")
         .and_then(|e| e["fit_mode"].as_str())
         .unwrap_or("?")
         .replace('_', " ");
-    let toks = rec.get("perf_estimate")
+    let toks = rec
+        .get("perf_estimate")
         .and_then(|e| e["estimated_gen_toks"].as_f64())
         .unwrap_or(0.0);
     let reason = rec["reason"].as_str().unwrap_or("");
@@ -811,7 +910,10 @@ async fn cmd_models_recommend(client: &DaemonClient, repo: &str, json: bool) -> 
     Ok(())
 }
 
-async fn cmd_models_list(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_list(
+    client: &DaemonClient,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
@@ -843,7 +945,11 @@ async fn cmd_models_list(client: &DaemonClient, json: bool) -> Result<(), Box<dy
     Ok(())
 }
 
-async fn cmd_models_pull(client: &DaemonClient, repo: &str, quant: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_models_pull(
+    client: &DaemonClient,
+    repo: &str,
+    quant: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         return Err("rookeryd is not running".into());
     }
@@ -881,7 +987,9 @@ async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
         return Err("rookeryd is not running".into());
     }
 
-    if !json { println!("running benchmark...\n"); }
+    if !json {
+        println!("running benchmark...\n");
+    }
 
     let resp: serde_json::Value = client.get("/api/bench").await?;
 
@@ -897,7 +1005,10 @@ async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    println!("{:<12} {:>8} {:>8} {:>10} {:>10}", "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s");
+    println!(
+        "{:<12} {:>8} {:>8} {:>10} {:>10}",
+        "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s"
+    );
     println!("{}", "-".repeat(52));
 
     for t in tests {

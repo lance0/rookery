@@ -39,10 +39,7 @@ pub async fn wait_for_health(port: u16, timeout: Duration) -> Result<(), HealthE
 /// Single-shot health check — returns true if the server responds 200 within timeout.
 pub async fn check_health(port: u16, timeout: Duration) -> bool {
     let url = format!("http://127.0.0.1:{port}/health");
-    let client = match reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(_) => return false,
     };

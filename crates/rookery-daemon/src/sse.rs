@@ -13,26 +13,28 @@ pub async fn get_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // GPU stats stream — poll every 2 seconds
     let gpu_state = state.clone();
-    let gpu_stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
-        Duration::from_secs(2),
-    ))
-    .map(move |_| {
-        let stats = gpu_state
-            .gpu_monitor
-            .as_ref()
-            .and_then(|m| m.stats().ok())
-            .unwrap_or_default();
-        Ok(Event::default()
-            .event("gpu")
-            .json_data(&serde_json::json!({ "gpus": stats }))
-            .unwrap())
-    });
+    let gpu_stream =
+        tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(2)))
+            .map(move |_| {
+                let stats = gpu_state
+                    .gpu_monitor
+                    .as_ref()
+                    .and_then(|m| m.stats().ok())
+                    .unwrap_or_default();
+                Ok(Event::default()
+                    .event("gpu")
+                    .json_data(&serde_json::json!({ "gpus": stats }))
+                    .unwrap())
+            });
 
     // State change stream — fires on start/stop/swap
     let state_rx = state.state_tx.subscribe();
     let state_stream = BroadcastStream::new(state_rx).filter_map(|result| {
         futures_util::future::ready(match result {
-            Ok(value) => Some(Ok(Event::default().event("state").json_data(&value).unwrap())),
+            Ok(value) => Some(Ok(Event::default()
+                .event("state")
+                .json_data(&value)
+                .unwrap())),
             Err(_) => None, // lagged, skip
         })
     });
@@ -49,19 +51,16 @@ pub async fn get_events(
     // Send initial state immediately
     let current_state = state.process_manager.to_server_state().await;
     let initial_status = crate::routes::status_json_from_state(&current_state);
-    let initial_event = stream::once(futures_util::future::ready(Ok(
-        Event::default()
-            .event("state")
-            .json_data(&initial_status)
-            .unwrap(),
-    )));
+    let initial_event = stream::once(futures_util::future::ready(Ok(Event::default()
+        .event("state")
+        .json_data(&initial_status)
+        .unwrap())));
 
     // Merge all streams
-    let merged = initial_event
-        .chain(futures_util::stream::select(
-            gpu_stream,
-            futures_util::stream::select(state_stream, log_stream),
-        ));
+    let merged = initial_event.chain(futures_util::stream::select(
+        gpu_stream,
+        futures_util::stream::select(state_stream, log_stream),
+    ));
 
     Sse::new(merged).keep_alive(
         KeepAlive::new()

@@ -3,8 +3,8 @@ mod routes;
 mod sse;
 
 use app_state::AppState;
-use axum::routing::{get, post, put};
 use axum::Router;
+use axum::routing::{get, post, put};
 use rookery_core::config::Config;
 use rookery_core::state::{AgentPersistence, StatePersistence};
 use rookery_engine::agent::AgentManager;
@@ -12,7 +12,7 @@ use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::process::ProcessManager;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 #[tokio::main]
 async fn main() {
@@ -76,13 +76,24 @@ async fn main() {
         } = reconciled
         {
             if !rookery_engine::process::is_pid_alive(running_pid) {
-                tracing::warn!(pid = running_pid, "adopted process is a zombie — marking stopped");
+                tracing::warn!(
+                    pid = running_pid,
+                    "adopted process is a zombie — marking stopped"
+                );
                 let stopped = rookery_core::state::ServerState::Stopped;
                 let _ = state_persistence.save(&stopped);
-            } else if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3)).await {
+            } else if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3))
+                .await
+            {
                 // Health endpoint responds — now verify inference actually works
-                if rookery_engine::health::check_inference(port, std::time::Duration::from_secs(10)).await {
-                    tracing::info!(pid = running_pid, port, "adopted process is healthy (inference canary passed)");
+                if rookery_engine::health::check_inference(port, std::time::Duration::from_secs(10))
+                    .await
+                {
+                    tracing::info!(
+                        pid = running_pid,
+                        port,
+                        "adopted process is healthy (inference canary passed)"
+                    );
                     process_manager
                         .adopt(rookery_engine::process::ProcessInfo {
                             pid: running_pid,
@@ -94,12 +105,20 @@ async fn main() {
                         })
                         .await;
                 } else {
-                    tracing::warn!(pid = running_pid, port, "adopted process failed inference canary — marking stopped");
+                    tracing::warn!(
+                        pid = running_pid,
+                        port,
+                        "adopted process failed inference canary — marking stopped"
+                    );
                     let stopped = rookery_core::state::ServerState::Stopped;
                     let _ = state_persistence.save(&stopped);
                 }
             } else {
-                tracing::warn!(pid = running_pid, port, "adopted process failed health check — marking stopped");
+                tracing::warn!(
+                    pid = running_pid,
+                    port,
+                    "adopted process failed health check — marking stopped"
+                );
                 let stopped = rookery_core::state::ServerState::Stopped;
                 let _ = state_persistence.save(&stopped);
             }
@@ -146,22 +165,31 @@ async fn main() {
     if let Ok(agent_state) = agent_persistence.load() {
         let reconciled = agent_persistence.reconcile(agent_state);
         for (name, entry) in &reconciled.agents {
-            agent_manager.adopt(name, entry, config.agents.get(name)).await;
+            agent_manager
+                .adopt(name, entry, config.agents.get(name))
+                .await;
         }
         let _ = agent_persistence.save(&reconciled);
 
         // Restart adopted agents that need fresh connections to llama-server.
         // After a daemon restart, agents may hold stale CLOSE-WAIT sockets to
         // the old llama-server process and silently fail to send requests.
+        //
+        // We remove the stale adopted entry first, then start fresh. If the
+        // agent uses --replace (like hermes), the new process handles killing
+        // the old one via its own PID file. This avoids a race between our
+        // stop() SIGTERM and --replace's SIGTERM hitting the same process.
         for (name, _entry) in &reconciled.agents {
             if let Some(agent_config) = config.agents.get(name) {
                 if agent_config.restart_on_swap {
                     tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
-                    let _ = agent_manager.stop(name).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Remove stale tracking without sending SIGTERM — let --replace handle it
+                    agent_manager.remove_tracking(name).await;
                     match agent_manager.start(name, agent_config).await {
                         Ok(info) => {
-                            agent_manager.record_restart(name, "daemon_restart", 0, 0).await;
+                            agent_manager
+                                .record_restart(name, "daemon_restart", 0, 0)
+                                .await;
                             tracing::info!(agent = %name, pid = info.pid, "agent restarted");
                         }
                         Err(e) => {
@@ -169,10 +197,14 @@ async fn main() {
                             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             match agent_manager.start(name, agent_config).await {
                                 Ok(info) => {
-                                    agent_manager.record_restart(name, "daemon_restart", 0, 0).await;
+                                    agent_manager
+                                        .record_restart(name, "daemon_restart", 0, 0)
+                                        .await;
                                     tracing::info!(agent = %name, pid = info.pid, "agent restarted on retry");
                                 }
-                                Err(e) => tracing::error!(agent = %name, error = %e, "agent restart failed after retry"),
+                                Err(e) => {
+                                    tracing::error!(agent = %name, error = %e, "agent restart failed after retry")
+                                }
                             }
                         }
                     }
@@ -208,8 +240,7 @@ async fn main() {
     }
 
     // Build hardware profile and HF client
-    let hardware_profile =
-        rookery_engine::hardware::build_hardware_profile(gpu_monitor.as_ref());
+    let hardware_profile = rookery_engine::hardware::build_hardware_profile(gpu_monitor.as_ref());
     tracing::info!(gpu = ?hardware_profile.gpu.as_ref().map(|g| &g.name), cpu = %hardware_profile.cpu.name, "hardware profile built");
     let hf_client = rookery_engine::models::HfClient::new();
 
@@ -252,9 +283,9 @@ async fn main() {
             }
             let current = canary_state.process_manager.to_server_state().await;
             let (profile, port) = match current {
-                rookery_core::state::ServerState::Running { ref profile, port, .. } => {
-                    (profile.clone(), port)
-                }
+                rookery_core::state::ServerState::Running {
+                    ref profile, port, ..
+                } => (profile.clone(), port),
                 _ => continue,
             };
 
@@ -290,7 +321,11 @@ async fn main() {
             let _ = canary_state.state_persistence.save(&stopped);
 
             let config = canary_state.config.read().await;
-            match canary_state.process_manager.start_and_wait(&config, &profile).await {
+            match canary_state
+                .process_manager
+                .start_and_wait(&config, &profile)
+                .await
+            {
                 Ok(server_state) => {
                     let _ = canary_state.state_persistence.save(&server_state);
                     if server_state.is_running() {

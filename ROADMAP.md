@@ -89,6 +89,14 @@
 - [ ] Bench panel: show error toast on failure instead of silent swallow
 - [x] Fix CSS variable: --text-muted → --muted in header connection status
 
+### Frontend — Mobile Responsiveness
+- [ ] Responsive layout for tabbed UI (Overview, Settings, Chat, Bench, Logs)
+- [ ] Touch-friendly controls for GPU gauges, profile switcher, agent controls
+- [ ] Mobile-optimized log viewer and chat playground
+- [ ] Hamburger menu for smaller screens
+- [ ] Stack GPU gauges vertically on mobile
+- [ ] Ensure keyboard shortcuts don't conflict with mobile gestures
+
 ## Phase 7: Production Hardening (Done)
 - [x] Redact sensitive fields from GET /api/config (agent env vars replaced with count)
 - [x] OOM killer protection: set oom_score_adj=-900 on llama-server after spawn

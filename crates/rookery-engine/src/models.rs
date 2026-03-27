@@ -104,20 +104,54 @@ const QUANT_PREFERENCE: &[&str] = &[
 // --- Known quant patterns for extraction ---
 
 const QUANT_PATTERNS: &[&str] = &[
-    "UD-Q4_K_XL", "UD-Q4_K_L", "UD-Q5_K_XL", "UD-Q5_K_L", "UD-Q6_K_XL",
-    "UD-Q4_K_M", "UD-Q4_K_S", "UD-Q5_K_M", "UD-Q5_K_S",
-    "UD-IQ4_XS", "UD-IQ2_M", "UD-IQ2_S", "UD-IQ2_XS",
-    "MXFP4_MOE", "MXFP4",
-    "Q8_0", "Q6_K_L", "Q6_K", "Q5_K_L", "Q5_K_M", "Q5_K_S",
-    "Q4_K_L", "Q4_K_M", "Q4_K_S", "Q4_0",
-    "Q3_K_L", "Q3_K_M", "Q3_K_S",
-    "Q2_K_L", "Q2_K", "Q2_K_S",
-    "IQ4_XS", "IQ4_NL",
-    "IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ3_M",
-    "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M",
-    "IQ1_S", "IQ1_M",
-    "TQ1_0", "TQ2_0",
-    "BF16", "F16", "F32",
+    "UD-Q4_K_XL",
+    "UD-Q4_K_L",
+    "UD-Q5_K_XL",
+    "UD-Q5_K_L",
+    "UD-Q6_K_XL",
+    "UD-Q4_K_M",
+    "UD-Q4_K_S",
+    "UD-Q5_K_M",
+    "UD-Q5_K_S",
+    "UD-IQ4_XS",
+    "UD-IQ2_M",
+    "UD-IQ2_S",
+    "UD-IQ2_XS",
+    "MXFP4_MOE",
+    "MXFP4",
+    "Q8_0",
+    "Q6_K_L",
+    "Q6_K",
+    "Q5_K_L",
+    "Q5_K_M",
+    "Q5_K_S",
+    "Q4_K_L",
+    "Q4_K_M",
+    "Q4_K_S",
+    "Q4_0",
+    "Q3_K_L",
+    "Q3_K_M",
+    "Q3_K_S",
+    "Q2_K_L",
+    "Q2_K",
+    "Q2_K_S",
+    "IQ4_XS",
+    "IQ4_NL",
+    "IQ3_XXS",
+    "IQ3_XS",
+    "IQ3_S",
+    "IQ3_M",
+    "IQ2_XXS",
+    "IQ2_XS",
+    "IQ2_S",
+    "IQ2_M",
+    "IQ1_S",
+    "IQ1_M",
+    "TQ1_0",
+    "TQ2_0",
+    "BF16",
+    "F16",
+    "F32",
 ];
 
 // --- HfClient ---
@@ -160,10 +194,7 @@ impl HfClient {
     }
 
     pub async fn list_files(&self, repo: &str) -> Result<Vec<HfFileEntry>, String> {
-        let url = format!(
-            "https://huggingface.co/api/models/{}/tree/main",
-            repo
-        );
+        let url = format!("https://huggingface.co/api/models/{}/tree/main", repo);
 
         let resp = self
             .client
@@ -173,7 +204,11 @@ impl HfClient {
             .map_err(|e| format!("HF API request failed: {e}"))?;
 
         if !resp.status().is_success() {
-            return Err(format!("HF API returned {} for repo '{}'", resp.status(), repo));
+            return Err(format!(
+                "HF API returned {} for repo '{}'",
+                resp.status(),
+                repo
+            ));
         }
 
         resp.json::<Vec<HfFileEntry>>()
@@ -188,10 +223,7 @@ impl HfClient {
         dest: &Path,
         progress_tx: Option<&tokio::sync::watch::Sender<DownloadProgress>>,
     ) -> Result<(), String> {
-        let url = format!(
-            "https://huggingface.co/{}//resolve/main/{}",
-            repo, filename
-        );
+        let url = format!("https://huggingface.co/{}//resolve/main/{}", repo, filename);
 
         let resp = self
             .client
@@ -239,7 +271,9 @@ impl HfClient {
             }
         }
 
-        file.flush().await.map_err(|e| format!("flush error: {e}"))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("flush error: {e}"))?;
         drop(file);
 
         // Rename .part to final
@@ -297,13 +331,10 @@ pub fn extract_quants(files: &[HfFileEntry]) -> Vec<QuantInfo> {
 
         let label = extract_quant_label(basename);
 
-        quant_map
-            .entry(label)
-            .or_default()
-            .push(QuantFile {
-                path: path.clone(),
-                size: file.size,
-            });
+        quant_map.entry(label).or_default().push(QuantFile {
+            path: path.clone(),
+            size: file.size,
+        });
     }
 
     let mut quants: Vec<QuantInfo> = quant_map
@@ -559,10 +590,7 @@ mod tests {
     #[test]
     fn test_extract_quant_label() {
         assert_eq!(extract_quant_label("Model-Q4_K_M.gguf"), "Q4_K_M");
-        assert_eq!(
-            extract_quant_label("Model-UD-Q4_K_XL.gguf"),
-            "UD-Q4_K_XL"
-        );
+        assert_eq!(extract_quant_label("Model-UD-Q4_K_XL.gguf"), "UD-Q4_K_XL");
         assert_eq!(extract_quant_label("Model-BF16.gguf"), "BF16");
         assert_eq!(
             extract_quant_label("Model-Q8_0-00001-of-00003.gguf"),
@@ -574,11 +602,31 @@ mod tests {
     #[test]
     fn test_extract_quants() {
         let files = vec![
-            HfFileEntry { file_type: "file".into(), path: "Model-Q4_K_M.gguf".into(), size: 5_000_000_000 },
-            HfFileEntry { file_type: "file".into(), path: "Model-Q8_0-00001-of-00002.gguf".into(), size: 8_000_000_000 },
-            HfFileEntry { file_type: "file".into(), path: "Model-Q8_0-00002-of-00002.gguf".into(), size: 8_000_000_000 },
-            HfFileEntry { file_type: "file".into(), path: "mmproj-BF16.gguf".into(), size: 500_000_000 },
-            HfFileEntry { file_type: "file".into(), path: "README.md".into(), size: 1000 },
+            HfFileEntry {
+                file_type: "file".into(),
+                path: "Model-Q4_K_M.gguf".into(),
+                size: 5_000_000_000,
+            },
+            HfFileEntry {
+                file_type: "file".into(),
+                path: "Model-Q8_0-00001-of-00002.gguf".into(),
+                size: 8_000_000_000,
+            },
+            HfFileEntry {
+                file_type: "file".into(),
+                path: "Model-Q8_0-00002-of-00002.gguf".into(),
+                size: 8_000_000_000,
+            },
+            HfFileEntry {
+                file_type: "file".into(),
+                path: "mmproj-BF16.gguf".into(),
+                size: 500_000_000,
+            },
+            HfFileEntry {
+                file_type: "file".into(),
+                path: "README.md".into(),
+                size: 1000,
+            },
         ];
 
         let quants = extract_quants(&files);
@@ -596,9 +644,10 @@ mod tests {
     #[test]
     fn test_cache_path() {
         let path = cache_path("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf");
-        assert!(path
-            .to_str()
-            .unwrap()
-            .ends_with("unsloth_Qwen3-8B-GGUF_Qwen3-8B-Q4_K_M.gguf"));
+        assert!(
+            path.to_str()
+                .unwrap()
+                .ends_with("unsloth_Qwen3-8B-GGUF_Qwen3-8B-Q4_K_M.gguf")
+        );
     }
 }

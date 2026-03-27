@@ -77,7 +77,9 @@ impl AgentManager {
     /// Adopt a previously-running agent by PID (used after daemon restart).
     pub async fn adopt(&self, name: &str, entry: &AgentEntry, config: Option<&AgentConfig>) {
         tracing::info!(agent = name, pid = entry.pid, "adopting existing agent");
-        let version = config.and_then(|c| c.version_file.as_ref()).and_then(read_version_file);
+        let version = config
+            .and_then(|c| c.version_file.as_ref())
+            .and_then(read_version_file);
         let info = AgentInfo {
             name: name.to_string(),
             pid: entry.pid,
@@ -126,11 +128,7 @@ impl AgentManager {
         }
     }
 
-    pub async fn start(
-        &self,
-        name: &str,
-        config: &AgentConfig,
-    ) -> Result<AgentInfo, AgentError> {
+    pub async fn start(&self, name: &str, config: &AgentConfig) -> Result<AgentInfo, AgentError> {
         let mut agents = self.agents.lock().await;
 
         // Check if already running
@@ -290,7 +288,11 @@ impl AgentManager {
             }
 
             if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-                tracing::warn!(agent = name, pid, "adopted agent didn't exit, sending SIGKILL");
+                tracing::warn!(
+                    agent = name,
+                    pid,
+                    "adopted agent didn't exit, sending SIGKILL"
+                );
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGKILL,
@@ -305,6 +307,15 @@ impl AgentManager {
         self.crash_counts.lock().await.remove(name);
 
         Ok(())
+    }
+
+    /// Remove an agent from tracking without sending any signals.
+    /// Used when the agent will be restarted with --replace, which
+    /// handles killing the old process via its own PID file.
+    pub async fn remove_tracking(&self, name: &str) {
+        let mut agents = self.agents.lock().await;
+        agents.remove(name);
+        self.persist_state(&agents);
     }
 
     pub async fn stop_all(&self) {
@@ -359,7 +370,11 @@ impl AgentManager {
         let agent = agents.get(name)?;
 
         let uptime_secs = if agent.info.status == AgentStatus::Running {
-            Some(Utc::now().signed_duration_since(agent.info.started_at).num_seconds())
+            Some(
+                Utc::now()
+                    .signed_duration_since(agent.info.started_at)
+                    .num_seconds(),
+            )
         } else {
             None
         };
@@ -374,12 +389,20 @@ impl AgentManager {
             total_restarts: Some(agent.total_restarts),
             last_restart_reason: agent.last_restart_reason.clone(),
             error_count: Some(agent.error_count.load(Ordering::Relaxed)),
-            lifetime_errors: Some(agent.lifetime_errors + agent.error_count.load(Ordering::Relaxed)),
+            lifetime_errors: Some(
+                agent.lifetime_errors + agent.error_count.load(Ordering::Relaxed),
+            ),
         })
     }
 
     /// Record restart metrics on a newly-started agent.
-    pub async fn record_restart(&self, name: &str, reason: &str, prev_restarts: u32, prev_errors: u32) {
+    pub async fn record_restart(
+        &self,
+        name: &str,
+        reason: &str,
+        prev_restarts: u32,
+        prev_errors: u32,
+    ) {
         let mut agents = self.agents.lock().await;
         if let Some(agent) = agents.get_mut(name) {
             agent.total_restarts = prev_restarts + 1;
@@ -422,14 +445,10 @@ impl AgentManager {
 
             // Track dependency port liveness for down→up transition detection.
             // Initialized to true so a cold start doesn't trigger a false bounce.
-            let tracked_ports: std::collections::HashSet<u16> = configs
-                .values()
-                .filter_map(|c| c.depends_on_port)
-                .collect();
-            let mut port_was_up: HashMap<u16, bool> = tracked_ports
-                .iter()
-                .map(|&p| (p, true))
-                .collect();
+            let tracked_ports: std::collections::HashSet<u16> =
+                configs.values().filter_map(|c| c.depends_on_port).collect();
+            let mut port_was_up: HashMap<u16, bool> =
+                tracked_ports.iter().map(|&p| (p, true)).collect();
 
             loop {
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -440,11 +459,9 @@ impl AgentManager {
                     let mut ports_recovered: Vec<u16> = Vec::new();
 
                     for &port in &tracked_ports {
-                        let is_up = crate::health::check_health(
-                            port,
-                            std::time::Duration::from_secs(3),
-                        )
-                        .await;
+                        let is_up =
+                            crate::health::check_health(port, std::time::Duration::from_secs(3))
+                                .await;
                         let was_up = port_was_up.get(&port).copied().unwrap_or(true);
 
                         if is_up && !was_up {
@@ -483,7 +500,14 @@ impl AgentManager {
                                     }
                                     false
                                 })
-                                .map(|(name, agent)| (name.clone(), agent.total_restarts, agent.lifetime_errors + agent.error_count.load(Ordering::Relaxed)))
+                                .map(|(name, agent)| {
+                                    (
+                                        name.clone(),
+                                        agent.total_restarts,
+                                        agent.lifetime_errors
+                                            + agent.error_count.load(Ordering::Relaxed),
+                                    )
+                                })
                                 .collect()
                         };
 
@@ -497,7 +521,14 @@ impl AgentManager {
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 match manager.start(&name, cfg).await {
                                     Ok(info) => {
-                                        manager.record_restart(&name, "port_recovery", prev_restarts, prev_errors).await;
+                                        manager
+                                            .record_restart(
+                                                &name,
+                                                "port_recovery",
+                                                prev_restarts,
+                                                prev_errors,
+                                            )
+                                            .await;
                                         tracing::info!(
                                             agent = %name,
                                             pid = info.pid,
@@ -537,15 +568,21 @@ impl AgentManager {
                                         pid = agent.info.pid,
                                         "agent exited unexpectedly, scheduling restart"
                                     );
-                                    let prev_errors = agent.lifetime_errors + agent.error_count.load(Ordering::Relaxed);
-                                    dead_entries.push((name.clone(), agent.total_restarts, prev_errors));
+                                    let prev_errors = agent.lifetime_errors
+                                        + agent.error_count.load(Ordering::Relaxed);
+                                    dead_entries.push((
+                                        name.clone(),
+                                        agent.total_restarts,
+                                        prev_errors,
+                                    ));
                                 }
                             }
                         }
                     }
 
                     // Remove dead agents from tracking
-                    let dead_names: Vec<String> = dead_entries.iter().map(|(n, _, _)| n.clone()).collect();
+                    let dead_names: Vec<String> =
+                        dead_entries.iter().map(|(n, _, _)| n.clone()).collect();
                     for name in &dead_names {
                         agents.remove(name);
                     }
@@ -589,8 +626,7 @@ impl AgentManager {
                     };
 
                     // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 60s
-                    let backoff_secs =
-                        (1u64 << (crash_count - 1).min(6)).min(MAX_BACKOFF_SECS);
+                    let backoff_secs = (1u64 << (crash_count - 1).min(6)).min(MAX_BACKOFF_SECS);
 
                     tracing::info!(
                         agent = %name,
@@ -604,7 +640,9 @@ impl AgentManager {
                     if let Some(cfg) = configs.get(&name) {
                         match manager.start(&name, cfg).await {
                             Ok(info) => {
-                                manager.record_restart(&name, "crash", prev_restarts, prev_errors).await;
+                                manager
+                                    .record_restart(&name, "crash", prev_restarts, prev_errors)
+                                    .await;
                                 tracing::info!(
                                     agent = %name,
                                     pid = info.pid,
@@ -670,4 +708,225 @@ pub enum AgentError {
 
     #[error("failed to spawn agent '{name}': {error}")]
     SpawnFailed { name: String, error: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_version_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pyproject.toml");
+        std::fs::write(
+            &path,
+            r#"
+[project]
+name = "test-agent"
+version = "1.2.3"
+"#,
+        )
+        .unwrap();
+        assert_eq!(read_version_file(&path), Some("1.2.3".to_string()));
+    }
+
+    #[test]
+    fn test_read_version_poetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pyproject.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tool.poetry]
+name = "test-agent"
+version = "0.4.0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(read_version_file(&path), Some("0.4.0".to_string()));
+    }
+
+    #[test]
+    fn test_read_version_cargo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &path,
+            r#"
+[package]
+name = "rookery"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(read_version_file(&path), Some("0.1.0".to_string()));
+    }
+
+    #[test]
+    fn test_read_version_missing_file() {
+        let path = std::path::PathBuf::from("/tmp/nonexistent_version_file.toml");
+        assert_eq!(read_version_file(&path), None);
+    }
+
+    #[test]
+    fn test_read_version_no_version_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pyproject.toml");
+        std::fs::write(
+            &path,
+            r#"
+[project]
+name = "test-agent"
+"#,
+        )
+        .unwrap();
+        assert_eq!(read_version_file(&path), None);
+    }
+
+    #[tokio::test]
+    async fn test_agent_manager_start_stop() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+        };
+
+        // Start
+        let info = manager.start("test", &config).await.unwrap();
+        assert_eq!(info.name, "test");
+        assert!(info.pid > 0);
+        assert!(manager.is_running("test").await);
+
+        // Stop
+        manager.stop("test").await.unwrap();
+        assert!(!manager.is_running("test").await);
+    }
+
+    #[tokio::test]
+    async fn test_agent_manager_already_running() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+        };
+
+        manager.start("test", &config).await.unwrap();
+        let err = manager.start("test", &config).await.unwrap_err();
+        assert!(matches!(err, AgentError::AlreadyRunning(_)));
+
+        manager.stop("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_manager_get_health() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+        };
+
+        manager.start("test", &config).await.unwrap();
+
+        let health = manager.get_health("test").await.unwrap();
+        assert_eq!(health.name, "test");
+        assert_eq!(health.status, AgentStatus::Running);
+        assert!(health.uptime_secs.unwrap() >= 0);
+        assert_eq!(health.total_restarts, Some(0));
+        assert_eq!(health.error_count, Some(0));
+        assert_eq!(health.lifetime_errors, Some(0));
+
+        // Nonexistent agent
+        assert!(manager.get_health("nope").await.is_none());
+
+        manager.stop("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_manager_remove_tracking() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+        };
+
+        let info = manager.start("test", &config).await.unwrap();
+        let pid = info.pid;
+
+        // Remove tracking — process still runs but manager forgets it
+        manager.remove_tracking("test").await;
+        assert!(!manager.is_running("test").await);
+
+        // Process is still alive
+        assert!(crate::process::is_pid_alive(pid));
+
+        // Clean up
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_manager_record_restart() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+        };
+
+        manager.start("test", &config).await.unwrap();
+        manager.record_restart("test", "crash", 2, 5).await;
+
+        let health = manager.get_health("test").await.unwrap();
+        assert_eq!(health.total_restarts, Some(3));
+        assert_eq!(health.last_restart_reason, Some("crash".to_string()));
+        assert_eq!(health.lifetime_errors, Some(5)); // prev 5 + current 0
+
+        manager.stop("test").await.unwrap();
+    }
 }

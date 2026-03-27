@@ -32,7 +32,10 @@ impl GpuMonitor {
         Ok(Self { nvml })
     }
 
-    pub fn device(&self, index: u32) -> Result<nvml_wrapper::Device<'_>, nvml_wrapper::error::NvmlError> {
+    pub fn device(
+        &self,
+        index: u32,
+    ) -> Result<nvml_wrapper::Device<'_>, nvml_wrapper::error::NvmlError> {
         self.nvml.device_by_index(index)
     }
 
@@ -45,8 +48,8 @@ impl GpuMonitor {
 
             let name = device.name()?;
             let memory = device.memory_info()?;
-            let temp = device
-                .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)?;
+            let temp =
+                device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)?;
             let util = device.utilization_rates()?;
             let power = device.power_usage().unwrap_or(0); // milliwatts
             let power_limit = device.enforced_power_limit().unwrap_or(0);
