@@ -200,6 +200,18 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Cache cargo registry + build artifacts for fast CI
 - [ ] Test matrix: stable + nightly Rust
 
+## vLLM Backend Support
+- [ ] Config: `backend = "vllm"` on profile (vs current implicit `llama-server`)
+- [ ] ProcessManager: support Docker-based backends (docker compose up/down for vLLM)
+- [ ] Profile: vLLM-specific params (gpu-memory-utilization, max-num-seqs, NVFP4_BACKEND)
+- [ ] Health check: adapt for vLLM health endpoint (different from llama-server /health)
+- [ ] Swap: docker compose down + up instead of SIGTERM/start
+- [ ] Dashboard: show backend type (llama.cpp vs vLLM) in status card
+- [ ] Use case: NVFP4 Qwen3.5-27B at ~80 tok/s via vLLM (vs 54 on llama.cpp Q6_K)
+- [ ] A/B testing: run llama.cpp on port 8081 and vLLM on 8000, swap hermes between them
+- [ ] CUDA 13.0 inside Docker container (vLLM nightly) — doesn't conflict with host CUDA 12.8
+- [ ] Blog post: tool calling quality comparison between Q6_K (llama.cpp) vs NVFP4 (vLLM)
+
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
