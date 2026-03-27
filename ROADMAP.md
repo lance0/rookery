@@ -178,6 +178,28 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Restart history timeline (when, why)
 - [ ] Quick actions: "flush state", "reconnect telegram", "view errors"
 
+## Code Quality & Testing
+### Linting
+- [x] `cargo fmt` — enforced across workspace
+- [x] `cargo clippy` — zero warnings (27 fixed)
+- [ ] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
+- [ ] Pre-commit hook: run fmt + clippy before commit
+
+### Test Coverage
+- [x] `rookery-core`: config parsing, state serialization, reconciliation (4 tests)
+- [x] `rookery-engine`: log buffer, model utils, is_pid_alive, version parsing, AgentManager (20 tests)
+- [ ] `rookery-engine`: ProcessManager start/stop/swap (needs mock llama-server)
+- [ ] `rookery-engine`: watchdog behavior (crash restart, backoff, port recovery bounce)
+- [ ] `rookery-daemon`: route handler integration tests (axum test client)
+- [ ] `rookery-daemon`: SSE event stream tests
+- [ ] `rookery-cli`: CLI argument parsing, output formatting
+- [ ] End-to-end: daemon startup → start → swap → agent lifecycle
+
+### CI Pipeline
+- [ ] GitHub Actions workflow: build + test + clippy + fmt on push/PR
+- [ ] Cache cargo registry + build artifacts for fast CI
+- [ ] Test matrix: stable + nightly Rust
+
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)

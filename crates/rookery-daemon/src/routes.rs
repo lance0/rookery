@@ -152,23 +152,21 @@ pub async fn post_start(
     }
 
     // Capacity gate: check VRAM before starting
-    if let Some(ref monitor) = state.gpu_monitor {
-        if let Some(estimated_mb) = estimated_vram_mb {
-            if let Ok(stats) = monitor.stats() {
-                if let Some(gpu) = stats.first() {
-                    let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
-                    if free_mb < estimated_mb as u64 {
-                        return Ok(Json(ActionResponse {
-                            success: false,
-                            message: format!(
-                                "insufficient VRAM: need ~{}MB, only {}MB free ({}MB / {}MB used)",
-                                estimated_mb, free_mb, gpu.vram_used_mb, gpu.vram_total_mb
-                            ),
-                            status: status_from_state(&current),
-                        }));
-                    }
-                }
-            }
+    if let Some(ref monitor) = state.gpu_monitor
+        && let Some(estimated_mb) = estimated_vram_mb
+        && let Ok(stats) = monitor.stats()
+        && let Some(gpu) = stats.first()
+    {
+        let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
+        if free_mb < estimated_mb as u64 {
+            return Ok(Json(ActionResponse {
+                success: false,
+                message: format!(
+                    "insufficient VRAM: need ~{}MB, only {}MB free ({}MB / {}MB used)",
+                    estimated_mb, free_mb, gpu.vram_used_mb, gpu.vram_total_mb
+                ),
+                status: status_from_state(&current),
+            }));
         }
     }
 
@@ -524,15 +522,12 @@ pub async fn get_model_info(
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .send()
         .await
+        && let Ok(data) = resp.json::<serde_json::Value>().await
+        && let Some(models) = data["data"].as_array()
+        && let Some(first) = models.first()
     {
-        if let Ok(data) = resp.json::<serde_json::Value>().await {
-            if let Some(models) = data["data"].as_array() {
-                if let Some(first) = models.first() {
-                    model_id = first["id"].as_str().map(String::from);
-                    owned_by = first["owned_by"].as_str().map(String::from);
-                }
-            }
-        }
+        model_id = first["id"].as_str().map(String::from);
+        owned_by = first["owned_by"].as_str().map(String::from);
     }
 
     // Fetch /props
@@ -612,7 +607,7 @@ pub async fn post_chat(
         .timeout(std::time::Duration::from_secs(60))
         .map(|item| match item {
             Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            Ok(Err(e)) => Err(std::io::Error::other(e)),
             Err(_elapsed) => {
                 tracing::warn!("chat stream timed out (no data for 60s)");
                 Err(std::io::Error::new(
@@ -779,16 +774,16 @@ pub async fn get_bench(
             .await
         {
             Ok(resp) => {
-                if let Ok(data) = resp.json::<serde_json::Value>().await {
-                    if let Some(timings) = data.get("timings") {
-                        tests.push(BenchTest {
-                            name: name.to_string(),
-                            prompt_tokens: timings["prompt_n"].as_u64().unwrap_or(0),
-                            completion_tokens: timings["predicted_n"].as_u64().unwrap_or(0),
-                            pp_tok_s: timings["prompt_per_second"].as_f64().unwrap_or(0.0),
-                            gen_tok_s: timings["predicted_per_second"].as_f64().unwrap_or(0.0),
-                        });
-                    }
+                if let Ok(data) = resp.json::<serde_json::Value>().await
+                    && let Some(timings) = data.get("timings")
+                {
+                    tests.push(BenchTest {
+                        name: name.to_string(),
+                        prompt_tokens: timings["prompt_n"].as_u64().unwrap_or(0),
+                        completion_tokens: timings["predicted_n"].as_u64().unwrap_or(0),
+                        pp_tok_s: timings["prompt_per_second"].as_f64().unwrap_or(0.0),
+                        gen_tok_s: timings["predicted_per_second"].as_f64().unwrap_or(0.0),
+                    });
                 }
             }
             Err(e) => {

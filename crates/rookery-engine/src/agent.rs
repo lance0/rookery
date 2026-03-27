@@ -487,16 +487,15 @@ impl AgentManager {
                             agents
                                 .iter()
                                 .filter(|(name, agent)| {
-                                    if let Some(cfg) = configs.get(*name) {
-                                        if let Some(dep_port) = cfg.depends_on_port {
-                                            if ports_recovered.contains(&dep_port) {
-                                                let uptime = Utc::now()
-                                                    .signed_duration_since(agent.info.started_at)
-                                                    .num_seconds();
-                                                return uptime > BOUNCE_MIN_UPTIME_SECS
-                                                    && !agent.intentional_stop;
-                                            }
-                                        }
+                                    if let Some(cfg) = configs.get(*name)
+                                        && let Some(dep_port) = cfg.depends_on_port
+                                        && ports_recovered.contains(&dep_port)
+                                    {
+                                        let uptime = Utc::now()
+                                            .signed_duration_since(agent.info.started_at)
+                                            .num_seconds();
+                                        return uptime > BOUNCE_MIN_UPTIME_SECS
+                                            && !agent.intentional_stop;
                                     }
                                     false
                                 })
@@ -561,21 +560,21 @@ impl AgentManager {
 
                         if !alive && !agent.intentional_stop {
                             // Check if this agent has restart_on_crash
-                            if let Some(cfg) = configs.get(name) {
-                                if cfg.restart_on_crash {
-                                    tracing::warn!(
-                                        agent = %name,
-                                        pid = agent.info.pid,
-                                        "agent exited unexpectedly, scheduling restart"
-                                    );
-                                    let prev_errors = agent.lifetime_errors
-                                        + agent.error_count.load(Ordering::Relaxed);
-                                    dead_entries.push((
-                                        name.clone(),
-                                        agent.total_restarts,
-                                        prev_errors,
-                                    ));
-                                }
+                            if let Some(cfg) = configs.get(name)
+                                && cfg.restart_on_crash
+                            {
+                                tracing::warn!(
+                                    agent = %name,
+                                    pid = agent.info.pid,
+                                    "agent exited unexpectedly, scheduling restart"
+                                );
+                                let prev_errors = agent.lifetime_errors
+                                    + agent.error_count.load(Ordering::Relaxed);
+                                dead_entries.push((
+                                    name.clone(),
+                                    agent.total_restarts,
+                                    prev_errors,
+                                ));
                             }
                         }
                     }

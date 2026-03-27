@@ -107,12 +107,9 @@ impl ProcessManager {
             .spawn()
             .map_err(Error::Io)?;
 
-        let pid = child.id().ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "failed to get child PID",
-            ))
-        })?;
+        let pid = child
+            .id()
+            .ok_or_else(|| Error::Io(std::io::Error::other("failed to get child PID")))?;
 
         // Protect llama-server from OOM killer (requires CAP_SYS_RESOURCE or root)
         let oom_path = format!("/proc/{pid}/oom_score_adj");

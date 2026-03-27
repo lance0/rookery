@@ -23,7 +23,7 @@ pub async fn get_events(
                     .unwrap_or_default();
                 Ok(Event::default()
                     .event("gpu")
-                    .json_data(&serde_json::json!({ "gpus": stats }))
+                    .json_data(serde_json::json!({ "gpus": stats }))
                     .unwrap())
             });
 

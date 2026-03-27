@@ -160,6 +160,12 @@ pub struct HfClient {
     client: reqwest::Client,
 }
 
+impl Default for HfClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HfClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
@@ -381,7 +387,7 @@ fn extract_quant_label(filename: &str) -> String {
 
     // Try to match known quant patterns (longest first for correct matching)
     let mut sorted_patterns: Vec<&&str> = QUANT_PATTERNS.iter().collect();
-    sorted_patterns.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted_patterns.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     for pattern in sorted_patterns {
         if base.contains(pattern) {

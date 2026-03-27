@@ -97,10 +97,10 @@ impl GpuMonitor {
         if let Ok(stats) = self.stats() {
             for gpu in stats {
                 for proc in gpu.processes {
-                    if proc.name.contains("llama-server") || proc.name.contains("llama_server") {
-                        if tracked_pid != Some(proc.pid) {
-                            orphans.push(proc);
-                        }
+                    if (proc.name.contains("llama-server") || proc.name.contains("llama_server"))
+                        && tracked_pid != Some(proc.pid)
+                    {
+                        orphans.push(proc);
                     }
                 }
             }

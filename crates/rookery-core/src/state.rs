@@ -7,7 +7,9 @@ use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state")]
+#[derive(Default)]
 pub enum ServerState {
+    #[default]
     Stopped,
     Starting {
         profile: String,
@@ -55,15 +57,15 @@ impl ServerState {
     }
 }
 
-impl Default for ServerState {
-    fn default() -> Self {
-        ServerState::Stopped
-    }
-}
-
 /// Persists state to disk so the daemon can reconcile on restart.
 pub struct StatePersistence {
     path: PathBuf,
+}
+
+impl Default for StatePersistence {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatePersistence {
@@ -140,6 +142,12 @@ pub struct AgentState {
 
 pub struct AgentPersistence {
     path: PathBuf,
+}
+
+impl Default for AgentPersistence {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentPersistence {

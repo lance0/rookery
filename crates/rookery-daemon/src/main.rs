@@ -179,32 +179,32 @@ async fn main() {
         // agent uses --replace (like hermes), the new process handles killing
         // the old one via its own PID file. This avoids a race between our
         // stop() SIGTERM and --replace's SIGTERM hitting the same process.
-        for (name, _entry) in &reconciled.agents {
-            if let Some(agent_config) = config.agents.get(name) {
-                if agent_config.restart_on_swap {
-                    tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
-                    // Remove stale tracking without sending SIGTERM — let --replace handle it
-                    agent_manager.remove_tracking(name).await;
-                    match agent_manager.start(name, agent_config).await {
-                        Ok(info) => {
-                            agent_manager
-                                .record_restart(name, "daemon_restart", 0, 0)
-                                .await;
-                            tracing::info!(agent = %name, pid = info.pid, "agent restarted");
-                        }
-                        Err(e) => {
-                            tracing::warn!(agent = %name, error = %e, "agent restart failed on daemon startup, retrying");
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            match agent_manager.start(name, agent_config).await {
-                                Ok(info) => {
-                                    agent_manager
-                                        .record_restart(name, "daemon_restart", 0, 0)
-                                        .await;
-                                    tracing::info!(agent = %name, pid = info.pid, "agent restarted on retry");
-                                }
-                                Err(e) => {
-                                    tracing::error!(agent = %name, error = %e, "agent restart failed after retry")
-                                }
+        for name in reconciled.agents.keys() {
+            if let Some(agent_config) = config.agents.get(name)
+                && agent_config.restart_on_swap
+            {
+                tracing::info!(agent = %name, "bouncing adopted agent for fresh connection");
+                // Remove stale tracking without sending SIGTERM — let --replace handle it
+                agent_manager.remove_tracking(name).await;
+                match agent_manager.start(name, agent_config).await {
+                    Ok(info) => {
+                        agent_manager
+                            .record_restart(name, "daemon_restart", 0, 0)
+                            .await;
+                        tracing::info!(agent = %name, pid = info.pid, "agent restarted");
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent = %name, error = %e, "agent restart failed on daemon startup, retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        match agent_manager.start(name, agent_config).await {
+                            Ok(info) => {
+                                agent_manager
+                                    .record_restart(name, "daemon_restart", 0, 0)
+                                    .await;
+                                tracing::info!(agent = %name, pid = info.pid, "agent restarted on retry");
+                            }
+                            Err(e) => {
+                                tracing::error!(agent = %name, error = %e, "agent restart failed after retry")
                             }
                         }
                     }

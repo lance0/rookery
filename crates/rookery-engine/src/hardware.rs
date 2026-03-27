@@ -176,8 +176,6 @@ fn lookup_bandwidth(name: &str) -> f32 {
         1008.0
     } else if name_lower.contains("4080") {
         717.0
-    } else if name_lower.contains("4070 ti") {
-        504.0
     } else if name_lower.contains("4070") {
         504.0
     } else if name_lower.contains("3090") {
@@ -248,10 +246,10 @@ fn read_ram_total_mb() -> u64 {
         if line.starts_with("MemTotal:") {
             // Format: "MemTotal:       131702396 kB"
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(kb) = parts[1].parse::<u64>() {
-                    return kb / 1024;
-                }
+            if parts.len() >= 2
+                && let Ok(kb) = parts[1].parse::<u64>()
+            {
+                return kb / 1024;
             }
         }
     }
@@ -267,10 +265,10 @@ pub fn read_ram_free_mb() -> u64 {
     for line in content.lines() {
         if line.starts_with("MemAvailable:") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(kb) = parts[1].parse::<u64>() {
-                    return kb / 1024;
-                }
+            if parts.len() >= 2
+                && let Ok(kb) = parts[1].parse::<u64>()
+            {
+                return kb / 1024;
             }
         }
     }

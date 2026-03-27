@@ -206,6 +206,7 @@ struct AgentsResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct AgentInfo {
     name: String,
     pid: u32,
@@ -447,7 +448,7 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
     }
 
     println!("\nprofiles:");
-    for (name, _profile) in &config.profiles {
+    for name in config.profiles.keys() {
         let args = config.resolve_command_line(name)?;
         let default_marker = if name == &config.default_profile {
             " (default)"
@@ -701,10 +702,10 @@ async fn cmd_logs(
             for line in message.lines() {
                 if let Some(event_type) = line.strip_prefix("event: ") {
                     current_event = event_type.to_string();
-                } else if let Some(data) = line.strip_prefix("data: ") {
-                    if current_event == "log" {
-                        println!("{data}");
-                    }
+                } else if let Some(data) = line.strip_prefix("data: ")
+                    && current_event == "log"
+                {
+                    println!("{data}");
                 }
             }
         }
