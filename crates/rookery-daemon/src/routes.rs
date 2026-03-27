@@ -283,8 +283,9 @@ pub async fn post_swap(
                 for (name, agent_config) in &config.agents {
                     if agent_config.restart_on_swap && state.agent_manager.is_running(name).await {
                         // Capture prev restarts before stop
-                        let prev = state.agent_manager.get_health(name).await
-                            .and_then(|h| h.total_restarts).unwrap_or(0);
+                        let health = state.agent_manager.get_health(name).await;
+                        let prev_restarts = health.as_ref().and_then(|h| h.total_restarts).unwrap_or(0);
+                        let prev_errors = health.as_ref().and_then(|h| h.lifetime_errors).unwrap_or(0);
                         tracing::info!(agent = %name, "restarting agent after swap");
                         let _ = state.agent_manager.stop(name).await;
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -295,7 +296,7 @@ pub async fn post_swap(
                                 tracing::error!(agent = %name, error = %e, "agent restart failed after swap retry");
                             }
                         }
-                        state.agent_manager.record_restart(name, "swap", prev).await;
+                        state.agent_manager.record_restart(name, "swap", prev_restarts, prev_errors).await;
                     }
                 }
             }

@@ -161,7 +161,7 @@ async fn main() {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     match agent_manager.start(name, agent_config).await {
                         Ok(info) => {
-                            agent_manager.record_restart(name, "daemon_restart", 0).await;
+                            agent_manager.record_restart(name, "daemon_restart", 0, 0).await;
                             tracing::info!(agent = %name, pid = info.pid, "agent restarted");
                         }
                         Err(e) => {
@@ -169,7 +169,7 @@ async fn main() {
                             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             match agent_manager.start(name, agent_config).await {
                                 Ok(info) => {
-                                    agent_manager.record_restart(name, "daemon_restart", 0).await;
+                                    agent_manager.record_restart(name, "daemon_restart", 0, 0).await;
                                     tracing::info!(agent = %name, pid = info.pid, "agent restarted on retry");
                                 }
                                 Err(e) => tracing::error!(agent = %name, error = %e, "agent restart failed after retry"),

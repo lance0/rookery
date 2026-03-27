@@ -67,6 +67,8 @@ pub struct AgentInfo {
     pub total_restarts: Option<u32>,
     #[serde(default)]
     pub error_count: Option<u32>,
+    #[serde(default)]
+    pub lifetime_errors: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -428,7 +430,7 @@ fn App() -> impl IntoView {
                     }.into_any(),
                     Tab::Bench => view! {
                         <div class="section">
-                            <BenchPanel status=status />
+                            <BenchPanel status=status set_toasts=set_toasts />
                         </div>
                     }.into_any(),
                     Tab::Logs => view! {

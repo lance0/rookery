@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use crate::{ServerStatus, api};
+use crate::components::toast::{Toast, ToastKind, show_toast};
 
 #[derive(Debug, Clone, Default)]
 struct BenchResults {
@@ -17,13 +18,17 @@ struct BenchTest {
 }
 
 #[component]
-pub fn BenchPanel(status: ReadSignal<ServerStatus>) -> impl IntoView {
+pub fn BenchPanel(
+    status: ReadSignal<ServerStatus>,
+    set_toasts: WriteSignal<Vec<Toast>>,
+) -> impl IntoView {
     let (results, set_results) = signal(BenchResults::default());
 
     let is_running = move || status.get().state == "running";
 
     let on_bench = move |_| {
         set_results.update(|r| r.loading = true);
+        let st = set_toasts.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match api::run_bench().await {
                 Ok(data) => {
@@ -31,8 +36,9 @@ pub fn BenchPanel(status: ReadSignal<ServerStatus>) -> impl IntoView {
                         serde_json::from_value(data["tests"].clone()).unwrap_or_default();
                     set_results.set(BenchResults { tests, loading: false });
                 }
-                Err(_) => {
+                Err(e) => {
                     set_results.update(|r| r.loading = false);
+                    show_toast(st, format!("bench failed: {e}"), ToastKind::Error);
                 }
             }
         });

@@ -511,3 +511,14 @@ body {
 }
 .conn-dot.connected { background: var(--green); }
 .conn-dot.disconnected { background: var(--red); }
+
+/* Mobile */
+@media (max-width: 768px) {
+    .app { padding: 8px; }
+    .header { flex-wrap: wrap; }
+    .header h1 { font-size: 13px; }
+    .tab-bar { overflow-x: auto; flex-wrap: nowrap; }
+    .tab { padding: 6px 10px; font-size: 10px; white-space: nowrap; }
+    .chat-container { height: 350px; }
+    .bench-table { display: block; overflow-x: auto; }
+}
