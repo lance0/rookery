@@ -201,16 +201,44 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Test matrix: stable + nightly Rust
 
 ## vLLM Backend Support
-- [ ] Config: `backend = "vllm"` on profile (vs current implicit `llama-server`)
-- [ ] ProcessManager: support Docker-based backends (docker compose up/down for vLLM)
-- [ ] Profile: vLLM-specific params (gpu-memory-utilization, max-num-seqs, NVFP4_BACKEND)
-- [ ] Health check: adapt for vLLM health endpoint (different from llama-server /health)
-- [ ] Swap: docker compose down + up instead of SIGTERM/start
-- [ ] Dashboard: show backend type (llama.cpp vs vLLM) in status card
-- [ ] Use case: NVFP4 Qwen3.5-27B at ~80 tok/s via vLLM (vs 54 on llama.cpp Q6_K)
-- [ ] A/B testing: run llama.cpp on port 8081 and vLLM on 8000, swap hermes between them
-- [ ] CUDA 13.0 inside Docker container (vLLM nightly) — doesn't conflict with host CUDA 12.8
-- [ ] Blog post: tool calling quality comparison between Q6_K (llama.cpp) vs NVFP4 (vLLM)
+
+### Architecture
+- [ ] Backend trait: abstract ProcessManager behind `InferenceBackend` trait (start, stop, health, swap)
+- [ ] `LlamaServerBackend`: current implementation wrapped in trait (zero behavior change)
+- [ ] `VllmBackend`: Docker-based backend (docker compose up/down)
+- [ ] Config: `backend = "llama-server" | "vllm"` on profile (default: llama-server)
+- [ ] Backend selection at startup based on profile config
+
+### vLLM-Specific
+- [ ] Profile params: `docker_image`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `nvfp4_backend`
+- [ ] Docker compose template generation from profile config
+- [ ] Health check: `/health` endpoint (same as llama-server, vLLM supports it)
+- [ ] Swap: docker compose down + up (with drain period like llama-server)
+- [ ] CUDA 13.0 inside container — doesn't conflict with host CUDA 12.8
+- [ ] Log capture: docker compose logs -f piped into LogBuffer
+- [ ] Model download: HuggingFace models auto-downloaded by vLLM (no pre-download needed)
+
+### Quantization Profiles
+- [ ] NVFP4 profile: Qwen3.5-27B-NVFP4 at ~80 tok/s gen, 229K context
+- [ ] TurboQuant KV profile: AWQ-4bit weights + turboquant35 KV cache at 262K context
+- [ ] Profile comparison: `rookery bench --profile qwen_dense --profile qwen_nvfp4` side-by-side
+
+### Dashboard — Multi-Backend
+- [ ] Status card: show backend type (llama.cpp vs vLLM) + Docker container status
+- [ ] Profile switcher: visual indicator for backend type per profile
+- [ ] Backend-specific stats: vLLM shows batch utilization, llama.cpp shows slot status
+- [ ] Log viewer: unified log stream from both backend types
+
+### CLI
+- [ ] `rookery start --backend vllm` override
+- [ ] `rookery status` shows backend type
+- [ ] `rookery bench` works against any OpenAI-compatible endpoint (already does)
+
+### A/B Testing & Blog
+- [ ] Dual-port mode: llama.cpp on 8081 + vLLM on 8000, swap hermes between them
+- [ ] Tool calling quality benchmark: BFCL-V4 on Q6_K (llama.cpp) vs NVFP4 (vLLM)
+- [ ] Blog post: "Tool Calling Quality Across Quantization Formats on RTX 5090"
+- [ ] Hermes real-world comparison: same conversations on both backends, measure response quality
 
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
