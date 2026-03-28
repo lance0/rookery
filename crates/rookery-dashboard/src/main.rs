@@ -15,6 +15,8 @@ pub struct ServerStatus {
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub uptime_secs: Option<i64>,
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -48,10 +50,14 @@ pub struct ProfileInfo {
     pub name: String,
     pub model: String,
     pub port: u16,
-    pub ctx_size: u32,
-    pub reasoning_budget: i32,
+    #[serde(default)]
+    pub ctx_size: Option<u32>,
+    #[serde(default)]
+    pub reasoning_budget: Option<i32>,
     pub default: bool,
     pub estimated_vram_mb: Option<u32>,
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,7 +411,7 @@ fn App() -> impl IntoView {
                             </div>
                             <div class="grid">
                                 <ModelInfo model_info=model_info />
-                                <ServerStats stats=server_stats />
+                                <ServerStats stats=server_stats status=status />
                             </div>
                             <div class="grid">
                                 <AgentPanel agents=agents set_agents=set_agents set_toasts=set_toasts />

@@ -23,13 +23,20 @@ pub fn ProfileSwitcher(
                         let name = p.name.clone();
                         let is_active = active.as_ref() == Some(&name);
                         let card_class = if is_active { "profile-card active" } else { "profile-card" };
-                        let ctx = if p.ctx_size >= 1024 {
-                            format!("{}K", p.ctx_size / 1024)
+                        let ctx_str = p.ctx_size.map(|c| {
+                            if c >= 1024 {
+                                format!("{}K", c / 1024)
+                            } else {
+                                c.to_string()
+                            }
+                        });
+                        let thinking = if p.reasoning_budget.unwrap_or(0) != 0 { " thinking" } else { "" };
+                        let backend_label = p.backend.as_deref().unwrap_or("llama-server");
+                        let meta = if let Some(ctx) = ctx_str {
+                            format!("{}, {ctx}{thinking}, {backend_label}", p.model)
                         } else {
-                            p.ctx_size.to_string()
+                            format!("{}, {backend_label}", p.model)
                         };
-                        let thinking = if p.reasoning_budget != 0 { " thinking" } else { "" };
-                        let meta = format!("{}, {ctx}{thinking}", p.model);
                         let default_marker = if p.default { " *" } else { "" };
 
                         let click_name = name.clone();

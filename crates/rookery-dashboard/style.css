@@ -154,6 +154,7 @@ body {
 .badge.stopped { color: var(--red); border-color: var(--red); }
 .badge.starting, .badge.stopping, .badge.swapping { color: var(--amber); border-color: var(--amber); }
 .badge.failed { color: var(--red); border-color: var(--red); }
+.badge.backend { color: var(--dim); border-color: var(--border); margin-left: 6px; font-weight: 500; font-size: 10px; }
 
 /* Gauge */
 .gauge { margin: 8px 0; }

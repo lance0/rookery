@@ -17,6 +17,21 @@ pub fn StatusCard(
 
     let state_text = move || status.get().state.clone();
     let profile_text = move || status.get().profile.clone().unwrap_or_else(|| "—".into());
+
+    let backend_badge = move || {
+        let s = status.get();
+        if s.state != "running" {
+            return None;
+        }
+        s.backend.as_ref().map(|b| {
+            let label = match b.as_str() {
+                "vllm" => "vLLM",
+                "llama-server" => "llama.cpp",
+                other => other,
+            };
+            label.to_string()
+        })
+    };
     let pid_port = move || {
         let s = status.get();
         match (s.pid, s.port) {
@@ -73,7 +88,12 @@ pub fn StatusCard(
             </div>
             <div class="stat">
                 <div class="stat-label">"Profile"</div>
-                <div class="stat-value">{profile_text}</div>
+                <div class="stat-value">
+                    {profile_text}
+                    {move || backend_badge().map(|label| view! {
+                        <span class="badge backend">{label}</span>
+                    })}
+                </div>
             </div>
             <div class="stat">
                 <div class="stat-label">"PID / Port"</div>
