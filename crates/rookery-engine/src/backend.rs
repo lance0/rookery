@@ -2114,4 +2114,394 @@ mod tests {
             handle.abort();
         }
     }
+
+    // ── Integration tests (env-gated behind ROOKERY_INTEGRATION=1) ────
+    //
+    // These tests perform real Docker operations and require:
+    // - Docker daemon running
+    // - NVIDIA Container Toolkit installed (nvidia-docker runtime)
+    // - A vLLM Docker image available (pulled beforehand)
+    //
+    // Run with: ROOKERY_INTEGRATION=1 cargo test --workspace
+    // Without the env var, all integration tests are skipped gracefully.
+
+    /// Check if integration tests should run. Returns true only when
+    /// ROOKERY_INTEGRATION=1 is set in the environment.
+    fn integration_enabled() -> bool {
+        std::env::var("ROOKERY_INTEGRATION")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
+    /// Build a test Config + Profile for vLLM integration tests.
+    ///
+    /// Uses a lightweight vLLM image and a small model to minimize
+    /// resource requirements. The caller can override fields as needed.
+    fn integration_test_config(
+        _compose_path: &std::path::Path,
+    ) -> (
+        rookery_core::config::Config,
+        String, // profile name
+    ) {
+        use rookery_core::config::{Config, Model, Profile, VllmConfig};
+        use std::collections::HashMap;
+
+        // Use the standard vLLM OpenAI image — the actual image used must
+        // be pre-pulled in the test environment. We use a small model
+        // (facebook/opt-125m) that fits in minimal GPU memory.
+        let config = Config {
+            llama_server: PathBuf::new(),
+            default_profile: "integration_vllm".into(),
+            listen: "127.0.0.1:19876".parse().unwrap(),
+            models: HashMap::from([(
+                "opt_125m".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("facebook/opt-125m".into()),
+                    file: None,
+                    path: None,
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "integration_vllm".into(),
+                Profile {
+                    model: "opt_125m".into(),
+                    port: 19876,
+                    llama_server: None,
+                    vllm: Some(VllmConfig {
+                        docker_image: "vllm/vllm-openai:latest".into(),
+                        gpu_memory_utilization: 0.3,
+                        max_num_seqs: Some(2),
+                        max_num_batched_tokens: None,
+                        max_model_len: Some(512),
+                        quantization: None,
+                        tool_call_parser: None,
+                        kv_cache_dtype: None,
+                        extra_args: vec![],
+                    }),
+                    ctx_size: 4096,
+                    threads: 4,
+                    threads_batch: 24,
+                    batch_size: 4096,
+                    ubatch_size: 1024,
+                    gpu_layers: -1,
+                    gpu_index: None,
+                    cache_type_k: "q8_0".into(),
+                    cache_type_v: "q8_0".into(),
+                    flash_attention: true,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        (config, "integration_vllm".to_string())
+    }
+
+    // === Integration: Start VllmBackend, verify container starts and health passes ===
+    //
+    // Covers VAL-CROSS-006: Start vLLM profile end-to-end.
+    // Tests the full start lifecycle: compose generation → docker compose up -d →
+    // health check → Running state with BackendType::Vllm and container_id.
+    #[tokio::test]
+    async fn test_integration_vllm_start_and_health() {
+        if !integration_enabled() {
+            eprintln!("SKIPPED: ROOKERY_INTEGRATION=1 not set");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let compose_path = dir.path().join("vllm-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(1000));
+        let backend = VllmBackend::new(compose_path.clone(), log_buffer);
+
+        let (config, profile) = integration_test_config(&compose_path);
+
+        // Start the backend — this writes compose, runs docker compose up -d,
+        // polls health endpoint with exponential backoff
+        let result = backend.start(&config, &profile).await;
+        assert!(
+            result.is_ok(),
+            "vLLM start should succeed: {:?}",
+            result.err()
+        );
+
+        let info = result.unwrap();
+
+        // Verify BackendInfo fields
+        assert_eq!(info.backend_type, BackendType::Vllm);
+        assert!(
+            info.container_id.is_some(),
+            "container_id should be set after start"
+        );
+        assert_eq!(info.pid, None, "pid should be None for vLLM container");
+        assert_eq!(info.port, 19876);
+        assert_eq!(info.profile, "integration_vllm");
+
+        // Verify is_running() returns true
+        assert!(
+            backend.is_running().await,
+            "should be running after successful start"
+        );
+
+        // Verify process_info() returns the backend info
+        let pinfo = backend.process_info().await;
+        assert!(pinfo.is_some(), "process_info should be Some after start");
+        let pinfo = pinfo.unwrap();
+        assert_eq!(pinfo.backend_type, BackendType::Vllm);
+        assert_eq!(pinfo.container_id, info.container_id);
+
+        // Verify to_server_state() returns Running with Vllm type
+        let state = backend.to_server_state().await;
+        match &state {
+            ServerState::Running {
+                backend_type,
+                container_id,
+                profile: p,
+                port,
+                ..
+            } => {
+                assert_eq!(*backend_type, BackendType::Vllm);
+                assert!(container_id.is_some());
+                assert_eq!(p, "integration_vllm");
+                assert_eq!(*port, 19876);
+            }
+            other => panic!("expected Running state, got: {other:?}"),
+        }
+
+        // Verify compose file was written
+        assert!(compose_path.exists(), "compose file should exist");
+
+        // Clean up: stop the container
+        backend.stop().await.expect("stop should succeed");
+    }
+
+    // === Integration: Stop VllmBackend, verify container is removed ===
+    //
+    // Covers VAL-CROSS-009: Graceful shutdown cleans up vLLM container.
+    // Tests that after stop(), the container is fully removed and state is cleared.
+    #[tokio::test]
+    async fn test_integration_vllm_stop_removes_container() {
+        if !integration_enabled() {
+            eprintln!("SKIPPED: ROOKERY_INTEGRATION=1 not set");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let compose_path = dir.path().join("vllm-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(1000));
+        let backend = VllmBackend::new(compose_path.clone(), log_buffer);
+
+        let (config, profile) = integration_test_config(&compose_path);
+
+        // Start first
+        let start_result = backend.start(&config, &profile).await;
+        assert!(
+            start_result.is_ok(),
+            "start should succeed: {:?}",
+            start_result.err()
+        );
+
+        let container_id = start_result.unwrap().container_id.clone();
+        assert!(container_id.is_some(), "should have container_id");
+
+        // Verify running before stop
+        assert!(backend.is_running().await, "should be running before stop");
+
+        // Stop the backend
+        let stop_result = backend.stop().await;
+        assert!(
+            stop_result.is_ok(),
+            "stop should succeed: {:?}",
+            stop_result.err()
+        );
+
+        // Verify state is cleared
+        assert!(
+            !backend.is_running().await,
+            "should not be running after stop"
+        );
+        assert!(
+            backend.process_info().await.is_none(),
+            "process_info should be None after stop"
+        );
+        assert!(
+            backend.container_id.lock().await.is_none(),
+            "container_id should be cleared after stop"
+        );
+
+        // Verify to_server_state returns Stopped
+        let state = backend.to_server_state().await;
+        assert!(
+            matches!(state, ServerState::Stopped),
+            "state should be Stopped after stop, got: {state:?}"
+        );
+
+        // Verify the container is actually removed via docker compose ps
+        // (should return empty output since docker compose down was called)
+        let ps_result = backend.docker_compose_cmd(&["ps", "-q"]).await;
+        match ps_result {
+            Ok(output) => assert!(
+                output.trim().is_empty(),
+                "no containers should be running after stop"
+            ),
+            Err(_) => {
+                // docker compose ps may fail if compose project was fully cleaned up
+                // — this is acceptable
+            }
+        }
+    }
+
+    // === Integration: is_running() returns correct state through lifecycle ===
+    //
+    // Tests that is_running() accurately reflects container state at each
+    // point in the lifecycle: idle → started → stopped.
+    #[tokio::test]
+    async fn test_integration_vllm_is_running_lifecycle() {
+        if !integration_enabled() {
+            eprintln!("SKIPPED: ROOKERY_INTEGRATION=1 not set");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let compose_path = dir.path().join("vllm-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(1000));
+        let backend = VllmBackend::new(compose_path.clone(), log_buffer);
+
+        let (config, profile) = integration_test_config(&compose_path);
+
+        // Phase 1: Idle — not running
+        assert!(
+            !backend.is_running().await,
+            "should not be running when idle"
+        );
+
+        // Phase 2: After start — running
+        backend
+            .start(&config, &profile)
+            .await
+            .expect("start should succeed");
+        assert!(backend.is_running().await, "should be running after start");
+
+        // Phase 3: After stop — not running
+        backend.stop().await.expect("stop should succeed");
+        assert!(
+            !backend.is_running().await,
+            "should not be running after stop"
+        );
+    }
+
+    // === Integration: Orphan adoption — start, create fresh backend, adopt, verify ===
+    //
+    // Covers VAL-CROSS-008: Daemon restart recovery with vLLM container.
+    // Simulates the daemon restart scenario:
+    // 1. Start a vLLM container
+    // 2. Create a FRESH VllmBackend (simulating daemon restart)
+    // 3. Adopt the running container by its container ID
+    // 4. Verify is_running() returns true on the fresh backend
+    // 5. Verify stop() on the adopted backend cleans up the container
+    #[tokio::test]
+    async fn test_integration_vllm_orphan_adoption() {
+        if !integration_enabled() {
+            eprintln!("SKIPPED: ROOKERY_INTEGRATION=1 not set");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let compose_path = dir.path().join("vllm-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(1000));
+
+        let (config, profile) = integration_test_config(&compose_path);
+
+        // Phase 1: Start a container with the first backend instance
+        let backend1 = VllmBackend::new(compose_path.clone(), log_buffer.clone());
+        let start_info = backend1
+            .start(&config, &profile)
+            .await
+            .expect("start should succeed");
+
+        let container_id = start_info
+            .container_id
+            .clone()
+            .expect("should have container_id");
+        assert!(
+            backend1.is_running().await,
+            "backend1 should be running after start"
+        );
+
+        // Phase 2: Create a FRESH backend (simulating daemon restart)
+        // The new backend knows the compose file path but has no internal state
+        let backend2 = VllmBackend::new(compose_path.clone(), log_buffer.clone());
+        assert!(
+            !backend2.is_running().await,
+            "fresh backend2 should not be running (no container_id set)"
+        );
+
+        // Phase 3: Adopt the running container by its BackendInfo
+        let adopt_info = BackendInfo {
+            pid: None,
+            container_id: Some(container_id.clone()),
+            port: start_info.port,
+            profile: start_info.profile.clone(),
+            started_at: start_info.started_at,
+            backend_type: BackendType::Vllm,
+            command_line: start_info.command_line.clone(),
+            exe_path: None,
+        };
+
+        let adopt_result = backend2.adopt(adopt_info).await;
+        assert!(
+            adopt_result.is_ok(),
+            "adopt should succeed for running container: {:?}",
+            adopt_result.err()
+        );
+
+        // Phase 4: Verify is_running() returns true on the adopted backend
+        assert!(
+            backend2.is_running().await,
+            "backend2 should be running after adopting a live container"
+        );
+
+        // Verify process_info matches the adopted info
+        let adopted_info = backend2
+            .process_info()
+            .await
+            .expect("should have process_info after adopt");
+        assert_eq!(
+            adopted_info.container_id.as_deref(),
+            Some(container_id.as_str()),
+            "adopted container_id should match"
+        );
+        assert_eq!(adopted_info.backend_type, BackendType::Vllm);
+        assert_eq!(adopted_info.port, 19876);
+
+        // Phase 5: Stop from the adopted backend — should clean up the container
+        backend2
+            .stop()
+            .await
+            .expect("stop on adopted backend should succeed");
+        assert!(
+            !backend2.is_running().await,
+            "should not be running after stop on adopted backend"
+        );
+
+        // Verify the container is actually gone
+        let ps_result = backend2.docker_compose_cmd(&["ps", "-q"]).await;
+        match ps_result {
+            Ok(output) => assert!(
+                output.trim().is_empty(),
+                "container should be removed after stop"
+            ),
+            Err(_) => {
+                // Acceptable — compose project fully cleaned up
+            }
+        }
+    }
 }
