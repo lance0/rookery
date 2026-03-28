@@ -1,0 +1,39 @@
+{
+  "featureId": "llama-server-backend-impl",
+  "reviewedAt": "2026-03-28T14:28:00Z",
+  "commitId": "cde26ef",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The wrapper largely delegates correctly to ProcessManager, but two blocking issues remain: factory dispatch for vLLM is a panic path (not a backend object) and adopt() can synthesize PID 0 from missing data, which is unsafe.",
+    "issues": [
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 196,
+        "severity": "blocking",
+        "description": "create_backend() uses unimplemented!() for BackendType::Vllm instead of returning a backend implementation. This does not satisfy VAL-TRAIT-010 in the validation contract (vllm profile should produce VllmBackend) and can crash the daemon when a vLLM profile is selected."
+      },
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 132,
+        "severity": "blocking",
+        "description": "backend_info_to_process_info() defaults missing pid to 0. If adopted state reaches stop() via ProcessManager's orphan-PID path, kill(0, SIGTERM/SIGKILL) may target the current process group. adopt() should reject missing PID for llama-server instead of synthesizing 0."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Feature scope and validation contract disagree on VAL-TRAIT-010 expectations.",
+      "evidence": "features.json for llama-server-backend-impl says VllmBackend will be added later, but validation-contract.md (VAL-TRAIT-010) requires a vllm profile to produce VllmBackend."
+    },
+    {
+      "area": "skills",
+      "observation": "rust-backend skill prescribes TDD (add failing tests first), but transcript flow implemented production code before adding/running tests.",
+      "evidence": "Transcript skeleton shows backend implementation edits occurred before test additions and before the first post-change cargo test run, while .factory/skills/rust-backend/SKILL.md step 4 requires failing tests first."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: LlamaServerBackend delegation is mostly correct, but factory vLLM dispatch is still a panic path and adopt conversion allows unsafe PID=0 fallback."
+}

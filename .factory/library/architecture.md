@@ -164,7 +164,7 @@ gpu_memory_utilization = 0.90
 max_model_len = 32768
 ```
 
-Common fields (`model`, `port`) live on the profile. Backend-specific tuning lives in the sub-table. A profile has exactly one sub-table — having both or neither is a config validation error.
+Common fields (`model`, `port`) live on the profile. Backend-specific tuning lives in the sub-table. A profile may define exactly one backend sub-table; defining both is a validation error, while defining neither falls back to legacy flat llama-server compatibility.
 
 ## vLLM Backend Lifecycle
 

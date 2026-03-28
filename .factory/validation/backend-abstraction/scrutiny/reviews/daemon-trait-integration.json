@@ -1,0 +1,51 @@
+{
+  "featureId": "daemon-trait-integration",
+  "reviewedAt": "2026-03-28T14:28:56Z",
+  "commitId": "2b07977a7c40a79b5e789ed36c3b37c2aac9bde3",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Trait integration is mostly in place, but the refactor introduces behavior regressions in status/swap handling that violate zero-behavior-change and validation contract requirements.",
+    "issues": [
+      {
+        "file": "crates/rookery-daemon/src/routes.rs",
+        "line": 16,
+        "severity": "blocking",
+        "description": "`StatusResponse.backend` is marked with `#[serde(skip_serializing_if = \"Option::is_none\")]`, so `/api/status` omits `backend` when stopped instead of returning `\"backend\": null` as required by VAL-API-001 and feature expectedBehavior."
+      },
+      {
+        "file": "crates/rookery-daemon/src/routes.rs",
+        "line": 1194,
+        "severity": "blocking",
+        "description": "`status_from_state` collapses `Starting`/`Stopping` into generic `\"transitioning\"`. Since `get_status` now directly returns `status_from_state` (line 20), `/api/status` no longer preserves prior `starting`/`stopping` states and uptime/profile data (regression vs pre-refactor behavior)."
+      },
+      {
+        "file": "crates/rookery-daemon/src/routes.rs",
+        "line": 254,
+        "severity": "blocking",
+        "description": "`post_swap` logs \"Set drain mode\" but never sets any drain flag before the 5s drain sleep; consequently `post_chat` drain guard at line 592 will not return 503 during swap drain. This breaks swap behavior preservation (`drain -> stop -> start` with request rejection during drain)."
+      },
+      {
+        "file": "crates/rookery-daemon/src/main.rs",
+        "line": 303,
+        "severity": "non_blocking",
+        "description": "Inference canary subscribes to `subscribe_errors()` once from the initial backend. After backend replacement in swap (`routes.rs` line 281), this receiver is stale and immediate CUDA-error-triggered canary checks from the new backend are lost (periodic 60s canary still runs)."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `rust-backend` skill mandates 'Write Failing Tests First', but this pure-refactor milestone expects behavior-preserving changes with existing tests unchanged; the worker followed intent but not literal step, and handoff requested skill adjustment.",
+      "evidence": "handoffs/2026-03-28T14-25-00-962Z__daemon-trait-integration__8930a2a8-5056-4e45-a43d-f49bf3c321f7.json -> handoff.skillFeedback.suggestedChanges[0]"
+    },
+    {
+      "area": "conventions",
+      "observation": "Validation contract expects API/SSE behavior assertions (e.g., VAL-API-001, VAL-SSE-001), but daemon crate currently has no in-crate tests, creating a coverage gap for API-regression-prone refactors.",
+      "evidence": "validation-contract.md (VAL-API-001/VAL-SSE-001) + `crates/rookery-daemon/src` contains no `#[cfg(test)]` blocks (grep result: no matches); worker handoff reports '0 daemon/cli tests' under cargo test results."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: the refactor correctly routes most daemon logic through `InferenceBackend`, but it introduced three blocking behavior regressions (`/api/status` backend null omission, `/api/status` state-shape regression for starting/stopping, and missing active drain mode during swap)."
+}

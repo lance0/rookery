@@ -1,0 +1,39 @@
+{
+  "featureId": "config-refactor-profile-subtables",
+  "reviewedAt": "2026-03-28T14:28:46Z",
+  "commitId": "947e572ee9c884450eb54a65874a752efb424584",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The refactor substantially implements backend-specific profile sub-tables and backward compatibility, but two blocking mismatches remain against the backend-abstraction validation contract: llama-server binary validation can be bypassed for llama profiles when the path is omitted, and vLLM command resolution does not include docker image information required by VAL-CFG-010.",
+    "issues": [
+      {
+        "file": "crates/rookery-core/src/config.rs",
+        "line": 509,
+        "severity": "blocking",
+        "description": "Validation for llama-server binary existence is gated by `!self.llama_server.as_os_str().is_empty()`. If a config has llama-server profiles but omits `llama_server` (empty PathBuf via serde default), validation passes instead of failing, which violates VAL-CFG-014's requirement that llama-server profiles require a valid binary path."
+      },
+      {
+        "file": "crates/rookery-core/src/config.rs",
+        "line": 645,
+        "severity": "blocking",
+        "description": "`resolve_vllm_command_line()` builds vLLM flags (`--model`, `--gpu-memory-utilization`, etc.) but never includes `vllm.docker_image`. The validation contract's VAL-CFG-010 requires Docker-based command output containing the image as part of the resolved vLLM command configuration."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `rust-backend` skill requires fail-first TDD, but this worker flow implemented major code edits before any failing-test cycle was shown.",
+      "evidence": ".factory/skills/rust-backend/SKILL.md:65 and :77 require adding failing tests first; transcript skeleton for workerSessionId d3eec6fa-770d-40bb-885d-567f55dc8197 shows \"Now let me implement the major refactoring of config.rs\" and large file rewrites before the first post-edit test run (\"Now let me try to compile and run the tests\")."
+    },
+    {
+      "area": "conventions",
+      "observation": "Shared architecture guidance conflicts with contract requirements on legacy flat profiles.",
+      "evidence": ".factory/library/architecture.md:167 states profiles with neither backend sub-table are a validation error, but validation contract VAL-CFG-003 (/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/validation-contract.md:15-16) explicitly requires legacy flat profiles (no sub-table) to parse as llama-server."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed feature config-refactor-profile-subtables using the handoff, commit diff, transcript skeleton, skill, and validation contract. Marked as fail due to two blocking contract mismatches in `crates/rookery-core/src/config.rs` (llama binary validation bypass and missing docker image in vLLM command resolution)."
+}
