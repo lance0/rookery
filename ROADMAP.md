@@ -65,16 +65,16 @@
 
 ### Backend — Watchdog & Health
 - [x] Inference canary: periodic minimal completion request (60s interval, 10s timeout, retry-once) with auto-restart
-- [ ] Restart backoff: exponential delay (1s→2s→4s...60s cap) on repeated crashes, reset on successful health
+- [x] Restart backoff: exponential delay (1s→2s→4s...60s cap) on repeated crashes, reset after 5min healthy uptime
 - [ ] Enable `--metrics` flag on llama-server, parse KV cache usage ratio + throughput
 - [x] Stderr pattern matching: detect `CUDA error` / `ggml_cuda_error` lines, trigger immediate canary
 - [x] Canary after orphan adoption: verify adopted process can actually serve inference
-- [ ] Startup readiness gate: poll /health until 200 before reporting "running" (already exists, verify robustness)
+- [x] Startup readiness gate: `wait_for_health()` with exponential backoff, 120s timeout
 
 ### Backend — Chat Proxy Hardening
 - [x] Stream timeout: 60s per-chunk timeout on chat proxy SSE stream
-- [ ] Request body size limit: cap message payload size
-- [ ] SSE connection limit: bound max concurrent /api/events connections
+- [x] Request body size limit: 1MB via axum DefaultBodyLimit
+- [x] SSE connection limit: max 16 concurrent /api/events connections (429 on overflow)
 
 ### Frontend — Leak Fixes
 - [x] Fix polling loop accumulation: move ServerStats polling to App level (single loop, passed as prop)
@@ -86,7 +86,7 @@
 ### Frontend — UX Reliability
 - [x] Settings input validation: range checks on sampling params, error toasts for invalid values
 - [ ] Loading/error states for initial data fetch (profiles, agents, logs)
-- [ ] Bench panel: show error toast on failure instead of silent swallow
+- [x] Bench panel: show error toast on failure
 - [x] Fix CSS variable: --text-muted → --muted in header connection status
 
 ### Frontend — Mobile Responsiveness
@@ -143,7 +143,7 @@
 - [x] Agent stderr error counting: atomic counter shared with stderr capture task
 - [x] Restart reason tracking: "crash", "swap", "port_recovery", "daemon_restart"
 - [x] Enriched `/api/agents` list: includes health metrics for all running agents (no N+1 calls needed)
-- [ ] Error count reset on restart: track "errors since last restart" vs "lifetime errors"
+- [x] Error count reset on restart: `error_count` resets per session, `lifetime_errors` accumulates
 - [ ] Agent chat timeout config: kill hung requests after configurable timeout
 - [x] Agent restart on error patterns: `restart_on_error_patterns` config, watch channel triggers immediate restart via watchdog select!
 

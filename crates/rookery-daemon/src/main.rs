@@ -368,6 +368,7 @@ async fn main() {
         .route("/api/models/cached", get(routes::get_models_cached))
         .route("/api/models/pull", post(routes::post_models_pull))
         .fallback(routes::get_dashboard)
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)) // 1MB request body limit
         .with_state(state);
 
     tracing::info!(%listen, "rookeryd starting");

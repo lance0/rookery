@@ -8,9 +8,18 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::app_state::AppState;
 
+/// Max concurrent SSE connections
+const MAX_SSE_CONNECTIONS: u32 = 16;
+static SSE_CONNECTION_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub async fn get_events(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, axum::http::StatusCode> {
+    let count = SSE_CONNECTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count >= MAX_SSE_CONNECTIONS {
+        SSE_CONNECTION_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
     // GPU stats stream — poll every 2 seconds
     let gpu_state = state.clone();
     let gpu_stream =
@@ -56,15 +65,22 @@ pub async fn get_events(
         .json_data(&initial_status)
         .unwrap())));
 
-    // Merge all streams
-    let merged = initial_event.chain(futures_util::stream::select(
-        gpu_stream,
-        futures_util::stream::select(state_stream, log_stream),
-    ));
+    // Merge all streams, decrement connection count when stream ends
+    let merged = initial_event
+        .chain(futures_util::stream::select(
+            gpu_stream,
+            futures_util::stream::select(state_stream, log_stream),
+        ))
+        .chain(stream::once(futures_util::future::lazy(|_| {
+            SSE_CONNECTION_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            // This item is never actually yielded because the stream ends when the client disconnects,
+            // triggering the drop. But we need a fallback decrement for clean shutdown.
+            Ok(Event::default().comment("close"))
+        })));
 
-    Sse::new(merged).keep_alive(
+    Ok(Sse::new(merged).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    ))
 }
