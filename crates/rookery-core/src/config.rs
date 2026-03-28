@@ -505,11 +505,15 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         // Only require llama_server binary when there are llama-server profiles
-        if self.has_llama_server_profiles()
-            && !self.llama_server.as_os_str().is_empty()
-            && !self.llama_server.exists()
-        {
-            return Err(Error::BinaryNotFound(self.llama_server.clone()));
+        if self.has_llama_server_profiles() {
+            if self.llama_server.as_os_str().is_empty() {
+                return Err(Error::ConfigValidation(
+                    "llama_server path is required when llama-server profiles exist".into(),
+                ));
+            }
+            if !self.llama_server.exists() {
+                return Err(Error::BinaryNotFound(self.llama_server.clone()));
+            }
         }
 
         for (name, profile) in &self.profiles {
@@ -648,7 +652,7 @@ impl Config {
             .as_ref()
             .ok_or_else(|| Error::ConfigValidation("vLLM profile missing vllm sub-table".into()))?;
 
-        let mut args = Vec::new();
+        let mut args = vec![vllm.docker_image.clone()];
 
         // Model — vLLM uses the HuggingFace repo ID directly
         if let Some(repo) = &model.repo {
@@ -1125,6 +1129,12 @@ extra_args = ["--enable-chunked-prefill"]
         let config: Config = toml::from_str(toml_str).unwrap();
         let args = config.resolve_command_line("vllm_prod").unwrap();
 
+        // docker_image should be the first element (matching llama-server binary path convention)
+        assert_eq!(
+            args[0], "vllm/vllm-openai:cu130-nightly",
+            "docker_image should be args[0]"
+        );
+
         // Should contain vLLM-specific args
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"kaitchup/Qwen3.5-27B-NVFP4".to_string()));
@@ -1169,6 +1179,12 @@ docker_image = "vllm/vllm-openai:latest"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         let args = config.resolve_command_line("vllm_min").unwrap();
+
+        // docker_image should be the first element
+        assert_eq!(
+            args[0], "vllm/vllm-openai:latest",
+            "docker_image should be args[0]"
+        );
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"--gpu-memory-utilization".to_string()));
@@ -1345,6 +1361,33 @@ docker_image = "vllm/vllm-openai:latest"
         // llama_server field defaults to empty PathBuf, no binary check needed
         assert!(config.llama_server.as_os_str().is_empty());
         config.validate().unwrap(); // should NOT error
+    }
+
+    // === VAL-CFG-014: validate() errors when llama-server profiles exist but path is empty ===
+    #[test]
+    fn test_config_validate_llama_empty_path_with_llama_profiles() {
+        let toml_str = r#"
+default_profile = "fast"
+
+[models.qwen35]
+source = "hf"
+repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
+file = "UD-Q4_K_XL"
+
+[profiles.fast]
+model = "qwen35"
+port = 8081
+ctx_size = 262144
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // llama_server path is empty (omitted from config)
+        assert!(config.llama_server.as_os_str().is_empty());
+        // Should error because llama-server profiles exist
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, Error::ConfigValidation(ref msg) if msg.contains("llama_server path is required")),
+            "should error on empty llama_server path with llama-server profiles: {err}"
+        );
     }
 
     // === VAL-CFG-014: Config validation checks llama_server binary for llama-server profiles ===
