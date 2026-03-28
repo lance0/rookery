@@ -426,4 +426,77 @@ mod tests {
             other => panic!("expected Running, got {other:?}"),
         }
     }
+
+    // === VAL-TRAIT-009: Save/load roundtrip with BackendType::Vllm and container_id='abc123' ===
+    //
+    // Explicit test with the exact values from the validation contract:
+    // backend_type=Vllm and container_id=Some("abc123").
+    #[test]
+    fn test_state_persistence_vllm_with_container_id_abc123() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let persistence = StatePersistence { path };
+
+        let since = Utc::now();
+        let state = ServerState::Running {
+            profile: "vllm_test".into(),
+            pid: 0,
+            port: 8081,
+            since,
+            command_line: vec!["--model".into(), "kaitchup/Qwen3.5-27B-NVFP4".into()],
+            exe_path: None,
+            backend_type: BackendType::Vllm,
+            container_id: Some("abc123".into()),
+        };
+
+        // Save
+        persistence.save(&state).unwrap();
+
+        // Load and assert both fields are preserved
+        let loaded = persistence.load().unwrap();
+        match loaded {
+            ServerState::Running {
+                profile,
+                backend_type,
+                container_id,
+                port,
+                ..
+            } => {
+                assert_eq!(profile, "vllm_test");
+                assert_eq!(backend_type, BackendType::Vllm);
+                assert_eq!(
+                    container_id.as_deref(),
+                    Some("abc123"),
+                    "container_id must survive save/load roundtrip"
+                );
+                assert_eq!(port, 8081);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    // === VAL-TRAIT-009: reconcile() with dead PID returns Stopped ===
+    //
+    // When the daemon restarts and the previously-running process has died,
+    // reconcile() should return Stopped regardless of backend_type.
+    #[test]
+    fn test_reconcile_dead_pid_returns_stopped_with_vllm() {
+        let persistence = StatePersistence::new();
+        let state = ServerState::Running {
+            profile: "vllm_prod".into(),
+            pid: 999_999_999, // non-existent PID
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: BackendType::Vllm,
+            container_id: Some("abc123".into()),
+        };
+
+        let reconciled = persistence.reconcile(state);
+        assert!(
+            matches!(reconciled, ServerState::Stopped),
+            "reconcile with dead PID should return Stopped, got {reconciled:?}"
+        );
+    }
 }

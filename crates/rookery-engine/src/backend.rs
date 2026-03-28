@@ -718,4 +718,183 @@ mod tests {
             "error should mention pid required, got: {err}"
         );
     }
+
+    // === VAL-TRAIT-004: stop() after adopt() with valid PID completes without error ===
+    //
+    // After adopting a process by PID (no child handle), stop() should complete
+    // successfully using the kill-by-PID fallback path. This tests the orphan
+    // stop scenario where the daemon restarted and adopted a running process.
+    #[tokio::test]
+    async fn test_stop_after_adopt_completes_ok() {
+        // Spawn a real process (sleep 60) so we can adopt and stop it
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("failed to spawn sleep process");
+        let pid = child.id().expect("no PID for child");
+
+        // Drop the child handle — simulates daemon restart where we lose the handle
+        drop(child);
+
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        let info = BackendInfo {
+            pid: Some(pid),
+            container_id: None,
+            port: 8081,
+            profile: "test".into(),
+            started_at: Utc::now(),
+            backend_type: BackendType::LlamaServer,
+            command_line: vec!["sleep".into(), "60".into()],
+            exe_path: Some(PathBuf::from("/bin/sleep")),
+        };
+
+        backend.adopt(info).await.unwrap();
+        assert!(
+            backend.is_running().await,
+            "adopted process should be running"
+        );
+
+        // stop() should complete without error using kill-by-PID path
+        let result = backend.stop().await;
+        assert!(
+            result.is_ok(),
+            "stop() after adopt should succeed: {:?}",
+            result.err()
+        );
+
+        // After stop, should no longer be running
+        assert!(
+            !backend.is_running().await,
+            "should not be running after stop"
+        );
+        assert!(
+            backend.process_info().await.is_none(),
+            "process_info should be None after stop"
+        );
+    }
+
+    // === VAL-TRAIT-005: adopt stores info, process_info returns it, stop uses kill-by-PID ===
+    //
+    // Comprehensive test for the orphan recovery flow:
+    // 1. adopt() stores the BackendInfo (no child handle)
+    // 2. process_info() returns the adopted info with correct fields
+    // 3. stop() falls back to kill-by-PID (SIGTERM→wait→SIGKILL) since there's no child handle
+    #[tokio::test]
+    async fn test_adopt_stores_info_and_stop_uses_pid_kill() {
+        // Spawn a real process to adopt
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("failed to spawn sleep process");
+        let pid = child.id().expect("no PID for child");
+
+        // Drop child handle — this is the key: after adopt, stop() must use kill-by-PID
+        drop(child);
+
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        let started_at = Utc::now();
+        let info = BackendInfo {
+            pid: Some(pid),
+            container_id: None,
+            port: 9090,
+            profile: "adopted_profile".into(),
+            started_at,
+            backend_type: BackendType::LlamaServer,
+            command_line: vec!["sleep".into(), "60".into()],
+            exe_path: Some(PathBuf::from("/bin/sleep")),
+        };
+
+        // 1. adopt() stores the info
+        backend.adopt(info).await.unwrap();
+
+        // 2. process_info() returns the adopted info
+        let adopted = backend
+            .process_info()
+            .await
+            .expect("should have info after adopt");
+        assert_eq!(adopted.pid, Some(pid));
+        assert_eq!(adopted.port, 9090);
+        assert_eq!(adopted.profile, "adopted_profile");
+        assert_eq!(adopted.backend_type, BackendType::LlamaServer);
+        assert_eq!(adopted.container_id, None);
+
+        // Process should be alive
+        let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        assert!(proc_path.exists(), "process should be alive before stop");
+
+        // 3. stop() uses kill-by-PID (no child handle available)
+        backend.stop().await.unwrap();
+
+        // Give the OS a moment to clean up
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Process should be dead
+        assert!(
+            !proc_path.exists(),
+            "process should be dead after stop via PID kill"
+        );
+        assert!(
+            !backend.is_running().await,
+            "should not be running after stop"
+        );
+        assert!(
+            backend.process_info().await.is_none(),
+            "info cleared after stop"
+        );
+    }
+
+    // === VAL-CROSS-005: Canary-relevant trait methods work on LlamaServerBackend ===
+    //
+    // The inference canary uses three trait methods: to_server_state(), is_draining(),
+    // and subscribe_errors(). This test verifies all three work correctly on
+    // LlamaServerBackend, which is the foundation for the canary integration.
+    #[tokio::test]
+    async fn test_canary_trait_methods_on_llama_server_backend() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        // to_server_state() — canary checks this to determine if backend is Running
+        let state = backend.to_server_state().await;
+        assert!(
+            matches!(state, ServerState::Stopped),
+            "idle backend should report Stopped to canary"
+        );
+
+        // is_draining() — canary skips health checks during drain
+        assert!(
+            !backend.is_draining(),
+            "fresh backend should not be draining (canary would skip checks)"
+        );
+
+        // set_draining works correctly for canary drain awareness
+        backend.set_draining(true);
+        assert!(
+            backend.is_draining(),
+            "canary should see draining=true during swap"
+        );
+        backend.set_draining(false);
+        assert!(
+            !backend.is_draining(),
+            "canary should see draining=false after swap completes"
+        );
+
+        // subscribe_errors() — canary uses this to detect CUDA errors
+        let rx = backend.subscribe_errors();
+        assert!(
+            !*rx.borrow(),
+            "initial error state should be false (no CUDA errors for canary)"
+        );
+
+        // The receiver should be a valid watch channel that can be polled
+        // (canary polls this in its loop to trigger immediate restart on CUDA error)
+        let rx2 = backend.subscribe_errors();
+        assert!(
+            !*rx2.borrow(),
+            "multiple subscribers should all see false initially"
+        );
+    }
 }

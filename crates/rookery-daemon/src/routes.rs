@@ -1428,4 +1428,230 @@ mod tests {
             );
         }
     }
+
+    // === VAL-SSE-001: SSE state events include backend field ===
+    //
+    // status_json_from_state() is the function used to build SSE state event
+    // payloads (via broadcast_state). When the server is Running, the JSON
+    // must include 'backend' set to the backend type string. When Stopped,
+    // backend must be null.
+    #[test]
+    fn test_status_json_running_includes_backend_field() {
+        let state = rookery_core::state::ServerState::Running {
+            profile: "fast".into(),
+            pid: 1234,
+            port: 8081,
+            since: chrono::Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: rookery_core::config::BackendType::LlamaServer,
+            container_id: None,
+        };
+        let json = status_json_from_state(&state);
+
+        // backend must be present and set to "llama-server" for Running state
+        assert!(
+            json.get("backend").is_some(),
+            "backend key must be present in SSE state JSON"
+        );
+        assert_eq!(
+            json["backend"], "llama-server",
+            "backend should be 'llama-server' for LlamaServer Running state"
+        );
+    }
+
+    #[test]
+    fn test_status_json_running_vllm_includes_backend_field() {
+        let state = rookery_core::state::ServerState::Running {
+            profile: "vllm_prod".into(),
+            pid: 0,
+            port: 8081,
+            since: chrono::Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: rookery_core::config::BackendType::Vllm,
+            container_id: Some("abc123".into()),
+        };
+        let json = status_json_from_state(&state);
+
+        assert_eq!(
+            json["backend"], "vllm",
+            "backend should be 'vllm' for Vllm Running state"
+        );
+    }
+
+    #[test]
+    fn test_status_json_stopped_has_backend_null() {
+        let state = rookery_core::state::ServerState::Stopped;
+        let json = status_json_from_state(&state);
+
+        assert!(
+            json.get("backend").is_some(),
+            "backend key must always be present"
+        );
+        assert!(
+            json["backend"].is_null(),
+            "backend should be null when Stopped, got: {}",
+            json["backend"]
+        );
+    }
+
+    // === VAL-API-002: /api/profiles includes backend per profile ===
+    //
+    // Tests the get_profiles logic by verifying that each profile in the JSON
+    // response includes a 'backend' field derived from the profile configuration.
+    // Uses a Config with both llama-server and vLLM profiles.
+    #[test]
+    fn test_profiles_response_includes_backend_field() {
+        use rookery_core::config::{Config, Model, Profile, VllmConfig};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let config = Config {
+            llama_server: PathBuf::from("/usr/bin/llama-server"),
+            default_profile: "llama_fast".into(),
+            listen: "127.0.0.1:3000".parse().unwrap(),
+            models: HashMap::from([
+                (
+                    "model_a".into(),
+                    Model {
+                        source: "local".into(),
+                        repo: None,
+                        file: None,
+                        path: Some(PathBuf::from("/models/a.gguf")),
+                        estimated_vram_mb: Some(4000),
+                    },
+                ),
+                (
+                    "model_b".into(),
+                    Model {
+                        source: "hf".into(),
+                        repo: Some("org/model-b".into()),
+                        file: None,
+                        path: None,
+                        estimated_vram_mb: None,
+                    },
+                ),
+            ]),
+            profiles: HashMap::from([
+                (
+                    "llama_fast".into(),
+                    Profile {
+                        model: "model_a".into(),
+                        port: 8081,
+                        llama_server: None,
+                        vllm: None,
+                        ctx_size: 4096,
+                        threads: 4,
+                        threads_batch: 24,
+                        batch_size: 4096,
+                        ubatch_size: 1024,
+                        gpu_layers: -1,
+                        gpu_index: None,
+                        cache_type_k: "q8_0".into(),
+                        cache_type_v: "q8_0".into(),
+                        flash_attention: true,
+                        reasoning_budget: 0,
+                        chat_template: None,
+                        temp: 0.7,
+                        top_p: 0.8,
+                        top_k: 20,
+                        min_p: 0.0,
+                        extra_args: vec![],
+                    },
+                ),
+                (
+                    "vllm_prod".into(),
+                    Profile {
+                        model: "model_b".into(),
+                        port: 8081,
+                        llama_server: None,
+                        vllm: Some(VllmConfig {
+                            docker_image: "vllm/vllm-openai:latest".into(),
+                            gpu_memory_utilization: 0.9,
+                            max_num_seqs: None,
+                            max_num_batched_tokens: None,
+                            max_model_len: None,
+                            quantization: None,
+                            tool_call_parser: None,
+                            kv_cache_dtype: None,
+                            extra_args: vec![],
+                        }),
+                        ctx_size: 4096,
+                        threads: 4,
+                        threads_batch: 24,
+                        batch_size: 4096,
+                        ubatch_size: 1024,
+                        gpu_layers: -1,
+                        gpu_index: None,
+                        cache_type_k: "q8_0".into(),
+                        cache_type_v: "q8_0".into(),
+                        flash_attention: true,
+                        reasoning_budget: 0,
+                        chat_template: None,
+                        temp: 0.7,
+                        top_p: 0.8,
+                        top_k: 20,
+                        min_p: 0.0,
+                        extra_args: vec![],
+                    },
+                ),
+            ]),
+            agents: HashMap::new(),
+        };
+
+        // Replicate the get_profiles logic from the route handler
+        let profiles: Vec<serde_json::Value> = config
+            .profiles
+            .iter()
+            .map(|(name, p)| {
+                let is_default = name == &config.default_profile;
+                let model = config.models.get(&p.model);
+                let ls = p.llama_server_config();
+                serde_json::json!({
+                    "name": name,
+                    "model": p.model,
+                    "port": p.port,
+                    "ctx_size": ls.as_ref().map(|c| c.ctx_size),
+                    "reasoning_budget": ls.as_ref().map(|c| c.reasoning_budget),
+                    "backend": p.backend_type().to_string(),
+                    "default": is_default,
+                    "estimated_vram_mb": model.and_then(|m| m.estimated_vram_mb),
+                })
+            })
+            .collect();
+
+        // Every profile must have a 'backend' field
+        for profile_json in &profiles {
+            let name = profile_json["name"].as_str().unwrap();
+            assert!(
+                profile_json.get("backend").is_some(),
+                "profile '{name}' missing 'backend' field"
+            );
+            let backend = profile_json["backend"].as_str().unwrap();
+            assert!(
+                backend == "llama-server" || backend == "vllm",
+                "profile '{name}' has unexpected backend value: {backend}"
+            );
+        }
+
+        // Find specific profiles and verify backend type
+        let llama_profile = profiles
+            .iter()
+            .find(|p| p["name"] == "llama_fast")
+            .expect("llama_fast profile should exist");
+        assert_eq!(
+            llama_profile["backend"], "llama-server",
+            "llama_fast should have backend 'llama-server'"
+        );
+
+        let vllm_profile = profiles
+            .iter()
+            .find(|p| p["name"] == "vllm_prod")
+            .expect("vllm_prod profile should exist");
+        assert_eq!(
+            vllm_profile["backend"], "vllm",
+            "vllm_prod should have backend 'vllm'"
+        );
+    }
 }
