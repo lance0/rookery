@@ -1,4 +1,5 @@
 mod app_state;
+pub mod canary;
 mod routes;
 mod sse;
 #[cfg(test)]
@@ -315,7 +316,6 @@ async fn main() {
     let canary_state = state.clone();
     tokio::spawn(async move {
         const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-        const CANARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         loop {
             // Re-subscribe to the current backend's error channel each cycle.
@@ -330,92 +330,13 @@ async fn main() {
                 }
             }
 
-            // Only check when server is running and not mid-swap
-            if canary_state.backend.lock().await.is_draining() {
-                continue;
-            }
-            let current = canary_state.backend.lock().await.to_server_state().await;
-            let (profile, port) = match current {
-                rookery_core::state::ServerState::Running {
-                    ref profile, port, ..
-                } => (profile.clone(), port),
-                _ => continue,
-            };
-
-            if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
-                tracing::debug!(port, "inference canary passed");
-                continue;
-            }
-
-            // First failure — retry once after 5s to avoid false positives
-            tracing::warn!(port, "inference canary failed, retrying in 5s");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-            if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
-                tracing::info!(port, "inference canary passed on retry");
-                continue;
-            }
-
-            // Two consecutive failures — server is broken, restart it
-            tracing::error!(port, profile = %profile, "inference canary failed twice, restarting server");
-
-            // Acquire op_lock to serialize with manual start/stop/swap
-            let _op_guard = canary_state.op_lock.lock().await;
-
-            // Re-check state under lock — someone may have stopped/swapped already
-            let current = canary_state.backend.lock().await.to_server_state().await;
-            if !current.is_running() {
-                tracing::info!("server already stopped, skipping canary restart");
-                continue;
-            }
-
-            let _ = canary_state.backend.lock().await.stop().await;
-            let stopped = rookery_core::state::ServerState::Stopped;
-            let _ = canary_state.state_persistence.save(&stopped);
-
-            let config = canary_state.config.read().await;
-            let backend = canary_state.backend.lock().await;
-            match backend.start(&config, &profile).await {
-                Ok(_info) => {
-                    let port_for_health = config
-                        .profiles
-                        .get(&profile)
-                        .map(|p| p.port)
-                        .unwrap_or(port);
-                    drop(backend);
-                    drop(config);
-                    match rookery_engine::health::wait_for_health(
-                        port_for_health,
-                        std::time::Duration::from_secs(120),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            let server_state =
-                                canary_state.backend.lock().await.to_server_state().await;
-                            let _ = canary_state.state_persistence.save(&server_state);
-                            if server_state.is_running() {
-                                tracing::info!(profile = %profile, "server restarted by inference canary");
-                            } else {
-                                tracing::error!(profile = %profile, "server failed to restart after canary");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, profile = %profile, "health check failed after canary restart");
-                            let _ = canary_state.backend.lock().await.stop().await;
-                            let failed = rookery_core::state::ServerState::Failed {
-                                last_error: e.to_string(),
-                                profile: profile.clone(),
-                                since: chrono::Utc::now(),
-                            };
-                            let _ = canary_state.state_persistence.save(&failed);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, profile = %profile, "canary restart failed");
-                }
-            }
+            canary::run_canary_check(
+                &canary_state.backend,
+                &canary_state.config,
+                &canary_state.state_persistence,
+                &canary_state.op_lock,
+            )
+            .await;
         }
     });
 
