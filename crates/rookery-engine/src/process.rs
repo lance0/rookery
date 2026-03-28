@@ -348,6 +348,10 @@ mod tests {
         let content = stat.unwrap();
         let pos = content.rfind(')').unwrap();
         let state = content[pos + 1..].trim().chars().next().unwrap();
-        assert_eq!(state, 'R', "test process should be Running");
+        // Process may be R (running), S (sleeping), or D (disk sleep) — all are alive, not Z (zombie)
+        assert!(
+            matches!(state, 'R' | 'S' | 'D'),
+            "test process should be alive (R/S/D), got '{state}'"
+        );
     }
 }
