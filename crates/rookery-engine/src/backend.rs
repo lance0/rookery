@@ -2417,7 +2417,8 @@ mod tests {
         let log_buffer = Arc::new(LogBuffer::new(1000));
         let backend = VllmBackend::new(compose_path.clone(), log_buffer);
 
-        let (config, profile) = integration_test_config(&compose_path, 19876);
+        let test_port: u16 = 19876;
+        let (config, profile) = integration_test_config(&compose_path, test_port);
 
         // Start the backend — this writes compose, runs docker compose up -d,
         // polls health endpoint with exponential backoff
@@ -2437,7 +2438,7 @@ mod tests {
             "container_id should be set after start"
         );
         assert_eq!(info.pid, None, "pid should be None for vLLM container");
-        assert_eq!(info.port, 19876);
+        assert_eq!(info.port, test_port);
         assert_eq!(info.profile, "integration_vllm");
 
         // Verify is_running() returns true
@@ -2466,7 +2467,7 @@ mod tests {
                 assert_eq!(*backend_type, BackendType::Vllm);
                 assert!(container_id.is_some());
                 assert_eq!(p, "integration_vllm");
-                assert_eq!(*port, 19876);
+                assert_eq!(*port, test_port);
             }
             other => panic!("expected Running state, got: {other:?}"),
         }
@@ -2613,7 +2614,8 @@ mod tests {
         let compose_path = dir.path().join("vllm-compose.yml");
         let log_buffer = Arc::new(LogBuffer::new(1000));
 
-        let (config, profile) = integration_test_config(&compose_path, 19879);
+        let test_port: u16 = 19879;
+        let (config, profile) = integration_test_config(&compose_path, test_port);
 
         // Phase 1: Start a container with the first backend instance
         let backend1 = VllmBackend::new(compose_path.clone(), log_buffer.clone());
@@ -2675,7 +2677,7 @@ mod tests {
             "adopted container_id should match"
         );
         assert_eq!(adopted_info.backend_type, BackendType::Vllm);
-        assert_eq!(adopted_info.port, 19876);
+        assert_eq!(adopted_info.port, test_port);
 
         // Phase 5: Stop from the adopted backend — should clean up the container
         backend2
