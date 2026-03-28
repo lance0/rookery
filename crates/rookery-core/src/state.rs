@@ -64,7 +64,7 @@ impl ServerState {
 
 /// Persists state to disk so the daemon can reconcile on restart.
 pub struct StatePersistence {
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
 impl Default for StatePersistence {

@@ -7,3 +7,6 @@ pub mod health;
 pub mod logs;
 pub mod models;
 pub mod process;
+
+#[cfg(test)]
+pub mod test_utils;

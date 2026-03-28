@@ -1256,6 +1256,7 @@ dependencies = [
 name = "rookery-daemon"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "futures-util",
@@ -1267,6 +1268,7 @@ dependencies = [
  "rookery-engine",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http",
@@ -1279,6 +1281,7 @@ name = "rookery-engine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "dirs",
  "futures-util",

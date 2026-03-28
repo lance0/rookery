@@ -24,3 +24,7 @@ nix = { version = "0.29", features = ["signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 include_dir = "0.7"
 mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"
+async-trait = { workspace = true }

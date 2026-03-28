@@ -1,6 +1,8 @@
 mod app_state;
 mod routes;
 mod sse;
+#[cfg(test)]
+pub mod test_utils;
 
 use app_state::AppState;
 use axum::Router;
