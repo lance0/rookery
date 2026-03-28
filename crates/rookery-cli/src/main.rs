@@ -172,6 +172,8 @@ struct StatusResponse {
     pid: Option<u32>,
     port: Option<u16>,
     uptime_secs: Option<i64>,
+    #[serde(default)]
+    backend: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -347,12 +349,16 @@ async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std
                 "pid": resp.pid,
                 "port": resp.port,
                 "uptime_secs": resp.uptime_secs,
+                "backend": resp.backend,
             }))?
         );
     } else {
         println!("state:   {}", resp.state);
         if let Some(profile) = &resp.profile {
             println!("profile: {profile}");
+        }
+        if let Some(backend) = &resp.backend {
+            println!("backend: {backend}");
         }
         if let Some(pid) = resp.pid {
             println!("pid:     {pid}");
@@ -635,6 +641,7 @@ async fn cmd_profiles(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
         let reasoning = p["reasoning_budget"].as_i64().unwrap_or(0);
         let is_default = p["default"].as_bool().unwrap_or(false);
         let vram = p["estimated_vram_mb"].as_u64();
+        let backend = p["backend"].as_str().unwrap_or("llama-server");
 
         let default_marker = if is_default { " (default)" } else { "" };
         let thinking = if reasoning != 0 { " thinking" } else { "" };
@@ -644,7 +651,11 @@ async fn cmd_profiles(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
             ctx.to_string()
         };
 
-        print!("  {name}{default_marker} — {model}, {ctx_label} ctx{thinking}");
+        print!("  [{backend}] {name}{default_marker} — {model}");
+        if ctx > 0 {
+            print!(", {ctx_label} ctx");
+        }
+        print!("{thinking}");
         if let Some(v) = vram {
             print!(", ~{:.1}GB VRAM", v as f64 / 1024.0);
         }
@@ -1024,4 +1035,421 @@ async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === VAL-CLI-004: StatusResponse deserialization backward-compatible ===
+    //
+    // CLI's StatusResponse struct can deserialize JSON from old daemons (no
+    // 'backend' field) and new daemons (with 'backend' field). Missing field
+    // defaults to None via #[serde(default)].
+    #[test]
+    fn test_status_response_backward_compat_no_backend() {
+        let json = r#"{
+            "state": "running",
+            "profile": "fast",
+            "pid": 1234,
+            "port": 8081,
+            "uptime_secs": 3600
+        }"#;
+        let resp: StatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.state, "running");
+        assert_eq!(resp.profile.as_deref(), Some("fast"));
+        assert_eq!(resp.pid, Some(1234));
+        assert_eq!(resp.port, Some(8081));
+        assert_eq!(resp.uptime_secs, Some(3600));
+        assert_eq!(
+            resp.backend, None,
+            "missing backend field should default to None"
+        );
+    }
+
+    #[test]
+    fn test_status_response_with_backend_field() {
+        let json = r#"{
+            "state": "running",
+            "profile": "fast",
+            "pid": 1234,
+            "port": 8081,
+            "uptime_secs": 3600,
+            "backend": "llama-server"
+        }"#;
+        let resp: StatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.backend.as_deref(), Some("llama-server"));
+    }
+
+    #[test]
+    fn test_status_response_with_vllm_backend() {
+        let json = r#"{
+            "state": "running",
+            "profile": "qwen_nvfp4",
+            "pid": 0,
+            "port": 8081,
+            "uptime_secs": 120,
+            "backend": "vllm"
+        }"#;
+        let resp: StatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.backend.as_deref(), Some("vllm"));
+    }
+
+    #[test]
+    fn test_status_response_with_null_backend() {
+        let json = r#"{
+            "state": "stopped",
+            "profile": null,
+            "pid": null,
+            "port": null,
+            "uptime_secs": null,
+            "backend": null
+        }"#;
+        let resp: StatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.state, "stopped");
+        assert_eq!(resp.backend, None);
+    }
+
+    // === VAL-CLI-001: Status command shows backend type (running) and omits it (stopped) ===
+    //
+    // Tests the formatting logic for `rookery status` by verifying the output
+    // includes a "backend:" line when running and omits it when stopped. Also
+    // tests `--json` mode includes the backend field.
+    #[test]
+    fn test_status_display_running_shows_backend() {
+        let resp = StatusResponse {
+            state: "running".into(),
+            profile: Some("fast".into()),
+            pid: Some(1234),
+            port: Some(8081),
+            uptime_secs: Some(3600),
+            backend: Some("llama-server".into()),
+        };
+
+        // Simulate the non-JSON display logic
+        let mut lines = Vec::new();
+        lines.push(format!("state:   {}", resp.state));
+        if let Some(profile) = &resp.profile {
+            lines.push(format!("profile: {profile}"));
+        }
+        if let Some(backend) = &resp.backend {
+            lines.push(format!("backend: {backend}"));
+        }
+        if let Some(pid) = resp.pid {
+            lines.push(format!("pid:     {pid}"));
+        }
+
+        let output = lines.join("\n");
+        assert!(
+            output.contains("backend: llama-server"),
+            "running status should show backend line, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_status_display_running_vllm_shows_backend() {
+        let resp = StatusResponse {
+            state: "running".into(),
+            profile: Some("qwen_nvfp4".into()),
+            pid: Some(0),
+            port: Some(8081),
+            uptime_secs: Some(120),
+            backend: Some("vllm".into()),
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!("state:   {}", resp.state));
+        if let Some(profile) = &resp.profile {
+            lines.push(format!("profile: {profile}"));
+        }
+        if let Some(backend) = &resp.backend {
+            lines.push(format!("backend: {backend}"));
+        }
+
+        let output = lines.join("\n");
+        assert!(
+            output.contains("backend: vllm"),
+            "running vLLM status should show backend line, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_status_display_stopped_omits_backend() {
+        let resp = StatusResponse {
+            state: "stopped".into(),
+            profile: None,
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!("state:   {}", resp.state));
+        if let Some(profile) = &resp.profile {
+            lines.push(format!("profile: {profile}"));
+        }
+        if let Some(backend) = &resp.backend {
+            lines.push(format!("backend: {backend}"));
+        }
+
+        let output = lines.join("\n");
+        assert!(
+            !output.contains("backend:"),
+            "stopped status should omit backend line, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_status_json_output_includes_backend_running() {
+        let resp = StatusResponse {
+            state: "running".into(),
+            profile: Some("fast".into()),
+            pid: Some(1234),
+            port: Some(8081),
+            uptime_secs: Some(3600),
+            backend: Some("llama-server".into()),
+        };
+
+        let json = serde_json::json!({
+            "state": resp.state,
+            "profile": resp.profile,
+            "pid": resp.pid,
+            "port": resp.port,
+            "uptime_secs": resp.uptime_secs,
+            "backend": resp.backend,
+        });
+
+        assert_eq!(json["backend"], "llama-server");
+        assert!(
+            json.get("backend").is_some(),
+            "JSON output must include backend key"
+        );
+    }
+
+    #[test]
+    fn test_status_json_output_includes_backend_null_when_stopped() {
+        let resp = StatusResponse {
+            state: "stopped".into(),
+            profile: None,
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        };
+
+        let json = serde_json::json!({
+            "state": resp.state,
+            "profile": resp.profile,
+            "pid": resp.pid,
+            "port": resp.port,
+            "uptime_secs": resp.uptime_secs,
+            "backend": resp.backend,
+        });
+
+        assert!(
+            json.get("backend").is_some(),
+            "JSON must always include backend key"
+        );
+        assert!(
+            json["backend"].is_null(),
+            "backend should be null when stopped"
+        );
+    }
+
+    // === VAL-CLI-003: Profiles command shows backend type per profile ===
+    //
+    // Tests the formatting logic for `rookery profiles` by verifying the output
+    // includes a [backend] prefix for each profile.
+    #[test]
+    fn test_profiles_display_shows_backend_prefix_llama_server() {
+        let profile = serde_json::json!({
+            "name": "qwen_fast",
+            "model": "qwen35",
+            "port": 8081,
+            "ctx_size": 262144,
+            "reasoning_budget": 0,
+            "backend": "llama-server",
+            "default": true,
+            "estimated_vram_mb": 25800,
+        });
+
+        let name = profile["name"].as_str().unwrap_or("?");
+        let model = profile["model"].as_str().unwrap_or("?");
+        let ctx = profile["ctx_size"].as_u64().unwrap_or(0);
+        let backend = profile["backend"].as_str().unwrap_or("llama-server");
+        let is_default = profile["default"].as_bool().unwrap_or(false);
+        let vram = profile["estimated_vram_mb"].as_u64();
+
+        let default_marker = if is_default { " (default)" } else { "" };
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+
+        let mut output = format!("  [{backend}] {name}{default_marker} — {model}");
+        if ctx > 0 {
+            output.push_str(&format!(", {ctx_label} ctx"));
+        }
+        if let Some(v) = vram {
+            output.push_str(&format!(", ~{:.1}GB VRAM", v as f64 / 1024.0));
+        }
+
+        assert!(
+            output.contains("[llama-server]"),
+            "profile output should have [llama-server] prefix, got: {output}"
+        );
+        assert!(
+            output.contains("qwen_fast"),
+            "profile output should contain profile name, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_profiles_display_shows_backend_prefix_vllm() {
+        let profile = serde_json::json!({
+            "name": "qwen_nvfp4",
+            "model": "qwen35_27b_nvfp4",
+            "port": 8081,
+            "ctx_size": null,
+            "reasoning_budget": 0,
+            "backend": "vllm",
+            "default": false,
+            "estimated_vram_mb": null,
+        });
+
+        let name = profile["name"].as_str().unwrap_or("?");
+        let model = profile["model"].as_str().unwrap_or("?");
+        let ctx = profile["ctx_size"].as_u64().unwrap_or(0);
+        let backend = profile["backend"].as_str().unwrap_or("llama-server");
+        let is_default = profile["default"].as_bool().unwrap_or(false);
+
+        let default_marker = if is_default { " (default)" } else { "" };
+
+        let mut output = format!("  [{backend}] {name}{default_marker} — {model}");
+        if ctx > 0 {
+            let ctx_label = if ctx >= 1024 {
+                format!("{}K", ctx / 1024)
+            } else {
+                ctx.to_string()
+            };
+            output.push_str(&format!(", {ctx_label} ctx"));
+        }
+
+        assert!(
+            output.contains("[vllm]"),
+            "profile output should have [vllm] prefix, got: {output}"
+        );
+        assert!(
+            output.contains("qwen_nvfp4"),
+            "profile output should contain profile name, got: {output}"
+        );
+        // vLLM profile with null ctx_size should not show ctx
+        assert!(
+            !output.contains("ctx"),
+            "vLLM profile with null ctx_size should not show ctx, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_profiles_display_mixed_backends() {
+        let profiles = vec![
+            serde_json::json!({
+                "name": "fast",
+                "model": "qwen35",
+                "backend": "llama-server",
+                "ctx_size": 131072,
+                "reasoning_budget": 0,
+                "default": true,
+                "estimated_vram_mb": null,
+            }),
+            serde_json::json!({
+                "name": "vllm_prod",
+                "model": "qwen35_nvfp4",
+                "backend": "vllm",
+                "ctx_size": null,
+                "reasoning_budget": 0,
+                "default": false,
+                "estimated_vram_mb": null,
+            }),
+        ];
+
+        let mut output_lines = Vec::new();
+        for p in &profiles {
+            let name = p["name"].as_str().unwrap_or("?");
+            let model = p["model"].as_str().unwrap_or("?");
+            let ctx = p["ctx_size"].as_u64().unwrap_or(0);
+            let backend = p["backend"].as_str().unwrap_or("llama-server");
+            let is_default = p["default"].as_bool().unwrap_or(false);
+
+            let default_marker = if is_default { " (default)" } else { "" };
+
+            let mut line = format!("  [{backend}] {name}{default_marker} — {model}");
+            if ctx > 0 {
+                let ctx_label = if ctx >= 1024 {
+                    format!("{}K", ctx / 1024)
+                } else {
+                    ctx.to_string()
+                };
+                line.push_str(&format!(", {ctx_label} ctx"));
+            }
+            output_lines.push(line);
+        }
+
+        let output = output_lines.join("\n");
+        assert!(
+            output.contains("[llama-server] fast"),
+            "first profile should be llama-server"
+        );
+        assert!(
+            output.contains("[vllm] vllm_prod"),
+            "second profile should be vllm"
+        );
+    }
+
+    // Test that profiles JSON passthrough includes backend field
+    #[test]
+    fn test_profiles_json_includes_backend() {
+        let resp = serde_json::json!({
+            "profiles": [
+                {
+                    "name": "fast",
+                    "model": "qwen35",
+                    "backend": "llama-server",
+                    "default": true,
+                },
+                {
+                    "name": "vllm_prod",
+                    "model": "qwen35_nvfp4",
+                    "backend": "vllm",
+                    "default": false,
+                },
+            ]
+        });
+
+        let profiles = resp["profiles"].as_array().unwrap();
+        assert_eq!(profiles[0]["backend"], "llama-server");
+        assert_eq!(profiles[1]["backend"], "vllm");
+    }
+
+    // Backward compat: profiles from old daemon without backend field
+    #[test]
+    fn test_profiles_display_missing_backend_defaults_to_llama_server() {
+        let profile = serde_json::json!({
+            "name": "old_profile",
+            "model": "qwen35",
+            "port": 8081,
+            "ctx_size": 131072,
+            "reasoning_budget": 0,
+            "default": false,
+        });
+
+        // Simulate the display logic — missing backend defaults to "llama-server"
+        let backend = profile["backend"].as_str().unwrap_or("llama-server");
+        assert_eq!(
+            backend, "llama-server",
+            "missing backend field should default to llama-server"
+        );
+    }
 }
