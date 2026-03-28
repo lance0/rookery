@@ -1,0 +1,34 @@
+{
+  "featureId": "fix-daemon-backend-safety",
+  "reviewedAt": "2026-03-28T20:02:13Z",
+  "commitId": "fcb23de",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The fix resolves 4 of the 5 prior blocking findings (vLLM panic path, PID=0 fallback, status backend omission, and starting/stopping status regression). However, swap drain handling is still unsafe on error paths: drain is set before stop but not cleared if backend creation fails, which can leave chat permanently returning 503 after recovery attempts.",
+    "issues": [
+      {
+        "file": "crates/rookery-daemon/src/routes.rs",
+        "line": 253,
+        "severity": "blocking",
+        "description": "post_swap() sets draining=true before the drain sleep, but if swap fails before backend replacement (e.g. create_backend returns Err for vLLM at line 273), draining is never reset. The function returns 500 on line 355 without clearing drain, while post_chat rejects whenever is_draining() is true (line 592). This can leave the daemon stuck rejecting chat requests even after later starts, so prior scrutiny issue #5 is not fully resolved on failure paths."
+      },
+      {
+        "file": "crates/rookery-daemon/src/main.rs",
+        "line": 314,
+        "severity": "non_blocking",
+        "description": "The inference canary subscribes to subscribe_errors() once at startup. After backend replacement during swap (routes.rs line 281), this receiver is stale for immediate error-triggered checks on the new backend. Periodic canary still runs, but event-driven CUDA error triggers from the new backend are missed."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Swap-drain guidance/tests emphasize success-path behavior but do not explicitly require cleanup assertions on swap failure paths.",
+      "evidence": "validation-contract.md VAL-CROSS-007 describes successful swap flow, and AGENTS.md API contract guidance focuses response-shape tests; neither explicitly covers asserting drain reset when swap errors before backend replacement."
+    }
+  ],
+  "addressesFailureFrom": "/home/lance/projects/rookery/.factory/validation/backend-abstraction/scrutiny/reviews/llama-server-backend-impl.json, /home/lance/projects/rookery/.factory/validation/backend-abstraction/scrutiny/reviews/daemon-trait-integration.json",
+  "summary": "Fix review failed: four prior blockers are resolved, but swap drain cleanup is still unsafe on error paths and can leave chat permanently unavailable (503). A prior non-blocking canary-subscription gap also remains."
+}
