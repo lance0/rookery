@@ -1,0 +1,49 @@
+{
+  "milestone": "backend-abstraction",
+  "round": 2,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cargo test --workspace",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cargo check --workspace",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cargo clippy --workspace",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-daemon-backend-safety"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-daemon-backend-safety",
+      "severity": "blocking",
+      "description": "post_swap() sets draining=true before drain sleep but does not reliably clear it on pre-replacement failure paths (e.g., create_backend error), which can leave post_chat permanently returning 503."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add explicit contract-testing guidance for swap failure paths to assert drain flag cleanup when swap errors before backend replacement.",
+      "evidence": "fix-daemon-backend-safety review found that drain mode is enabled but not always cleared on error paths, and current mission guidance/contracts emphasize success paths more than failure cleanup assertions.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/backend-abstraction/scrutiny/synthesis.round1.json",
+  "generatedAt": "2026-03-28T20:03:11Z"
+}
