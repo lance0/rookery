@@ -311,12 +311,15 @@ async fn main() {
     // CUDA zombie state where /health responds but inference is broken.
     // Also triggers immediately on CUDA error patterns in llama-server stderr.
     let canary_state = state.clone();
-    let mut cuda_error_rx = state.backend.lock().await.subscribe_errors();
     tokio::spawn(async move {
         const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         const CANARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         loop {
+            // Re-subscribe to the current backend's error channel each cycle.
+            // This ensures we always listen to the active backend after a swap.
+            let mut cuda_error_rx = canary_state.backend.lock().await.subscribe_errors();
+
             // Wait for either the regular interval or a CUDA error trigger
             tokio::select! {
                 _ = tokio::time::sleep(CANARY_INTERVAL) => {}

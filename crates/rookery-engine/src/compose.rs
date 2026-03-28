@@ -43,10 +43,14 @@ pub fn generate_compose(config: &Config, profile: &str) -> Result<String> {
     // Build the command args (everything except docker_image which is the image field).
     let mut command: Vec<String> = Vec::new();
 
-    // --model
-    if let Some(repo) = &model.repo {
-        command.extend(["--model".into(), repo.clone()]);
-    }
+    // --model (required for vLLM)
+    let repo = model.repo.as_ref().ok_or_else(|| {
+        Error::ConfigValidation(format!(
+            "vLLM profile '{profile}' references model '{}' which has no 'repo' field",
+            prof.model
+        ))
+    })?;
+    command.extend(["--model".into(), repo.clone()]);
 
     // --gpu-memory-utilization
     command.extend([
@@ -654,23 +658,14 @@ port = 9090
 docker_image = "vllm/vllm-openai:latest"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        let yaml_str = generate_compose(&config, "vp").unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+        let result = generate_compose(&config, "vp");
 
-        let command: Vec<String> = parsed["services"]["vllm"]["command"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-
-        // --model should NOT be present since repo is None
-        assert!(!command.contains(&"--model".to_string()));
-
-        // Port mapping should use profile port
-        assert_eq!(
-            parsed["services"]["vllm"]["ports"][0].as_str().unwrap(),
-            "9090:8000"
+        // vLLM profiles require a model repo — should fail validation
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no 'repo' field"),
+            "expected repo validation error, got: {err}"
         );
     }
 
