@@ -1,0 +1,15 @@
+{
+  "featureId": "cli-backend-display",
+  "reviewedAt": "2026-03-28T22:36:20Z",
+  "commitId": "951a8a0bce9eb22ace913313e03b904540336e43",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Implementation matches the feature requirements: CLI status parsing is backward-compatible with missing backend, status output includes backend when present, status --json includes backend field, and profiles output shows backend prefixes.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed handoff, transcript skeleton, skill guidance, and commit diff for cli-backend-display. The code changes in crates/rookery-cli/src/main.rs satisfy expected behavior for VAL-CLI-001, VAL-CLI-003, and VAL-CLI-004 with no blocking or non-blocking issues found."
+}
