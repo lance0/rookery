@@ -30,3 +30,12 @@ Testing surface, required testing skills/tools, and resource cost classification
 - cargo clippy (linting)
 - trunk build (WASM compilation)
 - No browser testing tools needed for automated validation
+
+## Flow Validator Guidance: cargo-cli-validation
+
+- Isolation boundary: shared repository checkout at `/home/lance/projects/rookery`; no separate data dirs needed.
+- Do not start/stop `rookeryd` or `llama-server`; validation is compile/test-only.
+- Run validators serially across subagents (`max concurrent = 1`) to avoid `cargo` target-dir lock contention.
+- Allowed commands: `cargo test --workspace`, `cargo clippy --workspace`, `cargo build --release`, and dashboard `trunk build --release`.
+- Write flow reports to `.factory/validation/backend-abstraction/user-testing/flows/*.json`.
+- When filtering tests, prefer substring filters unless the full test path is known; `--exact` with partial names can execute zero tests.

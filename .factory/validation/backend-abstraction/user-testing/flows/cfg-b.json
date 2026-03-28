@@ -1,0 +1,68 @@
+{
+  "groupId": "cfg-b",
+  "surface": "cargo-cli-validation",
+  "assertions": [
+    {
+      "id": "VAL-CFG-008",
+      "status": "pass",
+      "reason": "Targeted test passed: config::tests::test_config_validate_rejects_vllm_missing_docker_image",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-008.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-009",
+      "status": "pass",
+      "reason": "Targeted test passed: config::tests::test_config_validate_gpu_memory_utilization_boundaries",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-009.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-010",
+      "status": "pass",
+      "reason": "Targeted tests passed: config::tests::test_resolve_vllm_command_line and test_resolve_vllm_command_line_minimal",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-010-primary.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-011",
+      "status": "pass",
+      "reason": "Targeted tests passed: config::tests::test_config_serialization_roundtrip and test_config_serialization_roundtrip_flat_profile",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-011.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-012",
+      "status": "pass",
+      "reason": "Targeted test passed: config::tests::test_config_example_toml_parses",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-012.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-013",
+      "status": "pass",
+      "reason": "Targeted test passed: config::tests::test_config_vllm_only_no_llama_binary_required",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-013.log"
+      ]
+    },
+    {
+      "id": "VAL-CFG-014",
+      "status": "pass",
+      "reason": "Targeted tests passed for both branches: llama-server profiles require valid llama_server path, while vLLM-only configs skip binary check",
+      "evidence": [
+        "backend-abstraction/cfg-b/VAL-CFG-014-llama.log",
+        "backend-abstraction/cfg-b/VAL-CFG-014-vllm-only.log"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": [
+    "cargo test"
+  ]
+}

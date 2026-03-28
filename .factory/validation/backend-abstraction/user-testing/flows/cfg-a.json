@@ -1,0 +1,74 @@
+{
+  "groupId": "cfg-a",
+  "surface": "cargo-cli-validation",
+  "assertions": [
+    {
+      "id": "VAL-CFG-001",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_parse_llama_server_subtable",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-001.txt",
+        "crates/rookery-core/src/config.rs:720"
+      ]
+    },
+    {
+      "id": "VAL-CFG-002",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_parse_vllm_subtable",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-002.txt",
+        "crates/rookery-core/src/config.rs:784"
+      ]
+    },
+    {
+      "id": "VAL-CFG-003",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_backward_compat_flat_profile",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-003.txt",
+        "crates/rookery-core/src/config.rs:831"
+      ]
+    },
+    {
+      "id": "VAL-CFG-004",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_vllm_defaults",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-004.txt",
+        "crates/rookery-core/src/config.rs:874"
+      ]
+    },
+    {
+      "id": "VAL-CFG-005",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_mixed_backends",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-005.txt",
+        "crates/rookery-core/src/config.rs:905"
+      ]
+    },
+    {
+      "id": "VAL-CFG-006",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_vllm_model_hf_repo_no_file",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-006.txt",
+        "crates/rookery-core/src/config.rs:948"
+      ]
+    },
+    {
+      "id": "VAL-CFG-007",
+      "status": "pass",
+      "reason": "Targeted automated test passed: config::tests::test_config_validate_rejects_dual_backend",
+      "evidence": [
+        "backend-abstraction/cfg-a/VAL-CFG-007.txt",
+        "crates/rookery-core/src/config.rs:975"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": [
+    "cargo test"
+  ]
+}

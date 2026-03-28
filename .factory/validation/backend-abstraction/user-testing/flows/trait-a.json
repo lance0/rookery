@@ -1,0 +1,54 @@
+{
+  "groupId": "trait-a",
+  "surface": "cargo-cli-validation",
+  "assertions": [
+    {
+      "id": "VAL-TRAIT-001",
+      "status": "pass",
+      "reason": "workspace compilation and targeted trait object-safety test passed",
+      "evidence": [
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/01-cargo-build-workspace.txt",
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/02-test-val-trait-001.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-002",
+      "status": "pass",
+      "reason": "workspace compilation and targeted implementation test passed",
+      "evidence": [
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/01-cargo-build-workspace.txt",
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/03-test-val-trait-002.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-003",
+      "status": "pass",
+      "reason": "targeted start() BackendInfo field assertion test passed",
+      "evidence": [
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/04-test-val-trait-003.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-004",
+      "status": "fail",
+      "reason": "no explicit automated evidence found",
+      "evidence": [
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/05-test-val-trait-004-noop-stop.txt",
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/06-test-val-trait-004-idle-running-state.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-005",
+      "status": "fail",
+      "reason": "no explicit automated evidence found",
+      "evidence": [
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/07-test-val-trait-005-adopt-info.txt",
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/08-test-val-trait-005-adopt-running.txt",
+        "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/evidence/backend-abstraction/trait-a/09-test-val-trait-005-adopt-dead-pid.txt"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["cargo test", "cargo build"]
+}
