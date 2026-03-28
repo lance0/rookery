@@ -1,0 +1,34 @@
+{
+  "featureId": "vllm-integration-tests",
+  "reviewedAt": "2026-03-28T21:17:18Z",
+  "commitId": "aba69fc7eb96659cd11a6b1d221d7f9fee961119",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds the requested env-gated Docker integration tests (start/stop/is_running/adoption) and they do skip gracefully when ROOKERY_INTEGRATION is unset, but the implementation has a blocking reliability flaw when integration mode is enabled.",
+    "issues": [
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 2155,
+        "severity": "blocking",
+        "description": "All four integration tests share the same fixed host port (19876) via integration_test_config while each test is a normal #[tokio::test] (lines 2213, 2290, 2366, 2410) that can run concurrently under cargo test. When ROOKERY_INTEGRATION=1, parallel execution can cause Docker port-binding conflicts and nondeterministic failures, violating the expected behavior that enabled integration tests pass."
+      },
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 2173,
+        "severity": "non_blocking",
+        "description": "The integration helper pins docker_image to the floating tag vllm/vllm-openai:latest, which can change behavior over time and reduce reproducibility of integration test outcomes."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Mission guidance documents env-gating for integration tests but does not document handling shared resources (ports/docker project isolation) for parallel test execution, which likely contributed to the fixed-port parallelism bug.",
+      "evidence": "AGENTS.md:67 documents only env gating; backend.rs:2155 fixes port 19876 while integration tests at backend.rs:2213,2290,2366,2410 are parallelizable tokio tests."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed due to a blocking test-design issue: integration tests use a shared fixed port and can race under parallel cargo test runs when ROOKERY_INTEGRATION=1. Non-blocking reproducibility concern: floating Docker image tag."
+}

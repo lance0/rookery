@@ -1,0 +1,76 @@
+{
+  "milestone": "vllm-backend",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cargo test --workspace --manifest-path \"/home/lance/projects/rookery/Cargo.toml\"",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cargo check --workspace --manifest-path \"/home/lance/projects/rookery/Cargo.toml\"",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cargo clippy --workspace --manifest-path \"/home/lance/projects/rookery/Cargo.toml\"",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 2,
+    "failed": 3,
+    "failedFeatures": [
+      "vllm-backend-lifecycle",
+      "vllm-capacity-gate-and-cross-backend",
+      "vllm-integration-tests"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "vllm-backend-lifecycle",
+      "severity": "blocking",
+      "description": "VllmBackend::adopt() verifies only that some compose-managed container is running, then stores the caller-provided container_id without verifying that specific ID is alive."
+    },
+    {
+      "featureId": "vllm-backend-lifecycle",
+      "severity": "blocking",
+      "description": "VllmBackend::stop() ignores docker compose down errors and still clears internal state/returns Ok, allowing false Stopped state when container teardown fails."
+    },
+    {
+      "featureId": "vllm-capacity-gate-and-cross-backend",
+      "severity": "blocking",
+      "description": "ModelInfoResponse uses skip_serializing_if on props, so vLLM /props 404 paths omit the props key instead of returning props: null as required."
+    },
+    {
+      "featureId": "vllm-capacity-gate-and-cross-backend",
+      "severity": "blocking",
+      "description": "VllmBackend::start() calls Docker availability checks before compose generation; this violates the requirement that compose-generation failures return before any Docker command executes."
+    },
+    {
+      "featureId": "vllm-integration-tests",
+      "severity": "blocking",
+      "description": "All env-gated integration tests share fixed host port 19876 while using parallelizable tokio tests, causing nondeterministic port-binding conflicts when ROOKERY_INTEGRATION=1."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add integration-test isolation guidance: env-gated Docker tests must avoid shared fixed ports/resources across parallel tests (use unique ports, unique compose project names, or serialized execution).",
+      "evidence": "Feature vllm-integration-tests uses a shared fixed port across multiple #[tokio::test] cases, creating a race-prone design under parallel test execution.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Clarify whether rust-backend fail-first TDD is mandatory or aspirational; if mandatory, require explicit red-phase evidence in worker verification sections.",
+      "evidence": "Feature vllm-compose-generation transcript showed implementation plus tests added together without an explicit red-phase run, despite current skill wording requiring fail-first TDD.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

@@ -1,0 +1,28 @@
+{
+  "featureId": "vllm-backend-lifecycle",
+  "reviewedAt": "2026-03-28T21:17:33Z",
+  "commitId": "57a814c1860fbedebcb369d17e829861fd1911d1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature implements the VllmBackend trait surface and factory wiring, but two lifecycle correctness issues remain: adopt() does not validate the specific persisted container_id, and stop() suppresses compose-down failures while reporting success.",
+    "issues": [
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 423,
+        "severity": "blocking",
+        "description": "adopt() only checks whether any container for the compose project is running (is_container_running via `docker compose ps -q`) and then stores the caller-provided container_id at line 429. It never verifies that the provided/persisted container_id itself is running, so stale or mismatched IDs can be adopted and persisted as if valid."
+      },
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 393,
+        "severity": "blocking",
+        "description": "stop() discards errors from `docker compose down` (`let _ = ...`) and always clears internal state/returns Ok. If compose down fails, the daemon can report Stopped while the container is still running, breaking lifecycle correctness."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed handoff, transcript skeleton, skill file, and commit 57a814c diff. VllmBackend lifecycle is mostly implemented, but adopt() and stop() contain blocking correctness gaps that can cause stale/misreported runtime state, so this review is marked fail."
+}
