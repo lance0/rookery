@@ -1,0 +1,9 @@
+commands:
+  install: echo "No install step needed — Rust uses cargo"
+  build: cargo build --release
+  test: cargo test --workspace
+  typecheck: cargo check --workspace
+  lint: cargo clippy --workspace
+  dashboard-build: cd crates/rookery-dashboard && trunk build --release
+
+services: {}
