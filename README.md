@@ -2,6 +2,8 @@
 
 Local inference command center. Manages llama-server processes, GPU monitoring, model profiles, agent lifecycle, and hot-swap from a single daemon + CLI.
 
+**[Documentation](docs/README.md)** — Quick start, configuration reference, agent management, API reference, CLI reference, architecture.
+
 ## Quick Start
 
 ```bash
@@ -35,15 +37,16 @@ rookery completions bash    # generate shell completions
 
 ## Dashboard
 
-Open `http://127.0.0.1:3000/` for a Leptos WASM dashboard with tabbed UI:
+Open the dashboard at your configured `listen` address (default: `http://localhost:3131/`):
 
-- **Overview** — GPU gauges, server status, model info, server stats (requests, context window)
+- **Overview** — GPU gauges, server status, model info, server stats, agent panel with health metrics
 - **Settings** — profile switcher, sampling param editor (saves to config.toml), agent controls
 - **Chat** — streaming chat playground (SSE proxy to llama-server)
-- **Bench** — PP + gen speed benchmark
+- **Bench** — PP + gen speed benchmark with error toasts
 - **Logs** — live log viewer
+- **Models** — search HuggingFace, browse quants, VRAM-aware recommendations, download
 
-Keyboard shortcuts: `1`-`5` switch tabs, `s` start, `x` stop, `t` toggle theme. All data streams via SSE with automatic reconnection.
+Keyboard shortcuts: `1`-`6` switch tabs, `s` start, `x` stop, `t` toggle theme. Mobile responsive. All data streams via SSE with automatic reconnection.
 
 ## Architecture
 
@@ -108,6 +111,13 @@ The daemon exposes a REST API:
 | `/api/model-info` | GET | Model ID, context window from llama-server |
 | `/api/server-stats` | GET | Slot status, request count from llama-server |
 | `/api/chat` | POST | Streaming chat proxy to llama-server |
+| `/api/agents/{name}/health` | GET | Detailed agent health (uptime, restarts, errors) |
+| `/api/hardware` | GET | Hardware profile (GPU, CPU, RAM) |
+| `/api/models/search` | GET | Search HuggingFace for GGUF repos |
+| `/api/models/quants` | GET | List available quants for a repo |
+| `/api/models/recommend` | GET | VRAM-aware quant recommendation |
+| `/api/models/cached` | GET | List locally cached models |
+| `/api/models/pull` | POST | Download a model |
 
 ## systemd
 
