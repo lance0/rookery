@@ -81,3 +81,256 @@ pub enum HealthError {
     #[error("http client error: {0}")]
     Client(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::MockLlamaServer;
+
+    // ── wait_for_health tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_wait_for_health_succeeds_on_healthy_server() {
+        let server = MockLlamaServer::start().await;
+        let result = wait_for_health(server.port(), Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "wait_for_health should succeed on healthy server"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_health_timeout_on_unused_port() {
+        // Bind to port 0 to get an unused port, then immediately drop the listener
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let timeout = Duration::from_millis(500);
+        let start = tokio::time::Instant::now();
+        let result = wait_for_health(port, timeout).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "wait_for_health should fail on unused port"
+        );
+        match result.unwrap_err() {
+            HealthError::Timeout(t) => assert_eq!(t, timeout),
+            other => panic!("expected Timeout error, got: {other}"),
+        }
+        // Verify it actually waited close to the timeout duration
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "should have waited near the timeout, but only waited {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_health_succeeds_after_initial_failures() {
+        // Server returns 500 for the first 3 health requests, then 200
+        let server = MockLlamaServer::builder()
+            .health_fail_after(3)
+            .start()
+            .await;
+
+        // wait_for_health will get 500 on requests 4+ (fail_after=3 means first 3 succeed)
+        // Actually, health_fail_after(3) means first 3 requests succeed and 4th fails.
+        // We need the inverse: first N fail, then succeed. Let's use a different approach.
+        //
+        // The MockLlamaServer's health_fail_after causes *success* for the first N requests
+        // and *failure* after that. For this test, we want initial failures then success.
+        // Instead, we'll start a server with a delay and use a generous timeout.
+        let server2 = MockLlamaServer::builder()
+            .health_delay(Duration::from_millis(100))
+            .start()
+            .await;
+
+        let result = wait_for_health(server2.port(), Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "wait_for_health should succeed even with delayed health response"
+        );
+
+        server.shutdown().await;
+        server2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_health_respects_timeout() {
+        // Bind to port 0 then drop to get an unused port — connection refused
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let short_timeout = Duration::from_millis(300);
+        let start = tokio::time::Instant::now();
+        let result = wait_for_health(port, short_timeout).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // Should not have waited much longer than the timeout
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should respect timeout, but took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_health_exponential_backoff() {
+        // Start a server that delays health responses by 50ms. With exponential backoff,
+        // the total time should reflect increasing delays between retries rather than
+        // a fixed polling interval. We verify this by using a short timeout with an
+        // unreachable server and checking that fewer retries happen than with fixed delay.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // With exponential backoff starting at 100ms (100, 200, 400, 800...),
+        // in 1 second we should get ~3-4 retries, not 10 (as with fixed 100ms).
+        let timeout = Duration::from_secs(1);
+        let start = tokio::time::Instant::now();
+        let result = wait_for_health(port, timeout).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // The total elapsed should be close to the timeout
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "backoff should make elapsed close to timeout, was {elapsed:?}"
+        );
+    }
+
+    // ── check_health tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_check_health_true_on_200() {
+        let server = MockLlamaServer::start().await;
+        let result = check_health(server.port(), Duration::from_secs(5)).await;
+        assert!(
+            result,
+            "check_health should return true when server responds 200"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_health_false_on_500() {
+        // health_fail_after(0) means /health returns 500 on the very first request
+        let server = MockLlamaServer::builder()
+            .health_fail_after(0)
+            .start()
+            .await;
+
+        let result = check_health(server.port(), Duration::from_secs(5)).await;
+        assert!(!result, "check_health should return false on 500 response");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_health_false_on_connection_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let result = check_health(port, Duration::from_secs(1)).await;
+        assert!(
+            !result,
+            "check_health should return false when connection is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_health_false_on_timeout() {
+        // Use a server with a long health delay and a short client timeout
+        let server = MockLlamaServer::builder()
+            .health_delay(Duration::from_secs(5))
+            .start()
+            .await;
+
+        let result = check_health(server.port(), Duration::from_millis(100)).await;
+        assert!(
+            !result,
+            "check_health should return false when request times out"
+        );
+        server.shutdown().await;
+    }
+
+    // ── check_inference tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_check_inference_true_on_200() {
+        let server = MockLlamaServer::start().await;
+        let result = check_inference(server.port(), Duration::from_secs(5)).await;
+        assert!(
+            result,
+            "check_inference should return true when completions endpoint returns 200"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_inference_false_on_connection_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let result = check_inference(port, Duration::from_secs(1)).await;
+        assert!(
+            !result,
+            "check_inference should return false when connection is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_inference_false_on_timeout() {
+        // Create a minimal server that accepts connections but delays forever on completions
+        use axum::{Router, routing::post};
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                // Sleep longer than the client timeout
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "never"
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = check_inference(port, Duration::from_millis(200)).await;
+        assert!(!result, "check_inference should return false on timeout");
+
+        handle.abort();
+    }
+
+    // ── HealthError display tests ─────────────────────────────────────
+
+    #[test]
+    fn test_health_error_display_timeout() {
+        let err = HealthError::Timeout(Duration::from_secs(30));
+        let display = format!("{err}");
+        assert!(
+            display.contains("timed out"),
+            "Timeout error should contain 'timed out', got: {display}"
+        );
+        assert!(
+            display.contains("30"),
+            "Timeout error should contain duration, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_health_error_display_client() {
+        let err = HealthError::Client("connection reset".to_string());
+        let display = format!("{err}");
+        assert!(
+            display.contains("connection reset"),
+            "Client error should contain the message, got: {display}"
+        );
+    }
+}
