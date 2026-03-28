@@ -202,39 +202,45 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Cache cargo registry + build artifacts for fast CI
 - [ ] Test matrix: stable + nightly Rust
 
-## vLLM Backend Support
+## vLLM Backend Support (Done — Core)
 
-### Architecture
-- [ ] Backend trait: abstract ProcessManager behind `InferenceBackend` trait (start, stop, health, swap)
-- [ ] `LlamaServerBackend`: current implementation wrapped in trait (zero behavior change)
-- [ ] `VllmBackend`: Docker-based backend (docker compose up/down)
-- [ ] Config: `backend = "llama-server" | "vllm"` on profile (default: llama-server)
-- [ ] Backend selection at startup based on profile config
+### Architecture (Done)
+- [x] Backend trait: `InferenceBackend` trait in `backend.rs` (start, stop, health, swap, subscribe_errors)
+- [x] `LlamaServerBackend`: wraps ProcessManager, zero behavior change
+- [x] `VllmBackend`: Docker-based backend (docker compose up/down, log capture, CUDA detection)
+- [x] Config: profile sub-tables `[profiles.name.llama_server]` / `[profiles.name.vllm]`
+- [x] Backend selection at startup based on profile config
+- [x] Daemon holds `Box<dyn InferenceBackend>` — all routes polymorphic
 
-### vLLM-Specific
-- [ ] Profile params: `docker_image`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `nvfp4_backend`
-- [ ] Docker compose template generation from profile config
-- [ ] Health check: `/health` endpoint (same as llama-server, vLLM supports it)
-- [ ] Swap: docker compose down + up (with drain period like llama-server)
-- [ ] CUDA 13.0 inside container — doesn't conflict with host CUDA 12.8
-- [ ] Log capture: docker compose logs -f piped into LogBuffer
-- [ ] Model download: HuggingFace models auto-downloaded by vLLM (no pre-download needed)
+### vLLM-Specific (Done)
+- [x] Profile params: `docker_image`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `quantization`, `tool_call_parser`, `kv_cache_dtype`, `extra_args`
+- [x] Docker compose template generation (`compose.rs`) with NVIDIA GPU reservation
+- [x] Health check: same `/health` endpoint, works for both backends
+- [x] Swap: docker compose down + up with drain period
+- [x] CUDA 13.0 inside container — doesn't conflict with host CUDA 12.8
+- [x] Log capture: docker compose logs -f piped into LogBuffer with `[vllm]` prefix
+- [x] CUDA error detection in docker logs
+- [x] Compose --model validation (repo field required for vLLM profiles)
+- [x] Canary re-subscribes to backend error channel after swap (stale receiver fix)
+- [x] Capacity gate bypass for vLLM (manages own memory)
+- [x] Integration tests gated behind `ROOKERY_INTEGRATION=1`
 
-### Quantization Profiles
+### Dashboard — Multi-Backend (Done)
+- [x] Status card: backend badge ("llama.cpp" / "vLLM")
+- [x] Profile switcher: backend type indicator per profile
+- [x] ServerStats: shows "N/A" for vLLM (no /slots endpoint)
+- [ ] Backend-specific stats: vLLM batch utilization display
+
+### CLI (Done)
+- [x] `rookery status` shows backend type
+- [x] `rookery profiles` shows `[llama-server]` / `[vllm]` prefix
+- [x] `rookery bench` works against any OpenAI-compatible endpoint
+- [ ] `rookery start --backend vllm` CLI override (uses profile config currently)
+
+### Quantization Profiles & Testing (Not Yet Tested)
 - [ ] NVFP4 profile: Qwen3.5-27B-NVFP4 at ~80 tok/s gen, 229K context
 - [ ] TurboQuant KV profile: AWQ-4bit weights + turboquant35 KV cache at 262K context
 - [ ] Profile comparison: `rookery bench --profile qwen_dense --profile qwen_nvfp4` side-by-side
-
-### Dashboard — Multi-Backend
-- [ ] Status card: show backend type (llama.cpp vs vLLM) + Docker container status
-- [ ] Profile switcher: visual indicator for backend type per profile
-- [ ] Backend-specific stats: vLLM shows batch utilization, llama.cpp shows slot status
-- [ ] Log viewer: unified log stream from both backend types
-
-### CLI
-- [ ] `rookery start --backend vllm` override
-- [ ] `rookery status` shows backend type
-- [ ] `rookery bench` works against any OpenAI-compatible endpoint (already does)
 
 ### A/B Testing & Blog
 - [ ] Dual-port mode: llama.cpp on 8081 + vLLM on 8000, swap hermes between them

@@ -69,6 +69,58 @@ extra_args = ["--no-mmap"]      # additional llama-server args (optional)
 | `-1` | Unlimited thinking (model decides) |
 | `N` | Cap thinking to N tokens |
 
+## vLLM Backend
+
+Profiles can use vLLM instead of llama-server by adding a `[profiles.<name>.vllm]` sub-table:
+
+```toml
+[models.qwen35_27b_nvfp4]
+source = "hf"
+repo = "kaitchup/Qwen3.5-27B-NVFP4"
+estimated_vram_mb = 25800
+
+[profiles.qwen_nvfp4]
+model = "qwen35_27b_nvfp4"
+port = 8081
+
+[profiles.qwen_nvfp4.vllm]
+docker_image = "vllm/vllm-openai:cu130-nightly"   # Docker image
+gpu_memory_utilization = 0.89                       # fraction of VRAM to use
+max_num_seqs = 4                                    # max concurrent sequences
+max_num_batched_tokens = 4096                       # per-batch token budget
+max_model_len = 234567                              # max context length
+quantization = "awq_marlin"                         # quantization method
+tool_call_parser = "qwen3_coder"                    # tool call format parser
+kv_cache_dtype = "fp8"                              # KV cache quantization
+extra_args = ["--enable-chunked-prefill"]            # additional vLLM flags
+```
+
+### Prerequisites for vLLM
+
+- Docker + Docker Compose v2+
+- NVIDIA Container Toolkit (`nvidia-container-toolkit`)
+- HuggingFace token: set `HF_TOKEN` env var (for gated models)
+
+### How It Works
+
+1. Rookery generates `~/.config/rookery/vllm-compose.yml` from your profile config
+2. `rookery start` runs `docker compose up -d` instead of spawning llama-server
+3. `rookery stop` runs `docker compose down`
+4. Health checks, inference canary, and agent management work identically
+5. CUDA errors detected in docker logs trigger the same immediate canary
+
+### Backend Selection
+
+The backend is determined by the profile's sub-table:
+- `[profiles.name.llama_server]` → llama-server (default, can also be flat with no sub-table)
+- `[profiles.name.vllm]` → vLLM via Docker Compose
+
+```bash
+rookery start qwen_fast     # uses llama-server (has llama_server sub-table)
+rookery start qwen_nvfp4    # uses vLLM (has vllm sub-table)
+rookery swap qwen_fast       # swaps between backends seamlessly
+```
+
 ## Agents
 
 See [Agent Management](agents.md) for full documentation.

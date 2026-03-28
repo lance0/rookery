@@ -1,6 +1,6 @@
 # Rookery
 
-Local inference command center. Manages llama-server processes, GPU monitoring, model profiles, agent lifecycle, and hot-swap from a single daemon + CLI.
+Local inference command center. Manages llama-server and vLLM backends, GPU monitoring, model profiles, agent lifecycle, and hot-swap from a single daemon + CLI. Supports multiple inference backends via the `InferenceBackend` trait.
 
 **[Documentation](docs/README.md)** — Quick start, configuration reference, agent management, API reference, CLI reference, architecture.
 
@@ -52,7 +52,7 @@ Keyboard shortcuts: `1`-`6` switch tabs, `s` start, `x` stop, `t` toggle theme. 
 
 Two binaries:
 
-- **`rookeryd`** — long-running daemon (axum REST API on `127.0.0.1:3000`)
+- **`rookeryd`** — long-running daemon (axum REST API on configured `listen` address, default `0.0.0.0:3131`)
 - **`rookery`** — thin CLI that talks to the daemon over HTTP
 
 The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures logs, manages agents, and persists state across restarts. On startup it reconciles persisted state (both server and agent PIDs), adopts orphan processes, auto-starts configured agents, and cleans up stale llama-servers hogging VRAM.

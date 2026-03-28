@@ -12,10 +12,10 @@
 | Agent management | None | Full lifecycle (watchdog, health, restart) |
 | Inference health | None | Canary + CUDA stderr detection |
 | Metrics export | Prometheus + Grafana | Dashboard only (no Prometheus yet) |
-| Backend support | llama.cpp, vLLM, tabbyAPI, SD | llama.cpp (vLLM planned) |
+| Backend support | llama.cpp, vLLM, tabbyAPI, SD | llama.cpp, vLLM (Docker Compose) |
 | Model aliasing | Yes | No (use profile names) |
 | Request rewriting | Yes | No |
-| Docker orchestration | Yes | No (planned for vLLM) |
+| Docker orchestration | Yes | Yes (vLLM via Docker Compose) |
 
 ### llamactl (101 stars)
 **Architecturally similar.** Go binary with React dashboard, multi-backend.
@@ -107,7 +107,7 @@ They want **one tool that does all three**. Rookery is positioned to be that too
 | systemd + OOM protection | Done |
 | Auto-sleep / idle timeout | Roadmap |
 | Prometheus metrics | Roadmap |
-| vLLM backend | Roadmap |
+| vLLM backend | **Done** |
 | Model aliasing | Roadmap |
 | Multi-model concurrent | Roadmap |
 | Speculative decoding | Future |

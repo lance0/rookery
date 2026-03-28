@@ -16,16 +16,37 @@ crates/
 
 ### Two Binaries
 
-- **rookeryd** — long-running daemon that owns the llama-server process, monitors GPU, manages agents
+- **rookeryd** — long-running daemon that owns the inference backend, monitors GPU, manages agents
 - **rookery** — stateless CLI that makes HTTP calls to the daemon
 
 This split means the CLI can be used from any terminal, scripts, or CI. The daemon maintains all state.
+
+### Backend Abstraction
+
+The `InferenceBackend` trait (`backend.rs`) abstracts the inference server lifecycle:
+
+```
+InferenceBackend (trait)
+├── start(), stop(), is_running(), adopt()
+├── process_info(), to_server_state()
+├── is_draining(), set_draining()
+└── subscribe_errors()
+
+LlamaServerBackend          VllmBackend
+├── Wraps ProcessManager    ├── Docker Compose lifecycle
+├── spawn process           ├── docker compose up -d
+├── SIGTERM/SIGKILL         ├── docker compose down
+├── /proc/pid monitoring    ├── docker ps monitoring
+└── stderr capture          └── docker logs capture
+```
+
+The daemon holds `Box<dyn InferenceBackend>` — all routes, canary, and swap logic call trait methods without knowing which backend is active. Swapping between backends (e.g., llama-server → vLLM) creates a new backend instance.
 
 ### State Persistence
 
 Server state and agent state are persisted to JSON files (`~/.config/rookery/state.json`, `~/.config/rookery/agents.json`). On daemon restart, state is reconciled:
 
-1. Check if persisted PIDs are still alive (not zombies — reads `/proc/pid/stat`)
+1. Check if persisted PIDs/containers are still alive (not zombies — reads `/proc/pid/stat`, or `docker ps`)
 2. Adopt running processes or mark as stopped
 3. Run inference canary on adopted servers (not just health check)
 4. Bounce adopted agents for fresh connections
