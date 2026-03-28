@@ -62,9 +62,11 @@ Before writing any code, read the source files that will be modified. Understand
 - Import patterns and error handling conventions (`use crate::error::{Error, Result}`)
 - Whether async code uses `#[tokio::test]` or sync `#[test]`
 
-### 4. Write Failing Tests First (TDD)
+### 4. Write Tests (TDD where applicable)
 
-Add tests in the appropriate crate's inline test module (`#[cfg(test)] mod tests { ... }`).
+For **new features**: Write failing tests first (TDD red-green). Add tests in the appropriate crate's inline test module (`#[cfg(test)] mod tests { ... }`), confirm they fail, then implement to make them pass.
+
+For **refactoring or fix features** (behavior-preserving changes): Existing tests serve as the primary regression guard. Add targeted tests for the specific behavior being fixed or changed. The strict "fail first" requirement is relaxed — you may implement the fix and add tests together when the change is behavior-preserving and existing tests already cover the happy path.
 
 Conventions:
 - Test function names: `test_<feature>_<scenario>` (e.g., `test_config_parse_vllm_profile`)
@@ -73,8 +75,9 @@ Conventions:
 - `rookery-engine` has `tempfile = "3"` as a dev dependency for filesystem tests
 - Construct test data inline — do not rely on external fixture files
 - Test both success paths and error paths
+- **When changing API response shapes**: add tests verifying JSON structure for all states (Running, Stopped, Failed, Starting, Stopping)
 
-Run `cargo test --workspace` to confirm the new tests fail as expected.
+Run `cargo test --workspace` to confirm tests pass after implementation.
 
 ### 5. Implement the Feature
 
