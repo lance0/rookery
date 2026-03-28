@@ -347,12 +347,14 @@ pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json
         .map(|(name, p)| {
             let is_default = name == &config.default_profile;
             let model = config.models.get(&p.model);
+            let ls = p.llama_server_config();
             serde_json::json!({
                 "name": name,
                 "model": p.model,
                 "port": p.port,
-                "ctx_size": p.ctx_size,
-                "reasoning_budget": p.reasoning_budget,
+                "ctx_size": ls.as_ref().map(|c| c.ctx_size),
+                "reasoning_budget": ls.as_ref().map(|c| c.reasoning_budget),
+                "backend": p.backend_type().to_string(),
                 "default": is_default,
                 "estimated_vram_mb": model.and_then(|m| m.estimated_vram_mb),
             })

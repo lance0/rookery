@@ -2,6 +2,8 @@ llama_server = "/home/lance/projects/lancebox-inference/llama.cpp/build/bin/llam
 default_profile = "qwen_fast"
 listen = "127.0.0.1:3000"
 
+# ── Models ────────────────────────────────────────────────────────────
+
 [models.qwen35]
 source = "hf"
 repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
@@ -14,9 +16,19 @@ repo = "unsloth/Qwen3.5-27B-GGUF"
 file = "UD-Q4_K_XL"
 estimated_vram_mb = 24000
 
+# vLLM model — repo only, no GGUF file needed
+[models.qwen35_27b_nvfp4]
+source = "hf"
+repo = "kaitchup/Qwen3.5-27B-NVFP4"
+estimated_vram_mb = 20000
+
+# ── Profiles (llama-server backend) ──────────────────────────────────
+
 [profiles.qwen_fast]
 model = "qwen35"
 port = 8081
+
+[profiles.qwen_fast.llama_server]
 ctx_size = 262144
 threads = 4
 threads_batch = 24
@@ -36,6 +48,8 @@ min_p = 0.0
 [profiles.qwen_thinking]
 model = "qwen35"
 port = 8081
+
+[profiles.qwen_thinking.llama_server]
 ctx_size = 131072
 threads = 4
 threads_batch = 24
@@ -55,6 +69,8 @@ min_p = 0.0
 [profiles.qwen_dense]
 model = "qwen35_27b"
 port = 8081
+
+[profiles.qwen_dense.llama_server]
 ctx_size = 131072
 threads = 4
 threads_batch = 24
@@ -71,7 +87,25 @@ top_p = 0.8
 top_k = 20
 min_p = 0.0
 
-# Agents — external processes managed by rookery
+# ── Profiles (vLLM backend) ──────────────────────────────────────────
+
+[profiles.qwen_nvfp4]
+model = "qwen35_27b_nvfp4"
+port = 8081
+
+[profiles.qwen_nvfp4.vllm]
+docker_image = "vllm/vllm-openai:cu130-nightly"
+gpu_memory_utilization = 0.89
+max_num_seqs = 4
+max_num_batched_tokens = 4096
+max_model_len = 234567
+quantization = "awq_marlin"
+tool_call_parser = "qwen3_coder"
+kv_cache_dtype = "fp8"
+extra_args = ["--enable-chunked-prefill"]
+
+# ── Agents ────────────────────────────────────────────────────────────
+
 [agents.hermes]
 command = "/home/lance/.local/bin/hermes"
 args = ["gateway", "run", "--replace"]

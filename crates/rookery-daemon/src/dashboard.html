@@ -241,9 +241,15 @@ async function loadProfiles() {
     const btn = document.createElement('button');
     btn.className = 'profile-btn' + (p.default ? ' default' : '') + (p.name === activeProfile ? ' active' : '');
     btn.dataset.name = p.name;
-    const ctx = p.ctx_size >= 1024 ? (p.ctx_size / 1024) + 'K' : p.ctx_size;
-    const thinking = p.reasoning_budget !== 0 ? ' thinking' : '';
-    btn.textContent = `${p.name} (${ctx}${thinking})`;
+    let label;
+    if (p.ctx_size != null) {
+      const ctx = p.ctx_size >= 1024 ? (p.ctx_size / 1024) + 'K' : p.ctx_size;
+      const thinking = p.reasoning_budget !== 0 ? ' thinking' : '';
+      label = `${p.name} (${ctx}${thinking})`;
+    } else {
+      label = `${p.name} [${p.backend || 'unknown'}]`;
+    }
+    btn.textContent = label;
     btn.onclick = () => swapProfile(p.name);
     container.appendChild(btn);
   });
