@@ -324,6 +324,85 @@ impl ProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rookery_core::config::{Config, Model, Profile};
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+
+    // ── Test helpers ──────────────────────────────────────────────────
+
+    /// Build a minimal Config with a given binary path and port.
+    /// The binary is called via `Command::new(binary).args(cmd_args)` where
+    /// `cmd_args` contains all llama-server flags. Use a wrapper script
+    /// (see `make_sleep_script`) that ignores these flags.
+    fn make_test_config(binary: &str, port: u16) -> Config {
+        Config {
+            llama_server: PathBuf::from(binary),
+            default_profile: "test".into(),
+            listen: "127.0.0.1:19876".parse().unwrap(),
+            models: HashMap::from([(
+                "test_model".into(),
+                Model {
+                    source: "local".into(),
+                    repo: None,
+                    file: None,
+                    path: Some(PathBuf::from("/tmp/fake.gguf")),
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "test".into(),
+                Profile {
+                    model: "test_model".into(),
+                    port,
+                    llama_server: None,
+                    vllm: None,
+                    ctx_size: 1024,
+                    threads: 1,
+                    threads_batch: 1,
+                    batch_size: 512,
+                    ubatch_size: 256,
+                    gpu_layers: 0,
+                    gpu_index: None,
+                    cache_type_k: "f16".into(),
+                    cache_type_v: "f16".into(),
+                    flash_attention: false,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        }
+    }
+
+    /// Write an executable script to a path, ensuring the file handle is fully
+    /// closed and synced before returning. This prevents ETXTBSY errors when
+    /// the script is immediately executed.
+    fn write_test_script(path: &std::path::Path, content: &str) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    /// Create a temp script that ignores all arguments and just sleeps.
+    /// Returns (TempDir, script_path_string). TempDir must be kept alive
+    /// for the duration of the test to prevent cleanup.
+    fn make_sleep_script() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake_server.sh");
+        write_test_script(&script_path, "#!/bin/sh\nsleep 300\n");
+        let path_str = script_path.to_str().unwrap().to_string();
+        (dir, path_str)
+    }
+
+    // ── Existing is_pid_alive tests ───────────────────────────────────
 
     #[test]
     fn test_is_pid_alive_current_process() {
@@ -353,5 +432,534 @@ mod tests {
             matches!(state, 'R' | 'S' | 'D'),
             "test process should be alive (R/S/D), got '{state}'"
         );
+    }
+
+    // ── ProcessManager lifecycle tests ────────────────────────────────
+
+    /// 1. start() spawns child and reports correct ProcessInfo fields (pid, port, profile, started_at)
+    #[tokio::test]
+    async fn test_start_returns_correct_process_info() {
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, 19001);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let info = pm
+            .start(&config, "test")
+            .await
+            .expect("start should succeed");
+
+        assert!(info.pid > 0, "PID should be positive");
+        assert_eq!(info.port, 19001, "port should match profile config");
+        assert_eq!(info.profile, "test", "profile name should match");
+        assert_eq!(info.exe_path, PathBuf::from(&script));
+        assert!(
+            !info.command_line.is_empty(),
+            "command_line should be populated"
+        );
+        assert_eq!(
+            info.command_line[0], script,
+            "first arg should be the binary"
+        );
+        // started_at should be recent (within last 5 seconds)
+        let elapsed = Utc::now() - info.started_at;
+        assert!(
+            elapsed.num_seconds() < 5,
+            "started_at should be recent, was {elapsed}"
+        );
+        // Process should actually be running
+        assert!(
+            pm.is_running().await,
+            "process should be running after start"
+        );
+
+        // Clean up
+        pm.stop().await.unwrap();
+    }
+
+    /// 2. start() captures stdout into LogBuffer
+    #[tokio::test]
+    async fn test_start_captures_stdout_into_log_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_echo.sh");
+        write_test_script(
+            &script_path,
+            "#!/bin/sh\necho 'hello from test stdout'\necho 'second line'\nsleep 300\n",
+        );
+
+        let config = make_test_config(script_path.to_str().unwrap(), 19002);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer.clone());
+
+        let info = pm
+            .start(&config, "test")
+            .await
+            .expect("start should succeed");
+        assert!(info.pid > 0);
+
+        // Wait a moment for stdout to be captured by the async reader
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let lines = log_buffer.last_n(10);
+        assert!(
+            lines.iter().any(|l| l.contains("hello from test stdout")),
+            "LogBuffer should contain stdout output, got: {lines:?}"
+        );
+
+        // Clean up
+        pm.stop().await.unwrap();
+    }
+
+    /// 3. stop() on owned child — verify process dies, is_running returns false
+    #[tokio::test]
+    async fn test_stop_owned_child_kills_process() {
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, 19003);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let info = pm.start(&config, "test").await.unwrap();
+        assert!(pm.is_running().await, "should be running after start");
+        let pid = info.pid;
+
+        pm.stop().await.expect("stop should succeed");
+
+        assert!(!pm.is_running().await, "should not be running after stop");
+        assert!(
+            pm.process_info().await.is_none(),
+            "process_info should be None after stop"
+        );
+        // The OS process should also be dead
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !is_pid_alive(pid),
+            "OS process with PID {pid} should be dead after stop"
+        );
+    }
+
+    /// 4. stop() when idle — returns Ok (no-op)
+    #[tokio::test]
+    async fn test_stop_when_idle_is_noop() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        // stop() on a freshly-created ProcessManager should be fine
+        let result = pm.stop().await;
+        assert!(result.is_ok(), "stop on idle should return Ok");
+        assert!(!pm.is_running().await, "should not be running");
+    }
+
+    /// 5. adopt() then is_running() — returns true for live PID
+    #[tokio::test]
+    async fn test_adopt_then_is_running_for_live_pid() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        // Spawn a long-running process that we can adopt
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let info = ProcessInfo {
+            pid,
+            port: 19005,
+            profile: "adopted".into(),
+            started_at: Utc::now(),
+            command_line: vec!["/bin/sleep".into(), "60".into()],
+            exe_path: PathBuf::from("/bin/sleep"),
+        };
+
+        pm.adopt(info).await;
+
+        assert!(
+            pm.is_running().await,
+            "adopted process with live PID should be running"
+        );
+
+        let proc_info = pm.process_info().await;
+        assert!(proc_info.is_some());
+        assert_eq!(proc_info.unwrap().pid, pid);
+
+        // Clean up: stop the adopted process
+        pm.stop().await.unwrap();
+        // Also clean up the original child handle
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    /// 6. adopt() then stop() — kills by PID (no child handle)
+    #[tokio::test]
+    async fn test_adopt_then_stop_kills_by_pid() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        // Spawn a real process to adopt
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let info = ProcessInfo {
+            pid,
+            port: 19006,
+            profile: "adopted".into(),
+            started_at: Utc::now(),
+            command_line: vec!["/bin/sleep".into(), "60".into()],
+            exe_path: PathBuf::from("/bin/sleep"),
+        };
+
+        pm.adopt(info).await;
+        assert!(pm.is_running().await, "should be running after adopt");
+
+        // stop() should use the kill-by-PID path since there's no child handle
+        pm.stop()
+            .await
+            .expect("stop should succeed for adopted process");
+
+        assert!(!pm.is_running().await, "should not be running after stop");
+
+        // Give the OS a moment to clean up
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !is_pid_alive(pid),
+            "PID {pid} should be dead after stop on adopted process"
+        );
+
+        // Clean up child handle (already dead, but wait to reap)
+        let _ = child.wait().await;
+    }
+
+    /// 7. is_running() returns false after process exits on its own
+    #[tokio::test]
+    async fn test_is_running_false_after_process_exits() {
+        // Use a script that exits quickly
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_exit.sh");
+        write_test_script(&script_path, "#!/bin/sh\nexit 0\n");
+
+        let config = make_test_config(script_path.to_str().unwrap(), 19007);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        pm.start(&config, "test").await.unwrap();
+
+        // Wait for the process to exit
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            !pm.is_running().await,
+            "is_running should return false after process exits on its own"
+        );
+    }
+
+    /// 8. to_server_state() returns correct Running state with PID/port
+    #[tokio::test]
+    async fn test_to_server_state_returns_running_when_active() {
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, 19008);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let info = pm.start(&config, "test").await.unwrap();
+
+        let state = pm.to_server_state().await;
+        match state {
+            ServerState::Running {
+                profile, pid, port, ..
+            } => {
+                assert_eq!(profile, "test");
+                assert_eq!(pid, info.pid);
+                assert_eq!(port, 19008);
+            }
+            other => panic!("expected Running state, got {other:?}"),
+        }
+
+        pm.stop().await.unwrap();
+    }
+
+    /// 9. to_server_state() returns Stopped when nothing running
+    #[tokio::test]
+    async fn test_to_server_state_returns_stopped_when_idle() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let state = pm.to_server_state().await;
+        assert!(
+            matches!(state, ServerState::Stopped),
+            "expected Stopped, got {state:?}"
+        );
+    }
+
+    /// 10. start_and_wait() succeeds when mock server is healthy
+    #[tokio::test]
+    async fn test_start_and_wait_succeeds_with_healthy_server() {
+        use crate::test_utils::MockLlamaServer;
+
+        // Start a mock server first to get its port
+        let mock = MockLlamaServer::start().await;
+        let port = mock.port();
+
+        // Use a wrapper script that ignores args and stays alive.
+        // start_and_wait() calls start() (spawning this script) then
+        // wait_for_health(port). The mock server already serves /health on
+        // that port, so the health check passes.
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, port);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let state = pm
+            .start_and_wait(&config, "test")
+            .await
+            .expect("start_and_wait should succeed");
+
+        match state {
+            ServerState::Running {
+                profile,
+                port: state_port,
+                ..
+            } => {
+                assert_eq!(profile, "test");
+                assert_eq!(state_port, port);
+            }
+            other => panic!("expected Running state, got {other:?}"),
+        }
+
+        // Clean up
+        pm.stop().await.unwrap();
+        mock.shutdown().await;
+    }
+
+    /// 11. start_and_wait() returns Failed state on health timeout
+    ///
+    /// We cannot call start_and_wait() directly because it has a hardcoded
+    /// 120s health timeout. Instead, we replicate its logic with a short
+    /// timeout to verify the failure → stop → Failed state pattern.
+    #[tokio::test]
+    async fn test_start_and_wait_returns_failed_on_health_timeout() {
+        // Get a free port with no HTTP server → health check will fail
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, port);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let info = pm
+            .start(&config, "test")
+            .await
+            .expect("start should succeed");
+        assert!(pm.is_running().await);
+
+        // Simulate what start_and_wait does but with a short timeout
+        let health_result =
+            health::wait_for_health(info.port, std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            health_result.is_err(),
+            "health check should fail on unused port"
+        );
+
+        // stop + build Failed state like start_and_wait would
+        let _ = pm.stop().await;
+        let state = ServerState::Failed {
+            last_error: health_result.unwrap_err().to_string(),
+            profile: "test".into(),
+            since: Utc::now(),
+        };
+        match state {
+            ServerState::Failed {
+                ref last_error,
+                ref profile,
+                ..
+            } => {
+                assert!(
+                    last_error.contains("timed out"),
+                    "error should mention timeout, got: {last_error}"
+                );
+                assert_eq!(profile, "test");
+            }
+            other => panic!("expected Failed state, got {other:?}"),
+        }
+    }
+
+    /// 12. CUDA error detection in stderr triggers watch channel
+    #[tokio::test]
+    async fn test_cuda_error_detection_in_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_cuda_error.sh");
+        write_test_script(
+            &script_path,
+            "#!/bin/sh\necho 'CUDA error: out of memory' >&2\nsleep 300\n",
+        );
+
+        let config = make_test_config(script_path.to_str().unwrap(), 19012);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        // Subscribe to CUDA errors BEFORE starting
+        let mut cuda_rx = pm.subscribe_cuda_errors();
+
+        pm.start(&config, "test")
+            .await
+            .expect("start should succeed");
+
+        // Wait for the CUDA error to be detected in stderr
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), cuda_rx.changed()).await;
+
+        assert!(
+            result.is_ok(),
+            "CUDA error should trigger the watch channel within timeout"
+        );
+        assert!(
+            *cuda_rx.borrow(),
+            "CUDA error watch channel should be set to true"
+        );
+
+        pm.stop().await.unwrap();
+    }
+
+    /// 13. is_draining() returns false by default
+    #[test]
+    fn test_is_draining_default_false() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        assert!(!pm.is_draining(), "is_draining should be false by default");
+    }
+
+    /// 14. set_draining() toggles the flag correctly
+    #[test]
+    fn test_set_draining_toggles_flag() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        assert!(!pm.is_draining());
+
+        pm.set_draining(true);
+        assert!(
+            pm.is_draining(),
+            "should be draining after set_draining(true)"
+        );
+
+        pm.set_draining(false);
+        assert!(
+            !pm.is_draining(),
+            "should not be draining after set_draining(false)"
+        );
+
+        // Toggle again to verify it's not a one-time thing
+        pm.set_draining(true);
+        assert!(pm.is_draining());
+    }
+
+    /// start() when already running returns an error
+    #[tokio::test]
+    async fn test_start_when_already_running_returns_error() {
+        let (_dir, script) = make_sleep_script();
+        let config = make_test_config(&script, 19015);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        pm.start(&config, "test")
+            .await
+            .expect("first start should succeed");
+        assert!(pm.is_running().await);
+
+        let result = pm.start(&config, "test").await;
+        assert!(
+            result.is_err(),
+            "start on already-running should return error"
+        );
+        let err = result.unwrap_err();
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("already running"),
+            "error should mention 'already running', got: {err_msg}"
+        );
+
+        pm.stop().await.unwrap();
+    }
+
+    /// CUDA error channel does not fire for normal (non-CUDA) stderr output
+    #[tokio::test]
+    async fn test_cuda_error_not_triggered_by_normal_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_normal_output.sh");
+        write_test_script(
+            &script_path,
+            "#!/bin/sh\necho 'normal log output' >&2\necho 'all systems go' >&2\nsleep 300\n",
+        );
+
+        let config = make_test_config(script_path.to_str().unwrap(), 19016);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let mut cuda_rx = pm.subscribe_cuda_errors();
+
+        pm.start(&config, "test")
+            .await
+            .expect("start should succeed");
+
+        // Wait briefly for stderr to be processed
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(500), cuda_rx.changed()).await;
+
+        assert!(
+            result.is_err(),
+            "CUDA error channel should NOT fire for normal stderr output"
+        );
+
+        pm.stop().await.unwrap();
+    }
+
+    /// process_info() returns None when no process is running
+    #[tokio::test]
+    async fn test_process_info_none_when_idle() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        assert!(
+            pm.process_info().await.is_none(),
+            "process_info should be None when idle"
+        );
+    }
+
+    /// ggml_cuda_error variant also triggers the CUDA error watch channel
+    #[tokio::test]
+    async fn test_ggml_cuda_error_detection_in_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_ggml_cuda.sh");
+        write_test_script(
+            &script_path,
+            "#!/bin/sh\necho 'ggml_cuda_error: device kernel launch failed' >&2\nsleep 300\n",
+        );
+
+        let config = make_test_config(script_path.to_str().unwrap(), 19017);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let pm = ProcessManager::new(log_buffer);
+
+        let mut cuda_rx = pm.subscribe_cuda_errors();
+
+        pm.start(&config, "test")
+            .await
+            .expect("start should succeed");
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(3), cuda_rx.changed()).await;
+
+        assert!(
+            result.is_ok(),
+            "ggml_cuda_error should trigger the watch channel"
+        );
+        assert!(*cuda_rx.borrow());
+
+        pm.stop().await.unwrap();
     }
 }
