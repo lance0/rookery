@@ -2493,6 +2493,523 @@ mod tests {
         let _ = backend.docker_compose_cmd(&["down"]).await;
     }
 
+    // ── Backend interaction tests (VAL-BACK-001, VAL-BACK-002, VAL-BACK-003) ──
+
+    /// Helper: write an executable script to a path, syncing to disk before
+    /// returning to prevent ETXTBSY when the script is immediately executed.
+    fn write_test_script(path: &std::path::Path, content: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o755)).unwrap();
+        // Brief pause to ensure filesystem has fully released the file handle.
+        // Prevents ETXTBSY on Linux when multiple test threads write scripts.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    /// Helper: build a minimal Config for LlamaServerBackend tests.
+    fn make_backend_test_config(binary: &str, port: u16) -> rookery_core::config::Config {
+        use rookery_core::config::{Config, Model, Profile};
+        use std::collections::HashMap;
+
+        Config {
+            llama_server: PathBuf::from(binary),
+            default_profile: "test".into(),
+            listen: format!("127.0.0.1:{port}").parse().unwrap(),
+            models: HashMap::from([(
+                "test_model".into(),
+                Model {
+                    source: "local".into(),
+                    repo: None,
+                    file: None,
+                    path: Some(PathBuf::from("/tmp/fake.gguf")),
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "test".into(),
+                Profile {
+                    model: "test_model".into(),
+                    port,
+                    llama_server: None,
+                    vllm: None,
+                    ctx_size: 1024,
+                    threads: 1,
+                    threads_batch: 1,
+                    batch_size: 512,
+                    ubatch_size: 256,
+                    gpu_layers: 0,
+                    gpu_index: None,
+                    cache_type_k: "f16".into(),
+                    cache_type_v: "f16".into(),
+                    flash_attention: false,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        }
+    }
+
+    // === VAL-BACK-001: LlamaServerBackend start + health check succeeds with mock server ===
+    //
+    // Tests the full start+health interaction: LlamaServerBackend::start() spawns
+    // a process, then wait_for_health() confirms the mock server is responding.
+    // Verifies BackendInfo has correct fields after health check passes.
+    #[tokio::test]
+    async fn test_llama_backend_start_then_health_succeeds_with_mock() {
+        use crate::test_utils::MockLlamaServer;
+
+        // Start a mock server to handle health checks
+        let mock = MockLlamaServer::start().await;
+        let port = mock.port();
+
+        // Create a sleep script as the "binary" to spawn
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake_server.sh");
+        write_test_script(&script_path, "#!/bin/sh\nsleep 300\n");
+
+        let config = make_backend_test_config(script_path.to_str().unwrap(), port);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        // start() spawns the process and returns BackendInfo
+        let info = backend
+            .start(&config, "test")
+            .await
+            .expect("start should succeed");
+
+        // Verify BackendInfo fields
+        assert!(
+            info.pid.is_some(),
+            "pid should be set for llama-server backend"
+        );
+        assert!(info.pid.unwrap() > 0, "pid should be positive");
+        assert_eq!(info.port, port);
+        assert_eq!(info.profile, "test");
+        assert_eq!(info.backend_type, BackendType::LlamaServer);
+        assert_eq!(info.container_id, None, "llama-server has no container_id");
+        assert!(
+            !info.command_line.is_empty(),
+            "command_line should be populated"
+        );
+
+        // Now perform the health check against the mock server
+        // This simulates what the daemon does after backend.start()
+        let health_result = health::wait_for_health(port, std::time::Duration::from_secs(5)).await;
+        assert!(
+            health_result.is_ok(),
+            "health check should pass against mock server: {:?}",
+            health_result.err()
+        );
+
+        // Backend should still be running after health check
+        assert!(
+            backend.is_running().await,
+            "should be running after health passes"
+        );
+
+        // to_server_state should reflect Running
+        let state = backend.to_server_state().await;
+        match state {
+            ServerState::Running {
+                profile, port: p, ..
+            } => {
+                assert_eq!(profile, "test");
+                assert_eq!(p, port);
+            }
+            other => panic!("expected Running state, got: {other:?}"),
+        }
+
+        // Clean up
+        backend.stop().await.unwrap();
+        mock.shutdown().await;
+    }
+
+    // === VAL-BACK-001: LlamaServerBackend start with failing health — error, process cleaned up ===
+    //
+    // When the health check fails after start(), the process should be
+    // cleaned up (stopped). This tests the failure path of the start+health
+    // interaction that the daemon performs.
+    #[tokio::test]
+    async fn test_llama_backend_start_failing_health_cleans_up_process() {
+        // Get a free port with NO server listening — health check will fail
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Release port — nothing listening
+
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake_server.sh");
+        write_test_script(&script_path, "#!/bin/sh\nsleep 300\n");
+
+        let config = make_backend_test_config(script_path.to_str().unwrap(), port);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        // start() spawns the process (succeeds)
+        let info = backend
+            .start(&config, "test")
+            .await
+            .expect("start should succeed — it just spawns the process");
+
+        assert!(info.pid.is_some());
+        assert!(
+            backend.is_running().await,
+            "process should be running right after start"
+        );
+
+        // Health check with a short timeout — no server is listening, so it fails
+        let health_result =
+            health::wait_for_health(port, std::time::Duration::from_millis(500)).await;
+        assert!(
+            health_result.is_err(),
+            "health check should fail on port with no server"
+        );
+
+        // Simulate daemon behavior: on health failure, stop the process
+        let stop_result = backend.stop().await;
+        assert!(
+            stop_result.is_ok(),
+            "stop should succeed after health failure"
+        );
+
+        // Process should be cleaned up
+        assert!(
+            !backend.is_running().await,
+            "process should be stopped after health failure cleanup"
+        );
+        assert!(
+            backend.process_info().await.is_none(),
+            "process_info should be None after cleanup"
+        );
+    }
+
+    // === VAL-BACK-002: Swap drain lifecycle — LlamaServerBackend ===
+    //
+    // Tests the full drain lifecycle during swap: start backend, set draining,
+    // verify state, clear draining, verify state. Also checks that
+    // to_server_state() still works correctly while draining.
+    #[tokio::test]
+    async fn test_swap_drain_lifecycle_llama_server_backend() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        // Adopt a live PID to simulate a running backend
+        let info = BackendInfo {
+            pid: Some(std::process::id()),
+            container_id: None,
+            port: 8081,
+            profile: "active_profile".into(),
+            started_at: Utc::now(),
+            backend_type: BackendType::LlamaServer,
+            command_line: vec!["llama-server".into()],
+            exe_path: Some(PathBuf::from("/usr/bin/llama-server")),
+        };
+        backend.adopt(info).await.unwrap();
+        assert!(backend.is_running().await, "should be running after adopt");
+
+        // Phase 1: Not draining initially
+        assert!(!backend.is_draining(), "should not be draining initially");
+
+        // Phase 2: Enter drain mode (swap initiated)
+        backend.set_draining(true);
+        assert!(
+            backend.is_draining(),
+            "should be draining after set_draining(true)"
+        );
+
+        // While draining, backend should still report as running
+        assert!(
+            backend.is_running().await,
+            "should still be running while draining"
+        );
+
+        // to_server_state should still return Running during drain
+        let state = backend.to_server_state().await;
+        assert!(
+            matches!(state, ServerState::Running { .. }),
+            "should be Running while draining, got: {state:?}"
+        );
+
+        // Phase 3: Exit drain mode (swap completed or cancelled)
+        backend.set_draining(false);
+        assert!(
+            !backend.is_draining(),
+            "should not be draining after set_draining(false)"
+        );
+
+        // Still running
+        assert!(
+            backend.is_running().await,
+            "should still be running after drain cleared"
+        );
+    }
+
+    // === VAL-BACK-002: Swap drain lifecycle — VllmBackend ===
+    //
+    // Same lifecycle test for VllmBackend. Since VllmBackend uses AtomicBool
+    // for draining (independent of container state), this verifies the drain
+    // flag works correctly without requiring a running container.
+    #[test]
+    fn test_swap_drain_lifecycle_vllm_backend() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = VllmBackend::new(PathBuf::from("/tmp/test-compose.yml"), log_buffer);
+
+        // Phase 1: Not draining initially
+        assert!(!backend.is_draining(), "should not be draining initially");
+
+        // Phase 2: Enter drain mode
+        backend.set_draining(true);
+        assert!(
+            backend.is_draining(),
+            "should be draining after set_draining(true)"
+        );
+
+        // Phase 3: Exit drain mode
+        backend.set_draining(false);
+        assert!(
+            !backend.is_draining(),
+            "should not be draining after set_draining(false)"
+        );
+
+        // Phase 4: Can re-enter drain mode (e.g., another swap)
+        backend.set_draining(true);
+        assert!(backend.is_draining(), "should be draining again");
+        backend.set_draining(false);
+        assert!(!backend.is_draining(), "should exit drain mode again");
+    }
+
+    // === VAL-BACK-002: Backend replacement during swap ===
+    //
+    // During a swap, the old backend is draining while a new backend is
+    // created fresh. This test verifies that the new backend starts with
+    // a clean state (not draining, not running), while the old one remains
+    // draining. Tests both LlamaServerBackend and VllmBackend.
+    #[tokio::test]
+    async fn test_backend_replacement_during_swap_old_draining_new_fresh() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+
+        // Old LlamaServerBackend — simulate draining state during swap
+        let old_backend = LlamaServerBackend::new(log_buffer.clone());
+        old_backend.set_draining(true);
+        assert!(old_backend.is_draining(), "old backend should be draining");
+
+        // New backend created for the new profile — should be completely fresh
+        let new_backend = LlamaServerBackend::new(log_buffer.clone());
+        assert!(
+            !new_backend.is_draining(),
+            "new backend should NOT be draining — it was just created"
+        );
+        assert!(
+            !new_backend.is_running().await,
+            "new backend should NOT be running — it hasn't been started yet"
+        );
+        assert!(
+            new_backend.process_info().await.is_none(),
+            "new backend should have no process_info"
+        );
+        let state = new_backend.to_server_state().await;
+        assert!(
+            matches!(state, ServerState::Stopped),
+            "new backend should report Stopped"
+        );
+
+        // Old backend is still draining (state is independent)
+        assert!(
+            old_backend.is_draining(),
+            "old backend should still be draining"
+        );
+
+        // Also test with VllmBackend
+        let old_vllm = VllmBackend::new(PathBuf::from("/tmp/old.yml"), log_buffer.clone());
+        old_vllm.set_draining(true);
+        assert!(
+            old_vllm.is_draining(),
+            "old vllm backend should be draining"
+        );
+
+        let new_vllm = VllmBackend::new(PathBuf::from("/tmp/new.yml"), log_buffer);
+        assert!(
+            !new_vllm.is_draining(),
+            "new vllm backend should NOT be draining"
+        );
+        assert!(
+            !new_vllm.is_running().await,
+            "new vllm backend should NOT be running"
+        );
+
+        // Old vllm still draining
+        assert!(
+            old_vllm.is_draining(),
+            "old vllm backend should still be draining"
+        );
+    }
+
+    // === VAL-BACK-003: Backend error channel propagates CUDA errors ===
+    //
+    // Tests that CUDA errors detected in the backend's process stderr
+    // propagate through subscribe_errors(). Uses a script that outputs
+    // a CUDA error line to stderr.
+    #[tokio::test]
+    async fn test_llama_backend_error_channel_propagates_cuda_errors() {
+        // Create a script that outputs a CUDA error to stderr, then sleeps
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("cuda_error_server.sh");
+        write_test_script(
+            &script_path,
+            "#!/bin/sh\necho 'CUDA error: out of memory' >&2\nsleep 300\n",
+        );
+
+        // Use port 0 — we don't care about health, just stderr capture
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let config = make_backend_test_config(script_path.to_str().unwrap(), port);
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        // Subscribe to errors BEFORE starting
+        let mut error_rx = backend.subscribe_errors();
+        assert!(!*error_rx.borrow(), "initial error state should be false");
+
+        // Start the backend — the script will output a CUDA error to stderr
+        let info = backend
+            .start(&config, "test")
+            .await
+            .expect("start should succeed");
+        assert!(info.pid.is_some());
+
+        // Wait for the CUDA error to be detected (stderr capture is async)
+        let detected = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            error_rx.wait_for(|&val| val),
+        )
+        .await;
+
+        assert!(
+            detected.is_ok(),
+            "CUDA error should be detected within timeout"
+        );
+        // Re-check with a fresh borrow after the wait completes
+        let has_error = *backend.subscribe_errors().borrow();
+        assert!(
+            has_error,
+            "error channel should report true after CUDA error"
+        );
+
+        // Clean up
+        backend.stop().await.unwrap();
+    }
+
+    // === VAL-BACK-001/VAL-BACK-003: create_backend with full Config ===
+    //
+    // Tests that create_backend() returns the correct backend type for
+    // profiles from a more complete Config, and that each backend starts
+    // with clean initial state.
+    #[test]
+    fn test_create_backend_factory_returns_correct_types_with_clean_state() {
+        use rookery_core::config::{Profile, VllmConfig};
+
+        let log_buffer = Arc::new(LogBuffer::new(100));
+
+        // LlamaServer profile
+        let llama_profile = Profile {
+            model: "test".into(),
+            port: 8081,
+            llama_server: None,
+            vllm: None,
+            ctx_size: 4096,
+            threads: 4,
+            threads_batch: 24,
+            batch_size: 4096,
+            ubatch_size: 1024,
+            gpu_layers: -1,
+            gpu_index: None,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            flash_attention: true,
+            reasoning_budget: 0,
+            chat_template: None,
+            temp: 0.7,
+            top_p: 0.8,
+            top_k: 20,
+            min_p: 0.0,
+            extra_args: vec![],
+        };
+
+        let llama_backend = create_backend(&llama_profile, log_buffer.clone())
+            .expect("should create llama-server backend");
+
+        // Verify initial clean state
+        assert!(
+            !llama_backend.is_draining(),
+            "llama backend should not be draining initially"
+        );
+        let llama_errors = llama_backend.subscribe_errors();
+        assert!(
+            !*llama_errors.borrow(),
+            "llama backend should have no errors initially"
+        );
+
+        // VllmBackend profile
+        let vllm_profile = Profile {
+            model: "test".into(),
+            port: 8082,
+            llama_server: None,
+            vllm: Some(VllmConfig {
+                docker_image: "vllm/vllm-openai:latest".into(),
+                gpu_memory_utilization: 0.9,
+                max_num_seqs: Some(16),
+                max_num_batched_tokens: Some(4096),
+                max_model_len: Some(8192),
+                quantization: Some("awq".into()),
+                tool_call_parser: Some("hermes".into()),
+                kv_cache_dtype: Some("fp8".into()),
+                extra_args: vec!["--enforce-eager".into()],
+            }),
+            ctx_size: 4096,
+            threads: 4,
+            threads_batch: 24,
+            batch_size: 4096,
+            ubatch_size: 1024,
+            gpu_layers: -1,
+            gpu_index: None,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            flash_attention: true,
+            reasoning_budget: 0,
+            chat_template: None,
+            temp: 0.7,
+            top_p: 0.8,
+            top_k: 20,
+            min_p: 0.0,
+            extra_args: vec![],
+        };
+
+        let vllm_backend =
+            create_backend(&vllm_profile, log_buffer).expect("should create vLLM backend");
+
+        // Verify initial clean state
+        assert!(
+            !vllm_backend.is_draining(),
+            "vllm backend should not be draining initially"
+        );
+        let vllm_errors = vllm_backend.subscribe_errors();
+        assert!(
+            !*vllm_errors.borrow(),
+            "vllm backend should have no errors initially"
+        );
+    }
+
     // ── Integration tests (env-gated behind ROOKERY_INTEGRATION=1) ────
     //
     // These tests perform real Docker operations and require:
