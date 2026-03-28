@@ -69,3 +69,56 @@ No single competitor has this combination:
 | Docker container orchestration | llama-swap | Medium | Part of vLLM plan |
 | Auto-unload on idle timeout | llama-swap, KoboldCpp | Medium | Medium |
 | Swagger/OpenAPI docs | llamactl | Low | Low |
+
+## Community Feature Requests (What Users Want)
+
+### Most Requested (from GitHub issues, HN, Reddit)
+
+1. **Model idle timeout / auto-sleep** — llama.cpp router never unloads, Ollama eviction is buggy. Users want configurable idle timeouts with reload on request.
+2. **VRAM-based eviction** — unload based on VRAM pressure, not just model count.
+3. **Model pinning** — pin latency-sensitive models (code completion) so they never get evicted.
+4. **Always-on home AI server** — daemon that manages full lifecycle, serves every device on LAN. 55% of enterprise AI inference is now on-premises (up from 12% in 2023).
+5. **Speculative decoding management** — small draft model proposes tokens, large model verifies.
+6. **Prometheus + Grafana metrics** — vLLM has `/metrics`, llama-server doesn't. No tool provides integrated GPU + inference metrics.
+7. **Agent crash recovery** — OpenClaw reported 8+ hours of agent downtime from hanging tool calls.
+
+### The "Three Tool Problem"
+
+Users currently need:
+- LM Studio for model discovery
+- Ollama for dev
+- vLLM for production
+
+They want **one tool that does all three**. Rookery is positioned to be that tool.
+
+### Rookery's Feature Matrix vs Community Requests
+
+| Request | Rookery Status |
+|---------|---------------|
+| Model hot-swap with drain | Done |
+| VRAM capacity gate | Done |
+| Agent watchdog + crash recovery | Done |
+| Dependency port health | Done |
+| Inference canary | Done |
+| CUDA crash detection | Done |
+| HuggingFace model discovery | Done |
+| Hardware-profiled recommendations | Done |
+| GPU dashboard (NVML) | Done |
+| systemd + OOM protection | Done |
+| Auto-sleep / idle timeout | Roadmap |
+| Prometheus metrics | Roadmap |
+| vLLM backend | Roadmap |
+| Model aliasing | Roadmap |
+| Multi-model concurrent | Roadmap |
+| Speculative decoding | Future |
+| Model pinning | Future |
+| VRAM-based eviction | Future |
+
+## Sources
+
+- [Ollama vs vLLM comparison 2026](https://www.glukhov.org/llm-hosting/comparisons/hosting-llms-ollama-localai-jan-lmstudio-vllm-comparison/)
+- [llama.cpp model management](https://huggingface.co/blog/ggml-org/model-management-in-llamacpp)
+- [llamactl: Unified management](https://github.com/lordmathis/llamactl)
+- [Ask HN: Who's running local AI workstations in 2026?](https://news.ycombinator.com/item?id=46560663)
+- [Monitoring LLM Inference: Prometheus & Grafana](https://www.glukhov.org/observability/monitoring-llm-inference-prometheus-grafana/)
+- [Local LLM Inference 2026: Complete Guide](https://blog.starmorph.com/blog/local-llm-inference-tools-guide)
