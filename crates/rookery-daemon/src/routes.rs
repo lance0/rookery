@@ -557,7 +557,6 @@ pub struct ModelInfoResponse {
     pub model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owned_by: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub props: Option<serde_json::Value>,
 }
 
@@ -1995,7 +1994,7 @@ mod tests {
     // === VAL-API-003: GET /api/model-info returns null props for vLLM ===
     //
     // When the /props endpoint returns a non-success status (404 for vLLM),
-    // the ModelInfoResponse should have props: null (None).
+    // the ModelInfoResponse should have props: null (not omitted).
     // This test verifies the response structure.
     #[test]
     fn test_model_info_response_with_null_props() {
@@ -2010,10 +2009,14 @@ mod tests {
         assert_eq!(json["available"], true);
         assert_eq!(json["model_id"], "test-model");
         assert_eq!(json["owned_by"], "vllm");
-        // props should not appear in JSON (skip_serializing_if = Option::is_none)
+        // props must be present as null (not omitted) so consumers get a consistent schema
         assert!(
-            !json.as_object().unwrap().contains_key("props"),
-            "props should be omitted when None, got: {json}"
+            json.as_object().unwrap().contains_key("props"),
+            "props key should be present in JSON, got: {json}"
+        );
+        assert!(
+            json["props"].is_null(),
+            "props should be null when /props returns 404"
         );
     }
 

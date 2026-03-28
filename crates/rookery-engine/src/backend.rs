@@ -401,11 +401,14 @@ fn is_cuda_error(line: &str) -> bool {
 #[async_trait]
 impl InferenceBackend for VllmBackend {
     async fn start(&self, config: &Config, profile: &str) -> Result<BackendInfo> {
-        // Check Docker is available first
+        // Generate the compose file FIRST — config-related failures should
+        // happen before any Docker commands are executed (VAL-CROSS-002).
+        let yaml = compose::generate_compose(config, profile)?;
+
+        // Now check Docker availability
         Self::check_docker_available().await?;
 
-        // Generate and write the compose file
-        let yaml = compose::generate_compose(config, profile)?;
+        // Write the generated compose file
         if let Some(parent) = self.compose_file_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(Error::Io)?;
         }
@@ -484,9 +487,12 @@ impl InferenceBackend for VllmBackend {
         }
 
         tracing::info!("stopping vLLM via docker compose down");
-        let _ = self.docker_compose_cmd(&["down"]).await;
 
-        // Clear internal state
+        // Propagate docker compose down errors — do NOT clear state if the
+        // container might still be running.
+        self.docker_compose_cmd(&["down"]).await?;
+
+        // Only clear internal state after successful docker compose down
         *self.container_id.lock().await = None;
         *self.info.lock().await = None;
 
@@ -513,10 +519,32 @@ impl InferenceBackend for VllmBackend {
 
         tracing::info!(container_id = %cid, profile = %info.profile, "adopting existing vLLM container");
 
-        // Verify the container is actually running
-        if !self.is_container_running().await {
+        // Verify the container is actually running AND matches the expected container ID.
+        // `docker compose ps -q` returns container IDs for running services.
+        // We must confirm the returned ID matches the BackendInfo.container_id.
+        let running_id = match self.docker_compose_cmd(&["ps", "-q"]).await {
+            Ok(output) => {
+                let id = output.trim().to_string();
+                if id.is_empty() {
+                    return Err(Error::ConfigValidation(format!(
+                        "cannot adopt vLLM container '{cid}': no container is running"
+                    )));
+                }
+                id
+            }
+            Err(_) => {
+                return Err(Error::ConfigValidation(format!(
+                    "cannot adopt vLLM container '{cid}': container is not running"
+                )));
+            }
+        };
+
+        // Verify the running container ID matches the expected one.
+        // Docker may return full 64-char IDs while BackendInfo stores a 12-char short ID
+        // (or vice versa), so compare using a prefix match.
+        if !running_id.starts_with(cid.as_str()) && !cid.starts_with(running_id.as_str()) {
             return Err(Error::ConfigValidation(format!(
-                "cannot adopt vLLM container '{cid}': container is not running"
+                "cannot adopt vLLM container '{cid}': running container ID '{running_id}' does not match"
             )));
         }
 
@@ -1542,12 +1570,75 @@ mod tests {
     // === VAL-VLLM-010: stop() invokes docker compose down and clears state ===
     //
     // After setting internal state (simulating a running container), stop()
-    // should clear container_id and info, and attempt docker compose down.
+    // should clear container_id and info on successful docker compose down.
+    // A valid compose file must exist so docker compose down can succeed.
     #[tokio::test]
     async fn test_vllm_backend_stop_clears_state() {
+        use rookery_core::config::{Config, Model, Profile, VllmConfig};
+        use std::collections::HashMap;
+
         let dir = tempfile::tempdir().unwrap();
         let compose_path = dir.path().join("vllm-compose.yml");
         let log_buffer = Arc::new(LogBuffer::new(100));
+
+        // Write a valid compose file so docker compose down succeeds
+        // (even with no running containers, `docker compose down` returns success)
+        let config = Config {
+            llama_server: PathBuf::new(),
+            default_profile: "vllm_test".into(),
+            listen: "127.0.0.1:19999".parse().unwrap(),
+            models: HashMap::from([(
+                "test_model".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("test/model".into()),
+                    file: None,
+                    path: None,
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "vllm_test".into(),
+                Profile {
+                    model: "test_model".into(),
+                    port: 19999,
+                    llama_server: None,
+                    vllm: Some(VllmConfig {
+                        docker_image: "vllm/vllm-openai:latest".into(),
+                        gpu_memory_utilization: 0.9,
+                        max_num_seqs: None,
+                        max_num_batched_tokens: None,
+                        max_model_len: None,
+                        quantization: None,
+                        tool_call_parser: None,
+                        kv_cache_dtype: None,
+                        extra_args: vec![],
+                    }),
+                    ctx_size: 4096,
+                    threads: 4,
+                    threads_batch: 24,
+                    batch_size: 4096,
+                    ubatch_size: 1024,
+                    gpu_layers: -1,
+                    gpu_index: None,
+                    cache_type_k: "q8_0".into(),
+                    cache_type_v: "q8_0".into(),
+                    flash_attention: true,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        let yaml = crate::compose::generate_compose(&config, "vllm_test").unwrap();
+        std::fs::write(&compose_path, &yaml).unwrap();
+
         let backend = VllmBackend::new(compose_path, log_buffer);
 
         // Simulate having a running container by setting internal state
@@ -1563,10 +1654,10 @@ mod tests {
             exe_path: None,
         });
 
-        // stop() should clear internal state (docker compose down may fail since
-        // there's no real compose file, but that's handled gracefully)
+        // stop() should succeed (docker compose down succeeds on valid file with no containers)
+        // and clear internal state
         let result = backend.stop().await;
-        assert!(result.is_ok(), "stop() should succeed");
+        assert!(result.is_ok(), "stop() should succeed: {:?}", result.err());
 
         // State should be cleared
         assert!(
@@ -1584,6 +1675,46 @@ mod tests {
         assert!(
             backend.process_info().await.is_none(),
             "process_info should be None after stop"
+        );
+    }
+
+    // === stop() propagates docker compose down errors and does NOT clear state ===
+    #[tokio::test]
+    async fn test_vllm_backend_stop_propagates_error_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        // Use a nonexistent compose file path to make docker compose down fail
+        let compose_path = dir.path().join("nonexistent-dir").join("bad-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = VllmBackend::new(compose_path, log_buffer);
+
+        // Simulate having a running container
+        *backend.container_id.lock().await = Some("test_container_err".into());
+        *backend.info.lock().await = Some(BackendInfo {
+            pid: None,
+            container_id: Some("test_container_err".into()),
+            port: 8081,
+            profile: "test".into(),
+            started_at: Utc::now(),
+            backend_type: BackendType::Vllm,
+            command_line: vec![],
+            exe_path: None,
+        });
+
+        // stop() should fail because docker compose down fails on bad compose file
+        let result = backend.stop().await;
+        assert!(
+            result.is_err(),
+            "stop() should propagate docker compose down error"
+        );
+
+        // Internal state should NOT be cleared when docker compose down fails
+        assert!(
+            backend.container_id.lock().await.is_some(),
+            "container_id should be preserved when stop fails"
+        );
+        assert!(
+            backend.info.lock().await.is_some(),
+            "info should be preserved when stop fails"
         );
     }
 
@@ -1876,9 +2007,70 @@ mod tests {
     // Verifies that stop() aborts the log capture task handle.
     #[tokio::test]
     async fn test_vllm_stop_aborts_log_task() {
+        use rookery_core::config::{Config, Model, Profile, VllmConfig};
+        use std::collections::HashMap;
+
         let dir = tempfile::tempdir().unwrap();
         let compose_path = dir.path().join("vllm-compose.yml");
         let log_buffer = Arc::new(LogBuffer::new(100));
+
+        // Write a valid compose file so docker compose down succeeds
+        let config = Config {
+            llama_server: PathBuf::new(),
+            default_profile: "vllm_test".into(),
+            listen: "127.0.0.1:19999".parse().unwrap(),
+            models: HashMap::from([(
+                "test_model".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("test/model".into()),
+                    file: None,
+                    path: None,
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "vllm_test".into(),
+                Profile {
+                    model: "test_model".into(),
+                    port: 19999,
+                    llama_server: None,
+                    vllm: Some(VllmConfig {
+                        docker_image: "vllm/vllm-openai:latest".into(),
+                        gpu_memory_utilization: 0.9,
+                        max_num_seqs: None,
+                        max_num_batched_tokens: None,
+                        max_model_len: None,
+                        quantization: None,
+                        tool_call_parser: None,
+                        kv_cache_dtype: None,
+                        extra_args: vec![],
+                    }),
+                    ctx_size: 4096,
+                    threads: 4,
+                    threads_batch: 24,
+                    batch_size: 4096,
+                    ubatch_size: 1024,
+                    gpu_layers: -1,
+                    gpu_index: None,
+                    cache_type_k: "q8_0".into(),
+                    cache_type_v: "q8_0".into(),
+                    flash_attention: true,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        let yaml = crate::compose::generate_compose(&config, "vllm_test").unwrap();
+        std::fs::write(&compose_path, &yaml).unwrap();
+
         let backend = VllmBackend::new(compose_path, log_buffer);
 
         // Create a fake log task (a long-running sleep)
@@ -1900,9 +2092,9 @@ mod tests {
         });
         *backend.log_task.lock().await = Some(handle);
 
-        // stop() should abort the log task
+        // stop() should abort the log task and succeed
         let result = backend.stop().await;
-        assert!(result.is_ok(), "stop() should succeed");
+        assert!(result.is_ok(), "stop() should succeed: {:?}", result.err());
 
         // log_task should be None after stop
         assert!(
@@ -2136,9 +2328,11 @@ mod tests {
     /// Build a test Config + Profile for vLLM integration tests.
     ///
     /// Uses a lightweight vLLM image and a small model to minimize
-    /// resource requirements. The caller can override fields as needed.
+    /// resource requirements. Each test should pass a unique port to
+    /// avoid conflicts when tests run in parallel.
     fn integration_test_config(
         _compose_path: &std::path::Path,
+        port: u16,
     ) -> (
         rookery_core::config::Config,
         String, // profile name
@@ -2149,10 +2343,11 @@ mod tests {
         // Use the standard vLLM OpenAI image — the actual image used must
         // be pre-pulled in the test environment. We use a small model
         // (facebook/opt-125m) that fits in minimal GPU memory.
+        let listen_addr = format!("127.0.0.1:{port}");
         let config = Config {
             llama_server: PathBuf::new(),
             default_profile: "integration_vllm".into(),
-            listen: "127.0.0.1:19876".parse().unwrap(),
+            listen: listen_addr.parse().unwrap(),
             models: HashMap::from([(
                 "opt_125m".into(),
                 Model {
@@ -2167,7 +2362,7 @@ mod tests {
                 "integration_vllm".into(),
                 Profile {
                     model: "opt_125m".into(),
-                    port: 19876,
+                    port,
                     llama_server: None,
                     vllm: Some(VllmConfig {
                         docker_image: "vllm/vllm-openai:latest".into(),
@@ -2222,7 +2417,7 @@ mod tests {
         let log_buffer = Arc::new(LogBuffer::new(1000));
         let backend = VllmBackend::new(compose_path.clone(), log_buffer);
 
-        let (config, profile) = integration_test_config(&compose_path);
+        let (config, profile) = integration_test_config(&compose_path, 19876);
 
         // Start the backend — this writes compose, runs docker compose up -d,
         // polls health endpoint with exponential backoff
@@ -2299,7 +2494,7 @@ mod tests {
         let log_buffer = Arc::new(LogBuffer::new(1000));
         let backend = VllmBackend::new(compose_path.clone(), log_buffer);
 
-        let (config, profile) = integration_test_config(&compose_path);
+        let (config, profile) = integration_test_config(&compose_path, 19877);
 
         // Start first
         let start_result = backend.start(&config, &profile).await;
@@ -2375,7 +2570,7 @@ mod tests {
         let log_buffer = Arc::new(LogBuffer::new(1000));
         let backend = VllmBackend::new(compose_path.clone(), log_buffer);
 
-        let (config, profile) = integration_test_config(&compose_path);
+        let (config, profile) = integration_test_config(&compose_path, 19878);
 
         // Phase 1: Idle — not running
         assert!(
@@ -2418,7 +2613,7 @@ mod tests {
         let compose_path = dir.path().join("vllm-compose.yml");
         let log_buffer = Arc::new(LogBuffer::new(1000));
 
-        let (config, profile) = integration_test_config(&compose_path);
+        let (config, profile) = integration_test_config(&compose_path, 19879);
 
         // Phase 1: Start a container with the first backend instance
         let backend1 = VllmBackend::new(compose_path.clone(), log_buffer.clone());
