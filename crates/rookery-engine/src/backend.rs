@@ -1986,6 +1986,106 @@ mod tests {
         );
     }
 
+    // === VAL-CROSS-002: Compose generation failure returns error before Docker commands ===
+    //
+    // When VllmBackend::start() is called with a config that causes
+    // generate_compose() to fail (e.g., missing model), the error is
+    // returned BEFORE any Docker commands are executed. No docker compose
+    // up is invoked, and the backend state remains idle.
+    #[tokio::test]
+    async fn test_vllm_start_compose_failure_returns_error_before_docker() {
+        use rookery_core::config::{Config, Model, Profile, VllmConfig};
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let compose_path = dir.path().join("vllm-compose.yml");
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = VllmBackend::new(compose_path.clone(), log_buffer);
+
+        // Config with a vLLM profile that references a nonexistent model
+        let config = Config {
+            llama_server: PathBuf::new(),
+            default_profile: "bad".into(),
+            listen: "127.0.0.1:19999".parse().unwrap(),
+            models: HashMap::from([(
+                "good_model".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("test/model".into()),
+                    file: None,
+                    path: None,
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "bad".into(),
+                Profile {
+                    model: "nonexistent".into(), // <-- references missing model
+                    port: 8081,
+                    llama_server: None,
+                    vllm: Some(VllmConfig {
+                        docker_image: "vllm/vllm-openai:latest".into(),
+                        gpu_memory_utilization: 0.9,
+                        max_num_seqs: None,
+                        max_num_batched_tokens: None,
+                        max_model_len: None,
+                        quantization: None,
+                        tool_call_parser: None,
+                        kv_cache_dtype: None,
+                        extra_args: vec![],
+                    }),
+                    ctx_size: 4096,
+                    threads: 4,
+                    threads_batch: 24,
+                    batch_size: 4096,
+                    ubatch_size: 1024,
+                    gpu_layers: -1,
+                    gpu_index: None,
+                    cache_type_k: "q8_0".into(),
+                    cache_type_v: "q8_0".into(),
+                    flash_attention: true,
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: 0.7,
+                    top_p: 0.8,
+                    top_k: 20,
+                    min_p: 0.0,
+                    extra_args: vec![],
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        // start() should fail at compose generation, BEFORE any docker commands
+        let result = backend.start(&config, "bad").await;
+        assert!(
+            result.is_err(),
+            "start() should fail when compose generation fails"
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent") || err.contains("model not found"),
+            "error should relate to the missing model config, got: {err}"
+        );
+
+        // The compose file should NOT have been written (failure happened before write)
+        assert!(
+            !compose_path.exists(),
+            "compose file should not be written when generation fails"
+        );
+
+        // Backend should remain idle — no Docker commands were executed
+        assert!(
+            !backend.is_running().await,
+            "backend should not be running after compose generation failure"
+        );
+        assert!(
+            backend.process_info().await.is_none(),
+            "no process info should exist after compose generation failure"
+        );
+    }
+
     // === VAL-VLLM-013: spawn_log_capture sets log_task handle ===
     //
     // After calling spawn_log_capture, the log_task field should
