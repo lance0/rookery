@@ -1,0 +1,28 @@
+{
+  "featureId": "fix-vllm-scrutiny-issues",
+  "reviewedAt": "2026-03-28T21:29:48Z",
+  "commitId": "21f1d1a033f955367915807d35702be42a1383bf",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The fix commit resolves four of the five prior blocking findings (adopt container-id validation, stop error propagation, model-info null serialization, and compose-before-docker ordering), and introduces unique integration-test ports. However, one blocking integration assertion remains hardcoded to the old port and now contradicts the updated test configuration.",
+    "issues": [
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 2678,
+        "severity": "blocking",
+        "description": "test_integration_vllm_orphan_adoption now builds config with port 19879 (line 2616) but still asserts adopted_info.port == 19876. With ROOKERY_INTEGRATION=1 this test will fail deterministically, so the integration test fix is incomplete."
+      },
+      {
+        "file": "crates/rookery-engine/src/backend.rs",
+        "line": 2358,
+        "severity": "non_blocking",
+        "description": "Integration helper still pins docker_image to floating tag vllm/vllm-openai:latest, which can reduce long-term reproducibility of integration test outcomes."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/home/lance/projects/rookery/.factory/validation/vllm-backend/scrutiny/synthesis.json",
+  "summary": "Reviewed transcript skeleton, handoff, prior failed reviews, skill, and commit 21f1d1a. Four previously blocking issues are fixed in implementation, but a stale hardcoded port assertion leaves one blocking failure path in env-enabled integration tests, so this fix review remains fail."
+}
