@@ -146,6 +146,11 @@ pub struct AgentConfig {
     /// Path to a pyproject.toml or Cargo.toml to extract the agent's version.
     #[serde(default)]
     pub version_file: Option<PathBuf>,
+
+    /// Stderr patterns that trigger an immediate restart (case-insensitive substring match).
+    /// Example: ["telegram.error.TimedOut", "ReadTimeout", "CLOSE_WAIT"]
+    #[serde(default)]
+    pub restart_on_error_patterns: Vec<String>,
 }
 
 fn default_port() -> u16 {

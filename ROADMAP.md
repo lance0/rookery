@@ -105,29 +105,31 @@
 - [x] Agent state persistence: agents.json, reconcile+adopt on daemon restart, auto_start support
 - [ ] Proactive restart: schedule periodic restarts (skipped — llama-server is stable)
 
-## Phase 8: Model Discovery & Management
+## Phase 8: Model Discovery & Management (Done)
 ### CLI — `rookery models`
-- [ ] `rookery models search <query>` — search HuggingFace for GGUF repos
-- [ ] `rookery models quants <repo>` — list available quants (extract labels, group split shards, show sizes, highlight recommended)
-- [ ] `rookery models recommend <repo>` — VRAM-aware auto-selection (best quant that fits in free VRAM)
-- [ ] `rookery models list` — scan HF cache for already-downloaded GGUFs
-- [ ] `rookery models pull <repo> [quant]` — download a specific quant (or auto-pick best fit)
-- [ ] Quant preference ordering: UD variants first (UD-Q4_K_XL > UD-Q4_K_L > ...), then standard (Q4_K_M > Q5_K_M > ...)
-- [ ] Auto-prefix shorthand: bare names without `/` get `unsloth/` prepended
+- [x] `rookery models search <query>` — search HuggingFace for GGUF repos
+- [x] `rookery models quants <repo>` — list available quants (extract labels, group split shards, show sizes, highlight recommended)
+- [x] `rookery models recommend <repo>` — VRAM-aware auto-selection (best quant that fits in free VRAM)
+- [x] `rookery models list` — scan HF cache for already-downloaded GGUFs
+- [x] `rookery models pull <repo> [quant]` — download a specific quant (or auto-pick best fit)
+- [x] Quant preference ordering: UD variants first (UD-Q4_K_XL > UD-Q4_K_L > ...), then standard (Q4_K_M > Q5_K_M > ...)
+- [x] Auto-prefix shorthand: bare names without `/` get `unsloth/` prepended
+- [x] `rookery models hardware` — show GPU/CPU/RAM hardware profile
 
 ### Dashboard — Model Browser
-- [ ] Model search panel in Settings or new Models tab
-- [ ] Quant selector with sizes, download status, VRAM fit indicator
-- [ ] One-click download + add to config
-- [ ] Show already-downloaded models from HF cache
-- [ ] VRAM recommendation badge per quant
+- [x] Models tab with search, quants, recommendations
+- [x] Quant selector with sizes, download status, VRAM fit indicator
+- [x] One-click download + add to config
+- [x] Show already-downloaded models from HF cache
+- [x] VRAM recommendation badge per quant
 
 ### Backend — Engine
-- [ ] HuggingFace HTTP API client in rookery-engine (repo metadata, file listing, search)
-- [ ] Quant label extraction from GGUF filenames (regex: Q4_K_M, IQ4_XS, UD-Q4_K_XL, etc.)
-- [ ] Split shard grouping (multiple files per quant, sum sizes)
-- [ ] HF cache scanner (`~/.cache/huggingface/hub/models--*` or llama.cpp cache)
-- [ ] `/api/models/search`, `/api/models/quants/:repo`, `/api/models/recommend/:repo`, `/api/models/pull` endpoints
+- [x] HuggingFace HTTP API client in rookery-engine (repo metadata, file listing, search)
+- [x] Quant label extraction from GGUF filenames (regex: Q4_K_M, IQ4_XS, UD-Q4_K_XL, etc.)
+- [x] Split shard grouping (multiple files per quant, sum sizes)
+- [x] HF cache scanner (llama.cpp cache at `~/.cache/llama.cpp/`)
+- [x] `/api/models/search`, `/api/models/quants`, `/api/models/recommend`, `/api/models/cached`, `/api/models/pull` endpoints
+- [x] Hardware profiling: GPU (NVML), CPU, RAM with bandwidth lookup + performance estimation
 
 ## Agent Reliability
 - [x] Agent health check: `depends_on_port` config — watchdog detects server restart (down→up) and bounces dependent agents
@@ -143,7 +145,7 @@
 - [x] Enriched `/api/agents` list: includes health metrics for all running agents (no N+1 calls needed)
 - [ ] Error count reset on restart: track "errors since last restart" vs "lifetime errors"
 - [ ] Agent chat timeout config: kill hung requests after configurable timeout
-- [ ] Agent restart on specific error patterns (e.g., telegram.error.TimedOut → immediate restart vs waiting for watchdog poll)
+- [x] Agent restart on error patterns: `restart_on_error_patterns` config, watch channel triggers immediate restart via watchdog select!
 
 ## Phase 9: Hermes Management Plane (Kubernetes-Style Control)
 ### Vision

@@ -62,14 +62,21 @@ pub struct AgentManager {
     persistence: AgentPersistence,
     /// Tracks consecutive crash count per agent for exponential backoff.
     crash_counts: Mutex<HashMap<String, u32>>,
+    /// Fires when a fatal error pattern is detected in agent stderr.
+    /// Value is the agent name.
+    fatal_error_tx: tokio::sync::watch::Sender<Option<String>>,
+    fatal_error_rx: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 impl AgentManager {
     pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        let (fatal_error_tx, fatal_error_rx) = tokio::sync::watch::channel(None);
         Self {
             agents: Mutex::new(HashMap::new()),
             log_buffer,
             persistence: AgentPersistence::new(),
+            fatal_error_tx,
+            fatal_error_rx,
             crash_counts: Mutex::new(HashMap::new()),
         }
     }
@@ -181,12 +188,30 @@ impl AgentManager {
             let buf = self.log_buffer.clone();
             let p = prefix.clone();
             let err_count = error_count.clone();
+            let fatal_tx = self.fatal_error_tx.clone();
+            let agent_name = name.to_string();
+            let fatal_patterns: Vec<String> = config
+                .restart_on_error_patterns
+                .iter()
+                .map(|p| p.to_ascii_lowercase())
+                .collect();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    if line.to_ascii_lowercase().contains("error") {
+                    let lower = line.to_ascii_lowercase();
+                    if lower.contains("error") {
                         err_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if !fatal_patterns.is_empty()
+                        && fatal_patterns.iter().any(|pat| lower.contains(pat))
+                    {
+                        tracing::warn!(
+                            agent = %agent_name,
+                            line = %line,
+                            "fatal error pattern detected, triggering restart"
+                        );
+                        let _ = fatal_tx.send(Some(agent_name.clone()));
                     }
                     buf.push(format!("{p} {line}"));
                 }
@@ -443,6 +468,8 @@ impl AgentManager {
             const HEALTHY_RESET_SECS: u64 = 300; // reset backoff after 5min uptime
             const BOUNCE_MIN_UPTIME_SECS: i64 = 60; // skip freshly-started agents
 
+            let mut fatal_rx = manager.fatal_error_rx.clone();
+
             // Track dependency port liveness for down→up transition detection.
             // Initialized to true so a cold start doesn't trigger a false bounce.
             let tracked_ports: std::collections::HashSet<u16> =
@@ -451,7 +478,33 @@ impl AgentManager {
                 tracked_ports.iter().map(|&p| (p, true)).collect();
 
             loop {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                // Wait for either the regular poll interval or a fatal error trigger
+                tokio::select! {
+                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    _ = fatal_rx.changed() => {
+                        // Fatal error pattern detected — restart the agent immediately
+                        let triggered = fatal_rx.borrow_and_update().clone();
+                        if let Some(agent_name) = triggered {
+                            tracing::warn!(agent = %agent_name, "fatal error pattern triggered immediate restart");
+                            if let Some(cfg) = configs.get(&agent_name) {
+                                let prev = {
+                                    let agents = manager.agents.lock().await;
+                                    agents.get(&agent_name).map(|a| (a.total_restarts, a.lifetime_errors + a.error_count.load(Ordering::Relaxed))).unwrap_or((0, 0))
+                                };
+                                let _ = manager.stop(&agent_name).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                match manager.start(&agent_name, cfg).await {
+                                    Ok(info) => {
+                                        manager.record_restart(&agent_name, "error_pattern", prev.0, prev.1).await;
+                                        tracing::info!(agent = %agent_name, pid = info.pid, "agent restarted after fatal error pattern");
+                                    }
+                                    Err(e) => tracing::error!(agent = %agent_name, error = %e, "failed to restart after fatal error pattern"),
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
 
                 // Check dependency ports for down→up transitions (server restarted).
                 // Agents holding stale connections need to be bounced.
@@ -797,6 +850,7 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            restart_on_error_patterns: vec![],
         };
 
         // Start
@@ -825,6 +879,7 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            restart_on_error_patterns: vec![],
         };
 
         manager.start("test", &config).await.unwrap();
@@ -849,6 +904,7 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            restart_on_error_patterns: vec![],
         };
 
         manager.start("test", &config).await.unwrap();
@@ -882,6 +938,7 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            restart_on_error_patterns: vec![],
         };
 
         let info = manager.start("test", &config).await.unwrap();
@@ -916,6 +973,7 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            restart_on_error_patterns: vec![],
         };
 
         manager.start("test", &config).await.unwrap();
@@ -925,6 +983,73 @@ name = "test-agent"
         assert_eq!(health.total_restarts, Some(3));
         assert_eq!(health.last_restart_reason, Some("crash".to_string()));
         assert_eq!(health.lifetime_errors, Some(5)); // prev 5 + current 0
+
+        manager.stop("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_fatal_error_pattern_detection() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo 'telegram.error.TimedOut: connection lost' >&2; sleep 60".to_string(),
+            ],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+            restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
+        };
+
+        manager.start("test", &config).await.unwrap();
+
+        // Wait for stderr to be read and fatal pattern to fire
+        let mut rx = manager.fatal_error_rx.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(3), rx.changed())
+            .await
+            .expect("fatal error should trigger within 3s")
+            .expect("watch channel should not be closed");
+
+        let triggered = rx.borrow().clone();
+        assert_eq!(triggered, Some("test".to_string()));
+
+        manager.stop("test").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_no_false_fatal_trigger() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo 'normal warning message' >&2; sleep 60".to_string(),
+            ],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+            restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
+        };
+
+        manager.start("test", &config).await.unwrap();
+
+        // Should NOT trigger within 2s since the pattern doesn't match
+        let mut rx = manager.fatal_error_rx.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx.changed()).await;
+        assert!(result.is_err(), "should timeout — no fatal pattern matched");
 
         manager.stop("test").await.unwrap();
     }
