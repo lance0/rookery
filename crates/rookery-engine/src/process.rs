@@ -73,6 +73,10 @@ impl ProcessManager {
         self.draining.load(Ordering::SeqCst)
     }
 
+    pub fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::SeqCst);
+    }
+
     pub async fn start(&self, config: &Config, profile_name: &str) -> Result<ProcessInfo> {
         // Check if already running
         if self.is_running().await {

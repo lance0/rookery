@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rookery_core::config::{BackendType, Config, Profile};
-use rookery_core::error::Result;
+use rookery_core::error::{Error, Result};
 use rookery_core::state::ServerState;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -79,6 +79,9 @@ pub trait InferenceBackend: Send + Sync {
     /// Returns true if the backend is in drain mode (swap in progress).
     fn is_draining(&self) -> bool;
 
+    /// Set the drain mode flag (called by daemon during swap orchestration).
+    fn set_draining(&self, draining: bool);
+
     /// Subscribe to error notifications (e.g., CUDA errors from stderr).
     fn subscribe_errors(&self) -> watch::Receiver<bool>;
 }
@@ -124,18 +127,19 @@ fn process_info_to_backend_info(info: &ProcessInfo) -> BackendInfo {
 
 /// Convert a `BackendInfo` (trait-level) to a `ProcessInfo` (engine-internal).
 ///
-/// Requires `pid` to be `Some` and `exe_path` to be `Some`; falls back to
-/// defaults if missing (pid=0, exe_path="" — these cases only arise from
-/// malformed adoption data).
-fn backend_info_to_process_info(info: &BackendInfo) -> ProcessInfo {
-    ProcessInfo {
-        pid: info.pid.unwrap_or(0),
+/// Returns `Err` if `pid` is `None`, since LlamaServer backend requires a valid PID.
+fn backend_info_to_process_info(info: &BackendInfo) -> Result<ProcessInfo> {
+    let pid = info.pid.ok_or_else(|| {
+        Error::ConfigValidation("pid required for LlamaServer BackendInfo".into())
+    })?;
+    Ok(ProcessInfo {
+        pid,
         port: info.port,
         profile: info.profile.clone(),
         started_at: info.started_at,
         command_line: info.command_line.clone(),
         exe_path: info.exe_path.clone().unwrap_or_default(),
-    }
+    })
 }
 
 #[async_trait]
@@ -162,7 +166,7 @@ impl InferenceBackend for LlamaServerBackend {
     }
 
     async fn adopt(&self, info: BackendInfo) -> Result<()> {
-        let process_info = backend_info_to_process_info(&info);
+        let process_info = backend_info_to_process_info(&info)?;
         self.process_manager.adopt(process_info).await;
         Ok(())
     }
@@ -175,6 +179,10 @@ impl InferenceBackend for LlamaServerBackend {
         self.process_manager.is_draining()
     }
 
+    fn set_draining(&self, draining: bool) {
+        self.process_manager.set_draining(draining);
+    }
+
     fn subscribe_errors(&self) -> watch::Receiver<bool> {
         self.process_manager.subscribe_cuda_errors()
     }
@@ -185,16 +193,16 @@ impl InferenceBackend for LlamaServerBackend {
 /// Create the appropriate backend implementation based on the profile's backend type.
 ///
 /// Returns `LlamaServerBackend` for `LlamaServer` profiles.
-/// VllmBackend for `Vllm` profiles will be added in a later milestone.
-pub fn create_backend(profile: &Profile, log_buffer: Arc<LogBuffer>) -> Box<dyn InferenceBackend> {
+/// Returns `Err` for `Vllm` profiles until `VllmBackend` is implemented.
+pub fn create_backend(
+    profile: &Profile,
+    log_buffer: Arc<LogBuffer>,
+) -> Result<Box<dyn InferenceBackend>> {
     match profile.backend_type() {
-        BackendType::LlamaServer => Box::new(LlamaServerBackend::new(log_buffer)),
-        BackendType::Vllm => {
-            // VllmBackend will be implemented in the vllm-backend milestone.
-            // For now, panic with a clear message since vLLM profiles shouldn't
-            // reach this code path until the backend is implemented.
-            unimplemented!("VllmBackend not yet implemented — coming in the vllm-backend milestone")
-        }
+        BackendType::LlamaServer => Ok(Box::new(LlamaServerBackend::new(log_buffer))),
+        BackendType::Vllm => Err(Error::ConfigValidation(
+            "vLLM backend not yet implemented".into(),
+        )),
     }
 }
 
@@ -358,6 +366,25 @@ mod tests {
         let backend = LlamaServerBackend::new(log_buffer);
 
         assert!(!backend.is_draining(), "should not be draining by default");
+    }
+
+    // === set_draining toggles drain flag ===
+    #[test]
+    fn test_llama_server_backend_set_draining() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let backend = LlamaServerBackend::new(log_buffer);
+
+        assert!(!backend.is_draining(), "should start non-draining");
+        backend.set_draining(true);
+        assert!(
+            backend.is_draining(),
+            "should be draining after set_draining(true)"
+        );
+        backend.set_draining(false);
+        assert!(
+            !backend.is_draining(),
+            "should not be draining after set_draining(false)"
+        );
     }
 
     // === subscribe_errors returns a valid receiver ===
@@ -569,16 +596,16 @@ mod tests {
             extra_args: vec![],
         };
 
-        // Should not panic — returns LlamaServerBackend
-        let backend = create_backend(&profile, log_buffer);
+        // Should return Ok with LlamaServerBackend
+        let backend =
+            create_backend(&profile, log_buffer).expect("should succeed for llama-server");
         // We can verify it works by checking initial state
         assert!(!backend.is_draining());
     }
 
-    // === VAL-TRAIT-010: create_backend() panics for Vllm profile (not yet implemented) ===
+    // === VAL-TRAIT-010: create_backend() returns Err for Vllm profile (not yet implemented) ===
     #[test]
-    #[should_panic(expected = "VllmBackend not yet implemented")]
-    fn test_create_backend_vllm_profile_unimplemented() {
+    fn test_create_backend_vllm_profile_returns_err() {
         use rookery_core::config::{Profile, VllmConfig};
 
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -617,8 +644,14 @@ mod tests {
             extra_args: vec![],
         };
 
-        // Should panic with unimplemented message
-        let _backend = create_backend(&profile, log_buffer);
+        // Should return Err with ConfigValidation
+        let result = create_backend(&profile, log_buffer);
+        assert!(result.is_err(), "should return Err for vLLM profile");
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("vLLM backend not yet implemented"),
+            "error should mention vLLM not implemented, got: {err}"
+        );
     }
 
     // === Conversion helpers: process_info <-> backend_info roundtrip ===
@@ -656,7 +689,7 @@ mod tests {
             exe_path: Some(PathBuf::from("/usr/bin/llama-server")),
         };
 
-        let pinfo = backend_info_to_process_info(&binfo);
+        let pinfo = backend_info_to_process_info(&binfo).expect("should succeed with pid present");
         assert_eq!(pinfo.pid, 42);
         assert_eq!(pinfo.port, 8081);
         assert_eq!(pinfo.profile, "fast");
@@ -665,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_info_to_process_info_missing_pid_defaults() {
+    fn test_backend_info_to_process_info_missing_pid_returns_err() {
         let binfo = BackendInfo {
             pid: None,
             container_id: None,
@@ -677,12 +710,12 @@ mod tests {
             exe_path: None,
         };
 
-        let pinfo = backend_info_to_process_info(&binfo);
-        assert_eq!(pinfo.pid, 0, "missing pid should default to 0");
-        assert_eq!(
-            pinfo.exe_path,
-            PathBuf::new(),
-            "missing exe_path should default to empty"
+        let result = backend_info_to_process_info(&binfo);
+        assert!(result.is_err(), "should return Err when pid is None");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("pid required"),
+            "error should mention pid required, got: {err}"
         );
     }
 }

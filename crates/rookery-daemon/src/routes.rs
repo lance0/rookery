@@ -13,7 +13,6 @@ pub struct StatusResponse {
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub uptime_secs: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
 }
 
@@ -251,8 +250,7 @@ pub async fn post_swap(
         {
             let backend = state.backend.lock().await;
             if backend.is_running().await {
-                // Set drain mode — new chat requests get 503
-                // Note: draining is on the backend, but we access it through the trait
+                backend.set_draining(true);
                 tracing::info!("draining in-flight requests (5s)");
             }
         }
@@ -262,6 +260,8 @@ pub async fn post_swap(
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             state.backend.lock().await.stop().await?;
         }
+        // Draining is cleared implicitly: the old backend is replaced below,
+        // and the new backend starts with draining=false.
 
         // Create new backend for the target profile and start it
         let config = state.config.read().await;
@@ -270,7 +270,7 @@ pub async fn post_swap(
             .get(&req.profile)
             .ok_or_else(|| rookery_core::error::Error::ProfileNotFound(req.profile.clone()))?;
         let new_backend =
-            rookery_engine::backend::create_backend(profile, state.log_buffer.clone());
+            rookery_engine::backend::create_backend(profile, state.log_buffer.clone())?;
         let port = profile.port;
 
         // Start the new backend
@@ -1191,13 +1191,156 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             uptime_secs: None,
             backend: None,
         },
-        _ => StatusResponse {
-            state: "transitioning".into(),
+        rookery_core::state::ServerState::Starting { profile, .. } => StatusResponse {
+            state: "starting".into(),
+            profile: Some(profile.clone()),
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        },
+        rookery_core::state::ServerState::Stopping { .. } => StatusResponse {
+            state: "stopping".into(),
             profile: None,
             pid: None,
             port: None,
             uptime_secs: None,
             backend: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === Fix #3: StatusResponse always includes 'backend' key (null when stopped) ===
+    #[test]
+    fn test_status_response_includes_backend_when_stopped() {
+        let state = rookery_core::state::ServerState::Stopped;
+        let resp = status_from_state(&state);
+        let json = serde_json::to_value(&resp).unwrap();
+        // 'backend' key must be present (as null), not omitted
+        assert!(
+            json.get("backend").is_some(),
+            "backend key should be present in JSON, got: {json}"
+        );
+        assert!(
+            json["backend"].is_null(),
+            "backend should be null when stopped"
+        );
+    }
+
+    #[test]
+    fn test_status_response_includes_backend_when_running() {
+        let state = rookery_core::state::ServerState::Running {
+            profile: "test".into(),
+            pid: 1234,
+            port: 8081,
+            since: chrono::Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: rookery_core::config::BackendType::LlamaServer,
+            container_id: None,
+        };
+        let resp = status_from_state(&state);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["backend"], "llama-server");
+    }
+
+    #[test]
+    fn test_status_response_includes_backend_when_failed() {
+        let state = rookery_core::state::ServerState::Failed {
+            last_error: "test error".into(),
+            profile: "test".into(),
+            since: chrono::Utc::now(),
+        };
+        let resp = status_from_state(&state);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            json.get("backend").is_some(),
+            "backend key should be present"
+        );
+        assert!(
+            json["backend"].is_null(),
+            "backend should be null when failed"
+        );
+    }
+
+    // === Fix #4: status_from_state returns 'starting'/'stopping' not 'transitioning' ===
+    #[test]
+    fn test_status_from_state_starting() {
+        let state = rookery_core::state::ServerState::Starting {
+            profile: "my_profile".into(),
+            since: chrono::Utc::now(),
+        };
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "starting");
+        assert_eq!(resp.profile, Some("my_profile".into()));
+    }
+
+    #[test]
+    fn test_status_from_state_stopping() {
+        let state = rookery_core::state::ServerState::Stopping {
+            since: chrono::Utc::now(),
+        };
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "stopping");
+        assert_eq!(resp.profile, None);
+    }
+
+    #[test]
+    fn test_status_from_state_stopped() {
+        let state = rookery_core::state::ServerState::Stopped;
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "stopped");
+        assert_eq!(resp.profile, None);
+    }
+
+    #[test]
+    fn test_status_from_state_running() {
+        let state = rookery_core::state::ServerState::Running {
+            profile: "fast".into(),
+            pid: 42,
+            port: 8081,
+            since: chrono::Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: rookery_core::config::BackendType::LlamaServer,
+            container_id: None,
+        };
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "running");
+        assert_eq!(resp.profile, Some("fast".into()));
+        assert_eq!(resp.pid, Some(42));
+        assert_eq!(resp.port, Some(8081));
+        assert!(resp.backend.is_some());
+    }
+
+    // === status_json_from_state always includes backend key ===
+    #[test]
+    fn test_status_json_from_state_always_has_backend() {
+        let states = vec![
+            rookery_core::state::ServerState::Stopped,
+            rookery_core::state::ServerState::Starting {
+                profile: "test".into(),
+                since: chrono::Utc::now(),
+            },
+            rookery_core::state::ServerState::Stopping {
+                since: chrono::Utc::now(),
+            },
+            rookery_core::state::ServerState::Failed {
+                last_error: "err".into(),
+                profile: "test".into(),
+                since: chrono::Utc::now(),
+            },
+        ];
+        for state in &states {
+            let json = status_json_from_state(state);
+            assert!(
+                json.get("backend").is_some(),
+                "backend key missing for state: {json}"
+            );
+        }
     }
 }

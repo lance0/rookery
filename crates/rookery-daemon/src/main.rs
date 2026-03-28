@@ -53,18 +53,24 @@ async fn main() {
     // This will be replaced during reconciliation if a different profile was running.
     let initial_backend: Box<dyn InferenceBackend> = {
         let default_profile_name = &config.default_profile;
-        if let Some(profile) = config.profiles.get(default_profile_name) {
-            backend::create_backend(profile, log_buffer.clone())
+        let profile_for_backend = if let Some(profile) = config.profiles.get(default_profile_name) {
+            profile
         } else {
-            // Fallback: create a LlamaServerBackend if no default profile found
-            backend::create_backend(
-                config.profiles.values().next().unwrap_or_else(|| {
-                    // No profiles at all — create a dummy LlamaServer backend
-                    // This path shouldn't be hit in practice
-                    panic!("no profiles configured")
-                }),
-                log_buffer.clone(),
-            )
+            config
+                .profiles
+                .values()
+                .next()
+                .unwrap_or_else(|| panic!("no profiles configured"))
+        };
+        match backend::create_backend(profile_for_backend, log_buffer.clone()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "default profile backend unavailable, falling back to LlamaServerBackend");
+                // Fallback: create a LlamaServerBackend as a placeholder
+                Box::new(rookery_engine::backend::LlamaServerBackend::new(
+                    log_buffer.clone(),
+                ))
+            }
         }
     };
     let backend: Arc<tokio::sync::Mutex<Box<dyn InferenceBackend>>> =
@@ -129,12 +135,17 @@ async fn main() {
 
                     // If the reconciled profile has a different backend type, create the right backend
                     if let Some(profile_cfg) = config.profiles.get(profile) {
-                        let correct_backend =
-                            backend::create_backend(profile_cfg, log_buffer.clone());
-                        if let Err(e) = correct_backend.adopt(adopt_info).await {
-                            tracing::warn!(error = %e, "failed to adopt into backend");
+                        match backend::create_backend(profile_cfg, log_buffer.clone()) {
+                            Ok(correct_backend) => {
+                                if let Err(e) = correct_backend.adopt(adopt_info).await {
+                                    tracing::warn!(error = %e, "failed to adopt into backend");
+                                }
+                                *backend.lock().await = correct_backend;
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to create backend for reconciled profile");
+                            }
                         }
-                        *backend.lock().await = correct_backend;
                     } else {
                         // Profile no longer in config — adopt into current backend
                         if let Err(e) = backend.lock().await.adopt(adopt_info).await {
