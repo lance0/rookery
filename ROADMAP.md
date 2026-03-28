@@ -242,10 +242,22 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Blog post: "Tool Calling Quality Across Quantization Formats on RTX 5090"
 - [ ] Hermes real-world comparison: same conversations on both backends, measure response quality
 
+## Observability & Metrics (Inspired by llama-swap, GPUStack)
+- [ ] Prometheus metrics endpoint (`/metrics`) — GPU stats, request latency, agent health, model uptime
+- [ ] Grafana dashboard template (JSON import) — GPU gauges, request throughput, error rates
+- [ ] OpenTelemetry trace export for inference requests
+- [ ] KV cache usage gauge in dashboard (requires `--metrics` flag on llama-server)
+
+## Quality of Life (Inspired by Competitive Research)
+- [ ] Model aliasing: friendly names in API requests (e.g., "fast" → qwen_fast profile)
+- [ ] Auto-sleep: unload model after idle timeout, reload on first request
+- [ ] API key auth: optional bearer token for dashboard and API access
+- [ ] Swagger/OpenAPI spec generation for the REST API
+
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
 - Custom agent framework (build/test agents against local models)
 - ~~`--json` flag on all remaining commands~~ (done)
-- KV cache usage gauge in dashboard (requires --metrics)
-- Auto-sleep (unload model after idle timeout, reload on request)
+- Request rewriting / filtering (proxy layer for API requests)
+- Multi-model concurrent serving (multiple profiles on different ports simultaneously)
