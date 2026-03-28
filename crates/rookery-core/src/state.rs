@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::BackendType;
 use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,10 @@ pub enum ServerState {
         command_line: Vec<String>,
         #[serde(default)]
         exe_path: Option<PathBuf>,
+        #[serde(default)]
+        backend_type: BackendType,
+        #[serde(default)]
+        container_id: Option<String>,
     },
     Stopping {
         since: DateTime<Utc>,
@@ -234,6 +239,8 @@ mod tests {
             since: Utc::now(),
             command_line: vec!["llama-server".into(), "-ngl".into(), "99".into()],
             exe_path: Some(PathBuf::from("/usr/bin/llama-server")),
+            backend_type: BackendType::LlamaServer,
+            container_id: None,
         };
 
         let json = serde_json::to_string(&state).unwrap();
@@ -252,8 +259,171 @@ mod tests {
             since: Utc::now(),
             command_line: vec![],
             exe_path: None,
+            backend_type: BackendType::LlamaServer,
+            container_id: None,
         };
         let reconciled = persistence.reconcile(state);
         assert!(matches!(reconciled, ServerState::Stopped));
+    }
+
+    // === VAL-TRAIT-007: ServerState::Running includes backend_type and container_id ===
+    #[test]
+    fn test_running_state_has_backend_type_and_container_id() {
+        let state = ServerState::Running {
+            profile: "vllm_prod".into(),
+            pid: 0,
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: BackendType::Vllm,
+            container_id: Some("abc123def456".into()),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+
+        // Verify both new fields appear in the JSON
+        assert!(
+            json.contains("\"backend_type\""),
+            "JSON should contain backend_type"
+        );
+        assert!(json.contains("\"vllm\""), "JSON should contain vllm value");
+        assert!(
+            json.contains("\"container_id\""),
+            "JSON should contain container_id"
+        );
+        assert!(
+            json.contains("abc123def456"),
+            "JSON should contain container_id value"
+        );
+
+        // Roundtrip
+        let restored: ServerState = serde_json::from_str(&json).unwrap();
+        match restored {
+            ServerState::Running {
+                backend_type,
+                container_id,
+                ..
+            } => {
+                assert_eq!(backend_type, BackendType::Vllm);
+                assert_eq!(container_id.as_deref(), Some("abc123def456"));
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    // === VAL-TRAIT-008: ServerState backward-compatible deserialization ===
+    #[test]
+    fn test_state_backward_compat_no_backend_type() {
+        // Simulate old state.json without backend_type or container_id fields
+        let old_json = r#"{
+            "state": "Running",
+            "profile": "fast",
+            "pid": 12345,
+            "port": 8081,
+            "since": "2025-01-01T00:00:00Z",
+            "command_line": ["llama-server", "-ngl", "99"],
+            "exe_path": "/usr/bin/llama-server"
+        }"#;
+
+        let state: ServerState = serde_json::from_str(old_json).unwrap();
+        match state {
+            ServerState::Running {
+                profile,
+                pid,
+                port,
+                backend_type,
+                container_id,
+                command_line,
+                exe_path,
+                ..
+            } => {
+                assert_eq!(profile, "fast");
+                assert_eq!(pid, 12345);
+                assert_eq!(port, 8081);
+                // New fields default correctly
+                assert_eq!(backend_type, BackendType::LlamaServer);
+                assert_eq!(container_id, None);
+                // Old fields preserved
+                assert_eq!(command_line.len(), 3);
+                assert_eq!(exe_path, Some(PathBuf::from("/usr/bin/llama-server")));
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    // === VAL-TRAIT-009: StatePersistence save/load roundtrip with backend metadata ===
+    #[test]
+    fn test_state_persistence_roundtrip_with_backend_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let persistence = StatePersistence { path };
+
+        // Save a Running state with Vllm type and container_id
+        let state = ServerState::Running {
+            profile: "vllm_prod".into(),
+            pid: 0,
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec!["--model".into(), "test/model".into()],
+            exe_path: None,
+            backend_type: BackendType::Vllm,
+            container_id: Some("container-abc-123".into()),
+        };
+
+        persistence.save(&state).unwrap();
+        let loaded = persistence.load().unwrap();
+
+        match loaded {
+            ServerState::Running {
+                profile,
+                backend_type,
+                container_id,
+                command_line,
+                ..
+            } => {
+                assert_eq!(profile, "vllm_prod");
+                assert_eq!(backend_type, BackendType::Vllm);
+                assert_eq!(container_id.as_deref(), Some("container-abc-123"));
+                assert_eq!(command_line, vec!["--model", "test/model"]);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    // === VAL-TRAIT-009 (continued): Roundtrip with LlamaServer defaults ===
+    #[test]
+    fn test_state_persistence_roundtrip_llama_server_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let persistence = StatePersistence { path };
+
+        let state = ServerState::Running {
+            profile: "fast".into(),
+            pid: 12345,
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec!["llama-server".into()],
+            exe_path: Some(PathBuf::from("/usr/bin/llama-server")),
+            backend_type: BackendType::LlamaServer,
+            container_id: None,
+        };
+
+        persistence.save(&state).unwrap();
+        let loaded = persistence.load().unwrap();
+
+        match loaded {
+            ServerState::Running {
+                pid,
+                backend_type,
+                container_id,
+                ..
+            } => {
+                assert_eq!(pid, 12345);
+                assert_eq!(backend_type, BackendType::LlamaServer);
+                assert_eq!(container_id, None);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
     }
 }

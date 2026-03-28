@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rookery-core = { path = "../rookery-core" }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

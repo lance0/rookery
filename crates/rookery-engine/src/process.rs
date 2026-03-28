@@ -267,6 +267,8 @@ impl ProcessManager {
                 since: info.started_at,
                 command_line: info.command_line,
                 exe_path: Some(info.exe_path),
+                backend_type: rookery_core::config::BackendType::LlamaServer,
+                container_id: None,
             },
             _ => ServerState::Stopped,
         }
