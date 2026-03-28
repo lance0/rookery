@@ -146,7 +146,8 @@ pub struct AgentState {
 }
 
 pub struct AgentPersistence {
-    path: PathBuf,
+    /// Path to the agents.json file. Public for test construction with tempdir.
+    pub path: PathBuf,
 }
 
 impl Default for AgentPersistence {

@@ -1053,4 +1053,430 @@ name = "test-agent"
 
         manager.stop("test").await.unwrap();
     }
+
+    /// Helper to build a default AgentConfig for tests.
+    fn test_agent_config() -> AgentConfig {
+        AgentConfig {
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            version_file: None,
+            restart_on_error_patterns: vec![],
+        }
+    }
+
+    // === VAL-AGENT-002: adopt() registers PID and is_running returns true ===
+    #[tokio::test]
+    async fn test_agent_adopt_registers_pid_and_is_tracked() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Spawn a real process to get a valid PID
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let entry = AgentEntry {
+            pid,
+            started_at: Utc::now(),
+        };
+
+        // Adopt the PID (no child handle)
+        manager.adopt("adopted-agent", &entry, None).await;
+
+        // Verify it's tracked and running
+        assert!(manager.is_running("adopted-agent").await);
+
+        // Verify it appears in list
+        let agents = manager.list().await;
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "adopted-agent");
+        assert_eq!(agents[0].pid, pid);
+        assert_eq!(agents[0].status, AgentStatus::Running);
+
+        // Clean up
+        manager.stop("adopted-agent").await.unwrap();
+        drop(child);
+    }
+
+    // === VAL-AGENT-002: stop() on adopted agent uses kill-by-PID path ===
+    #[tokio::test]
+    async fn test_agent_stop_adopted_kills_by_pid() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Spawn a real process
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(false)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        let entry = AgentEntry {
+            pid,
+            started_at: Utc::now(),
+        };
+
+        manager.adopt("adopted", &entry, None).await;
+        assert!(manager.is_running("adopted").await);
+
+        // Stop the adopted agent (should use kill-by-PID since no child handle)
+        manager.stop("adopted").await.unwrap();
+
+        // Give the process time to die
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify the process is dead
+        assert!(!is_pid_alive(pid));
+        assert!(!manager.is_running("adopted").await);
+
+        drop(child);
+    }
+
+    // === VAL-AGENT-001: stop_all() stops multiple running agents ===
+    #[tokio::test]
+    async fn test_agent_stop_all_stops_multiple_agents() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+        let config = test_agent_config();
+
+        let info1 = manager.start("agent-1", &config).await.unwrap();
+        let info2 = manager.start("agent-2", &config).await.unwrap();
+        let info3 = manager.start("agent-3", &config).await.unwrap();
+
+        assert!(manager.is_running("agent-1").await);
+        assert!(manager.is_running("agent-2").await);
+        assert!(manager.is_running("agent-3").await);
+
+        manager.stop_all().await;
+
+        assert!(!manager.is_running("agent-1").await);
+        assert!(!manager.is_running("agent-2").await);
+        assert!(!manager.is_running("agent-3").await);
+
+        // Verify processes are actually dead
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!is_pid_alive(info1.pid));
+        assert!(!is_pid_alive(info2.pid));
+        assert!(!is_pid_alive(info3.pid));
+    }
+
+    // === VAL-AGENT-001: list() returns correct status and cleans up dead agents ===
+    #[tokio::test]
+    async fn test_agent_list_returns_status_and_cleans_dead() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Start an agent that exits immediately
+        let short_config = AgentConfig {
+            command: "true".to_string(),
+            args: vec![],
+            ..test_agent_config()
+        };
+        manager.start("short-lived", &short_config).await.unwrap();
+
+        // Start a long-running agent
+        let config = test_agent_config();
+        manager.start("long-lived", &config).await.unwrap();
+
+        // Wait for the short-lived agent to exit
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // list() should detect dead agent and clean it up
+        let agents = manager.list().await;
+        assert_eq!(agents.len(), 2);
+
+        let short = agents.iter().find(|a| a.name == "short-lived").unwrap();
+        assert_eq!(short.status, AgentStatus::Stopped);
+
+        let long = agents.iter().find(|a| a.name == "long-lived").unwrap();
+        assert_eq!(long.status, AgentStatus::Running);
+
+        // After list(), the dead agent should be removed from tracking
+        // A second list() should only show the still-running agent
+        let agents2 = manager.list().await;
+        assert_eq!(agents2.len(), 1);
+        assert_eq!(agents2[0].name, "long-lived");
+
+        manager.stop("long-lived").await.unwrap();
+    }
+
+    // === VAL-AGENT-002: Agent persistence — save and load round-trip ===
+    #[test]
+    fn test_agent_persistence_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+
+        let persistence = AgentPersistence { path: path.clone() };
+
+        let now = Utc::now();
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent-a".to_string(),
+            AgentEntry {
+                pid: 12345,
+                started_at: now,
+            },
+        );
+        agents.insert(
+            "agent-b".to_string(),
+            AgentEntry {
+                pid: 67890,
+                started_at: now,
+            },
+        );
+
+        let state = AgentState { agents };
+        persistence.save(&state).unwrap();
+
+        // Verify file was written
+        assert!(path.exists());
+
+        // Load and verify
+        let loaded = persistence.load().unwrap();
+        assert_eq!(loaded.agents.len(), 2);
+        assert_eq!(loaded.agents["agent-a"].pid, 12345);
+        assert_eq!(loaded.agents["agent-b"].pid, 67890);
+    }
+
+    // === VAL-AGENT-002: Agent persistence — load from nonexistent file returns empty ===
+    #[test]
+    fn test_agent_persistence_load_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent-agents.json");
+        let persistence = AgentPersistence { path };
+
+        let state = persistence.load().unwrap();
+        assert!(state.agents.is_empty());
+    }
+
+    // === VAL-AGENT-002: Agent persistence — reconcile removes dead agents ===
+    #[test]
+    fn test_agent_persistence_reconcile_removes_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let persistence = AgentPersistence { path };
+
+        let mut agents = HashMap::new();
+        // Use a PID that definitely doesn't exist
+        agents.insert(
+            "dead-agent".to_string(),
+            AgentEntry {
+                pid: 999_999_999,
+                started_at: Utc::now(),
+            },
+        );
+        // Use PID 1 (init) which is always alive
+        agents.insert(
+            "alive-agent".to_string(),
+            AgentEntry {
+                pid: 1,
+                started_at: Utc::now(),
+            },
+        );
+
+        let state = AgentState { agents };
+        let reconciled = persistence.reconcile(state);
+
+        // Dead agent should be removed, alive agent kept
+        assert!(!reconciled.agents.contains_key("dead-agent"));
+        assert!(reconciled.agents.contains_key("alive-agent"));
+    }
+
+    // === Agent env var passing — spawn with custom env, verify they're set ===
+    #[tokio::test]
+    async fn test_agent_env_var_passing() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("env_output.txt");
+        let marker_str = marker_path.to_str().unwrap().to_string();
+
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!("echo \"MY_VAR=$MY_VAR ANOTHER=$ANOTHER\" > {marker_str}"),
+            ],
+            env: HashMap::from([
+                ("MY_VAR".to_string(), "hello_world".to_string()),
+                ("ANOTHER".to_string(), "test_value".to_string()),
+            ]),
+            ..test_agent_config()
+        };
+
+        manager.start("env-test", &config).await.unwrap();
+
+        // Wait for the process to complete and write the file
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let content = std::fs::read_to_string(&marker_path).unwrap();
+        assert!(
+            content.contains("MY_VAR=hello_world"),
+            "Expected MY_VAR=hello_world in: {content}"
+        );
+        assert!(
+            content.contains("ANOTHER=test_value"),
+            "Expected ANOTHER=test_value in: {content}"
+        );
+    }
+
+    // === Agent workdir setting — spawn with custom workdir ===
+    #[tokio::test]
+    async fn test_agent_workdir_setting() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer.clone());
+
+        let workdir = tempfile::tempdir().unwrap();
+        let output_path = workdir.path().join("workdir_output.txt");
+
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec!["-c".to_string(), "pwd > workdir_output.txt".to_string()],
+            workdir: Some(workdir.path().to_path_buf()),
+            ..test_agent_config()
+        };
+
+        manager.start("workdir-test", &config).await.unwrap();
+
+        // Wait for the process to complete
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        let expected = workdir.path().to_str().unwrap();
+        assert!(
+            content.trim().ends_with(expected) || content.trim() == expected,
+            "Expected workdir {expected} in output: {content}"
+        );
+    }
+
+    // === is_running() for adopted (PID check) vs owned (try_wait) ===
+    #[tokio::test]
+    async fn test_agent_is_running_adopted_vs_owned() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Start an owned agent
+        let config = test_agent_config();
+        manager.start("owned", &config).await.unwrap();
+
+        // Adopt a process
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let adopted_pid = child.id().unwrap();
+        let entry = AgentEntry {
+            pid: adopted_pid,
+            started_at: Utc::now(),
+        };
+        manager.adopt("adopted", &entry, None).await;
+
+        // Both should be running
+        assert!(manager.is_running("owned").await);
+        assert!(manager.is_running("adopted").await);
+
+        // Nonexistent agent returns false
+        assert!(!manager.is_running("nonexistent").await);
+
+        // Clean up
+        manager.stop("owned").await.unwrap();
+        manager.stop("adopted").await.unwrap();
+        drop(child);
+    }
+
+    // === Crash detection — agent exits unexpectedly, detected on next list() ===
+    #[tokio::test]
+    async fn test_agent_crash_detected_on_list() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Start an agent that exits after a brief delay
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec!["-c".to_string(), "sleep 0.1".to_string()],
+            ..test_agent_config()
+        };
+        manager.start("crasher", &config).await.unwrap();
+
+        // Initially running
+        assert!(manager.is_running("crasher").await);
+
+        // Wait for the process to exit
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // list() should detect the crash and report Stopped
+        let agents = manager.list().await;
+        let crashed = agents.iter().find(|a| a.name == "crasher");
+        assert!(
+            crashed.is_some(),
+            "crashed agent should still appear in list with Stopped status"
+        );
+        assert_eq!(crashed.unwrap().status, AgentStatus::Stopped);
+
+        // After list cleans up, it's no longer tracked
+        let agents2 = manager.list().await;
+        assert!(
+            agents2.is_empty(),
+            "dead agent should be cleaned up after list()"
+        );
+    }
+
+    // === Error count tracking — stderr error lines increment counter ===
+    #[tokio::test]
+    async fn test_agent_error_count_tracking() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        // Start an agent that writes error lines to stderr then sleeps
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo 'error: first problem' >&2; echo 'error: second problem' >&2; echo 'error: third problem' >&2; sleep 60"
+                    .to_string(),
+            ],
+            ..test_agent_config()
+        };
+
+        manager.start("error-agent", &config).await.unwrap();
+
+        // Wait for stderr to be captured and counted
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let health = manager.get_health("error-agent").await.unwrap();
+        assert!(
+            health.error_count.unwrap() >= 3,
+            "Expected at least 3 errors, got {}",
+            health.error_count.unwrap()
+        );
+        assert!(
+            health.lifetime_errors.unwrap() >= 3,
+            "Expected at least 3 lifetime errors, got {}",
+            health.lifetime_errors.unwrap()
+        );
+
+        manager.stop("error-agent").await.unwrap();
+    }
+
+    // === stop() on nonexistent agent returns NotFound error ===
+    #[tokio::test]
+    async fn test_agent_stop_not_found() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = AgentManager::new(log_buffer);
+
+        let err = manager.stop("nonexistent").await.unwrap_err();
+        assert!(matches!(err, AgentError::NotFound(_)));
+    }
 }
