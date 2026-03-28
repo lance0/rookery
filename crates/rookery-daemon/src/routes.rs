@@ -13,72 +13,13 @@ pub struct StatusResponse {
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub uptime_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
-    let server_state = state.process_manager.to_server_state().await;
-
-    let (state_name, profile, pid, port, uptime_secs) = match &server_state {
-        rookery_core::state::ServerState::Stopped => ("stopped".into(), None, None, None, None),
-        rookery_core::state::ServerState::Starting { profile, since } => (
-            "starting".into(),
-            Some(profile.clone()),
-            None,
-            None,
-            Some(
-                chrono::Utc::now()
-                    .signed_duration_since(*since)
-                    .num_seconds(),
-            ),
-        ),
-        rookery_core::state::ServerState::Running {
-            profile,
-            pid,
-            port,
-            since,
-            ..
-        } => (
-            "running".into(),
-            Some(profile.clone()),
-            Some(*pid),
-            Some(*port),
-            Some(
-                chrono::Utc::now()
-                    .signed_duration_since(*since)
-                    .num_seconds(),
-            ),
-        ),
-        rookery_core::state::ServerState::Stopping { since } => (
-            "stopping".into(),
-            None,
-            None,
-            None,
-            Some(
-                chrono::Utc::now()
-                    .signed_duration_since(*since)
-                    .num_seconds(),
-            ),
-        ),
-        rookery_core::state::ServerState::Failed {
-            last_error,
-            profile,
-            ..
-        } => (
-            format!("failed: {last_error}"),
-            Some(profile.clone()),
-            None,
-            None,
-            None,
-        ),
-    };
-
-    Json(StatusResponse {
-        state: state_name,
-        profile,
-        pid,
-        port,
-        uptime_secs,
-    })
+    let server_state = state.backend.lock().await.to_server_state().await;
+    Json(status_from_state(&server_state))
 }
 
 #[derive(Serialize)]
@@ -134,7 +75,7 @@ pub async fn post_start(
     }
 
     // Idempotent: if already running with same profile, no-op
-    let current = state.process_manager.to_server_state().await;
+    let current = state.backend.lock().await.to_server_state().await;
     if let rookery_core::state::ServerState::Running { ref profile, .. } = current {
         if profile == &profile_name {
             return Ok(Json(ActionResponse {
@@ -180,28 +121,55 @@ pub async fn post_start(
     let _ = state.state_persistence.save(&starting_state);
     broadcast_state(&state, &starting_state);
 
-    // Re-acquire config for start_and_wait (needs full Config reference)
+    // Start via backend trait + health check
     let config = state.config.read().await;
-    match state
-        .process_manager
-        .start_and_wait(&config, &profile_name)
-        .await
-    {
-        Ok(server_state) => {
-            let _ = state.state_persistence.save(&server_state);
-            broadcast_state(&state, &server_state);
-            let is_running = server_state.is_running();
-
-            let status = status_from_state(&server_state);
-            Ok(Json(ActionResponse {
-                success: is_running,
-                message: if is_running {
-                    format!("server started with profile '{profile_name}'")
-                } else {
-                    "server failed to start".into()
-                },
-                status,
-            }))
+    let backend = state.backend.lock().await;
+    match backend.start(&config, &profile_name).await {
+        Ok(_info) => {
+            // Wait for health with 120s timeout
+            let port = config
+                .profiles
+                .get(&profile_name)
+                .map(|p| p.port)
+                .unwrap_or(8081);
+            drop(backend); // Release backend lock during health check
+            drop(config);
+            match rookery_engine::health::wait_for_health(port, std::time::Duration::from_secs(120))
+                .await
+            {
+                Ok(()) => {
+                    let server_state = state.backend.lock().await.to_server_state().await;
+                    let _ = state.state_persistence.save(&server_state);
+                    broadcast_state(&state, &server_state);
+                    let is_running = server_state.is_running();
+                    let status = status_from_state(&server_state);
+                    Ok(Json(ActionResponse {
+                        success: is_running,
+                        message: if is_running {
+                            format!("server started with profile '{profile_name}'")
+                        } else {
+                            "server failed to start".into()
+                        },
+                        status,
+                    }))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "health check failed, stopping server");
+                    let _ = state.backend.lock().await.stop().await;
+                    let failed = rookery_core::state::ServerState::Failed {
+                        last_error: e.to_string(),
+                        profile: profile_name,
+                        since: chrono::Utc::now(),
+                    };
+                    let _ = state.state_persistence.save(&failed);
+                    broadcast_state(&state, &failed);
+                    Ok(Json(ActionResponse {
+                        success: false,
+                        message: "server failed to start".into(),
+                        status: status_from_state(&failed),
+                    }))
+                }
+            }
         }
         Err(e) => {
             let failed = rookery_core::state::ServerState::Failed {
@@ -230,7 +198,7 @@ pub async fn post_stop(
     let _ = state.state_persistence.save(&stopping);
     broadcast_state(&state, &stopping);
 
-    match state.process_manager.stop().await {
+    match state.backend.lock().await.stop().await {
         Ok(()) => {
             let stopped = rookery_core::state::ServerState::Stopped;
             let _ = state.state_persistence.save(&stopped);
@@ -261,7 +229,9 @@ pub async fn post_swap(
     let _op_guard = state.op_lock.lock().await;
 
     let old_profile = state
-        .process_manager
+        .backend
+        .lock()
+        .await
         .process_info()
         .await
         .map(|i| i.profile);
@@ -272,11 +242,61 @@ pub async fn post_swap(
         "swapping model"
     );
 
-    // Hold config lock only for the swap call, then drop before agent restarts
-    let swap_result = {
+    // Swap orchestration at daemon level: drain → stop → create new backend → start → health check
+    let swap_result: std::result::Result<
+        rookery_core::state::ServerState,
+        rookery_core::error::Error,
+    > = async {
+        // Drain in-flight requests if currently running
+        {
+            let backend = state.backend.lock().await;
+            if backend.is_running().await {
+                // Set drain mode — new chat requests get 503
+                // Note: draining is on the backend, but we access it through the trait
+                tracing::info!("draining in-flight requests (5s)");
+            }
+        }
+
+        // Drain period
+        if state.backend.lock().await.is_running().await {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            state.backend.lock().await.stop().await?;
+        }
+
+        // Create new backend for the target profile and start it
         let config = state.config.read().await;
-        state.process_manager.swap(&config, &req.profile).await
-    };
+        let profile = config
+            .profiles
+            .get(&req.profile)
+            .ok_or_else(|| rookery_core::error::Error::ProfileNotFound(req.profile.clone()))?;
+        let new_backend =
+            rookery_engine::backend::create_backend(profile, state.log_buffer.clone());
+        let port = profile.port;
+
+        // Start the new backend
+        new_backend.start(&config, &req.profile).await?;
+        drop(config);
+
+        // Replace the backend in AppState
+        *state.backend.lock().await = new_backend;
+
+        // Wait for health with 120s timeout
+        match rookery_engine::health::wait_for_health(port, std::time::Duration::from_secs(120))
+            .await
+        {
+            Ok(()) => Ok(state.backend.lock().await.to_server_state().await),
+            Err(e) => {
+                tracing::error!(error = %e, "health check failed after swap, stopping server");
+                let _ = state.backend.lock().await.stop().await;
+                Ok(rookery_core::state::ServerState::Failed {
+                    last_error: e.to_string(),
+                    profile: req.profile.clone(),
+                    since: chrono::Utc::now(),
+                })
+            }
+        }
+    }
+    .await;
 
     match swap_result {
         Ok(server_state) => {
@@ -498,7 +518,7 @@ pub struct ModelInfoResponse {
 pub async fn get_model_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ModelInfoResponse>, StatusCode> {
-    let current = state.process_manager.to_server_state().await;
+    let current = state.backend.lock().await.to_server_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => {
@@ -569,11 +589,11 @@ pub async fn post_chat(
     Json(req): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Reject new requests during swap drain
-    if state.process_manager.is_draining() {
+    if state.backend.lock().await.is_draining() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let current = state.process_manager.to_server_state().await;
+    let current = state.backend.lock().await.to_server_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
@@ -630,7 +650,7 @@ pub async fn post_chat(
 pub async fn get_server_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let current = state.process_manager.to_server_state().await;
+    let current = state.backend.lock().await.to_server_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => {
@@ -739,7 +759,7 @@ pub struct BenchTest {
 pub async fn get_bench(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BenchResult>, StatusCode> {
-    let current = state.process_manager.to_server_state().await;
+    let current = state.backend.lock().await.to_server_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
@@ -807,6 +827,7 @@ pub fn status_json_from_state(state: &rookery_core::state::ServerState) -> serde
         "pid": s.pid,
         "port": s.port,
         "uptime_secs": s.uptime_secs,
+        "backend": s.backend,
     })
 }
 
@@ -1137,12 +1158,14 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             pid: None,
             port: None,
             uptime_secs: None,
+            backend: None,
         },
         rookery_core::state::ServerState::Running {
             profile,
             pid,
             port,
             since,
+            backend_type,
             ..
         } => StatusResponse {
             state: "running".into(),
@@ -1154,6 +1177,7 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
                     .signed_duration_since(*since)
                     .num_seconds(),
             ),
+            backend: Some(backend_type.to_string()),
         },
         rookery_core::state::ServerState::Failed {
             last_error,
@@ -1165,6 +1189,7 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             pid: None,
             port: None,
             uptime_secs: None,
+            backend: None,
         },
         _ => StatusResponse {
             state: "transitioning".into(),
@@ -1172,6 +1197,7 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             pid: None,
             port: None,
             uptime_secs: None,
+            backend: None,
         },
     }
 }

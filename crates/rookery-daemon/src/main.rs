@@ -8,9 +8,9 @@ use axum::routing::{get, post, put};
 use rookery_core::config::Config;
 use rookery_core::state::{AgentPersistence, StatePersistence};
 use rookery_engine::agent::AgentManager;
+use rookery_engine::backend::{self, BackendInfo, InferenceBackend};
 use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
-use rookery_engine::process::ProcessManager;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -49,8 +49,26 @@ async fn main() {
     // Init log buffer
     let log_buffer = Arc::new(LogBuffer::new(10_000));
 
-    // Init process manager and agent manager
-    let process_manager = ProcessManager::new(log_buffer.clone());
+    // Init backend (defaults to LlamaServerBackend for the default profile)
+    // This will be replaced during reconciliation if a different profile was running.
+    let initial_backend: Box<dyn InferenceBackend> = {
+        let default_profile_name = &config.default_profile;
+        if let Some(profile) = config.profiles.get(default_profile_name) {
+            backend::create_backend(profile, log_buffer.clone())
+        } else {
+            // Fallback: create a LlamaServerBackend if no default profile found
+            backend::create_backend(
+                config.profiles.values().next().unwrap_or_else(|| {
+                    // No profiles at all — create a dummy LlamaServer backend
+                    // This path shouldn't be hit in practice
+                    panic!("no profiles configured")
+                }),
+                log_buffer.clone(),
+            )
+        }
+    };
+    let backend: Arc<tokio::sync::Mutex<Box<dyn InferenceBackend>>> =
+        Arc::new(tokio::sync::Mutex::new(initial_backend));
     let agent_manager = Arc::new(AgentManager::new(log_buffer.clone()));
 
     // State change broadcast channel
@@ -64,7 +82,7 @@ async fn main() {
         tracing::info!(state = ?format!("{:?}", reconciled), "reconciled previous state");
         let _ = state_persistence.save(&reconciled);
 
-        // Adopt the running process — but verify it's actually healthy first
+        // Adopt the running process via the backend trait — but verify it's actually healthy first
         if let rookery_core::state::ServerState::Running {
             ref profile,
             pid: running_pid,
@@ -72,6 +90,8 @@ async fn main() {
             ref since,
             ref command_line,
             ref exe_path,
+            ref backend_type,
+            ref container_id,
             ..
         } = reconciled
         {
@@ -94,16 +114,33 @@ async fn main() {
                         port,
                         "adopted process is healthy (inference canary passed)"
                     );
-                    process_manager
-                        .adopt(rookery_engine::process::ProcessInfo {
-                            pid: running_pid,
-                            port,
-                            profile: profile.clone(),
-                            started_at: *since,
-                            command_line: command_line.clone(),
-                            exe_path: exe_path.clone().unwrap_or_default(),
-                        })
-                        .await;
+
+                    // Create the correct backend for the reconciled profile and adopt
+                    let adopt_info = BackendInfo {
+                        pid: Some(running_pid),
+                        container_id: container_id.clone(),
+                        port,
+                        profile: profile.clone(),
+                        started_at: *since,
+                        backend_type: *backend_type,
+                        command_line: command_line.clone(),
+                        exe_path: exe_path.clone(),
+                    };
+
+                    // If the reconciled profile has a different backend type, create the right backend
+                    if let Some(profile_cfg) = config.profiles.get(profile) {
+                        let correct_backend =
+                            backend::create_backend(profile_cfg, log_buffer.clone());
+                        if let Err(e) = correct_backend.adopt(adopt_info).await {
+                            tracing::warn!(error = %e, "failed to adopt into backend");
+                        }
+                        *backend.lock().await = correct_backend;
+                    } else {
+                        // Profile no longer in config — adopt into current backend
+                        if let Err(e) = backend.lock().await.adopt(adopt_info).await {
+                            tracing::warn!(error = %e, "failed to adopt into backend");
+                        }
+                    }
                 } else {
                     tracing::warn!(
                         pid = running_pid,
@@ -246,7 +283,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         config: Arc::new(RwLock::new(config)),
-        process_manager,
+        backend,
         agent_manager,
         gpu_monitor,
         log_buffer,
@@ -263,7 +300,7 @@ async fn main() {
     // CUDA zombie state where /health responds but inference is broken.
     // Also triggers immediately on CUDA error patterns in llama-server stderr.
     let canary_state = state.clone();
-    let mut cuda_error_rx = state.process_manager.subscribe_cuda_errors();
+    let mut cuda_error_rx = state.backend.lock().await.subscribe_errors();
     tokio::spawn(async move {
         const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         const CANARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -278,10 +315,10 @@ async fn main() {
             }
 
             // Only check when server is running and not mid-swap
-            if canary_state.process_manager.is_draining() {
+            if canary_state.backend.lock().await.is_draining() {
                 continue;
             }
-            let current = canary_state.process_manager.to_server_state().await;
+            let current = canary_state.backend.lock().await.to_server_state().await;
             let (profile, port) = match current {
                 rookery_core::state::ServerState::Running {
                     ref profile, port, ..
@@ -310,28 +347,53 @@ async fn main() {
             let _op_guard = canary_state.op_lock.lock().await;
 
             // Re-check state under lock — someone may have stopped/swapped already
-            let current = canary_state.process_manager.to_server_state().await;
+            let current = canary_state.backend.lock().await.to_server_state().await;
             if !current.is_running() {
                 tracing::info!("server already stopped, skipping canary restart");
                 continue;
             }
 
-            let _ = canary_state.process_manager.stop().await;
+            let _ = canary_state.backend.lock().await.stop().await;
             let stopped = rookery_core::state::ServerState::Stopped;
             let _ = canary_state.state_persistence.save(&stopped);
 
             let config = canary_state.config.read().await;
-            match canary_state
-                .process_manager
-                .start_and_wait(&config, &profile)
-                .await
-            {
-                Ok(server_state) => {
-                    let _ = canary_state.state_persistence.save(&server_state);
-                    if server_state.is_running() {
-                        tracing::info!(profile = %profile, "server restarted by inference canary");
-                    } else {
-                        tracing::error!(profile = %profile, "server failed to restart after canary");
+            let backend = canary_state.backend.lock().await;
+            match backend.start(&config, &profile).await {
+                Ok(_info) => {
+                    let port_for_health = config
+                        .profiles
+                        .get(&profile)
+                        .map(|p| p.port)
+                        .unwrap_or(port);
+                    drop(backend);
+                    drop(config);
+                    match rookery_engine::health::wait_for_health(
+                        port_for_health,
+                        std::time::Duration::from_secs(120),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let server_state =
+                                canary_state.backend.lock().await.to_server_state().await;
+                            let _ = canary_state.state_persistence.save(&server_state);
+                            if server_state.is_running() {
+                                tracing::info!(profile = %profile, "server restarted by inference canary");
+                            } else {
+                                tracing::error!(profile = %profile, "server failed to restart after canary");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, profile = %profile, "health check failed after canary restart");
+                            let _ = canary_state.backend.lock().await.stop().await;
+                            let failed = rookery_core::state::ServerState::Failed {
+                                last_error: e.to_string(),
+                                profile: profile.clone(),
+                                since: chrono::Utc::now(),
+                            };
+                            let _ = canary_state.state_persistence.save(&failed);
+                        }
                     }
                 }
                 Err(e) => {
@@ -387,7 +449,7 @@ async fn main() {
     // Clean up child processes on shutdown
     tracing::info!("shutting down — stopping agents and server");
     shutdown_state.agent_manager.stop_all().await;
-    let _ = shutdown_state.process_manager.stop().await;
+    let _ = shutdown_state.backend.lock().await.stop().await;
     let stopped = rookery_core::state::ServerState::Stopped;
     let _ = shutdown_state.state_persistence.save(&stopped);
     tracing::info!("rookeryd shut down");

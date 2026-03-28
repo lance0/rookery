@@ -58,7 +58,7 @@ pub async fn get_events(
     });
 
     // Send initial state immediately
-    let current_state = state.process_manager.to_server_state().await;
+    let current_state = state.backend.lock().await.to_server_state().await;
     let initial_status = crate::routes::status_json_from_state(&current_state);
     let initial_event = stream::once(futures_util::future::ready(Ok(Event::default()
         .event("state")
