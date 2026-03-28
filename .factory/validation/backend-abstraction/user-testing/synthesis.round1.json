@@ -1,0 +1,76 @@
+{
+  "milestone": "backend-abstraction",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 29,
+    "passed": 23,
+    "failed": 6,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-API-001",
+    "VAL-CROSS-003",
+    "VAL-CROSS-004",
+    "VAL-CFG-001",
+    "VAL-CFG-002",
+    "VAL-CFG-003",
+    "VAL-CFG-004",
+    "VAL-CFG-005",
+    "VAL-CFG-006",
+    "VAL-CFG-007",
+    "VAL-CFG-008",
+    "VAL-CFG-009",
+    "VAL-CFG-010",
+    "VAL-CFG-011",
+    "VAL-CFG-012",
+    "VAL-CFG-013",
+    "VAL-CFG-014",
+    "VAL-TRAIT-001",
+    "VAL-TRAIT-002",
+    "VAL-TRAIT-003",
+    "VAL-TRAIT-006",
+    "VAL-TRAIT-007",
+    "VAL-TRAIT-008"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-API-002",
+      "reason": "no explicit automated evidence found"
+    },
+    {
+      "id": "VAL-SSE-001",
+      "reason": "no explicit automated evidence found"
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "reason": "no explicit automated evidence found"
+    },
+    {
+      "id": "VAL-TRAIT-004",
+      "reason": "no explicit automated evidence found"
+    },
+    {
+      "id": "VAL-TRAIT-005",
+      "reason": "no explicit automated evidence found"
+    },
+    {
+      "id": "VAL-TRAIT-009",
+      "reason": "no explicit automated evidence found"
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance for cargo-cli-validation isolation/concurrency and command boundaries.",
+      "source": "setup"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Added note to avoid --exact with partial test names after flow friction discovery.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

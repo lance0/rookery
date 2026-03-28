@@ -1,0 +1,105 @@
+{
+  "groupId": "rerun-core-evidence",
+  "testedAt": "2026-03-28T20:41:09Z",
+  "surface": "cargo-cli-validation",
+  "isolation": {
+    "repo": "/home/lance/projects/rookery",
+    "missionDir": "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda",
+    "constraints": [
+      "shared repo checkout only",
+      "did not start/stop rookeryd",
+      "did not start/stop llama-server",
+      "cargo test validation only"
+    ]
+  },
+  "toolsUsed": [
+    "cargo test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-API-002",
+      "title": "GET /api/profiles includes backend per profile",
+      "status": "pass",
+      "reason": "Targeted daemon test passed (1/1): profiles response includes backend values for llama-server and vllm.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-daemon test_profiles_response_includes_backend_field -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-API-002-cargo-test.txt"
+      ]
+    },
+    {
+      "id": "VAL-SSE-001",
+      "title": "SSE state events include backend field",
+      "status": "pass",
+      "reason": "Targeted daemon status_json tests passed (4/4), covering running llama-server backend, running vllm backend, stopped backend=null, and backend key presence.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-daemon test_status_json_ -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-SSE-001-cargo-test.txt"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "title": "Inference canary works through trait interface",
+      "status": "pass",
+      "reason": "Targeted canary-trait test passed (1/1), verifying canary-relevant trait methods on backend abstraction.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_canary_trait_methods_on_llama_server_backend -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-CROSS-005-cargo-test.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-004",
+      "title": "stop() preserves stop semantics and no-op when idle",
+      "status": "pass",
+      "reason": "Targeted stop/idle tests passed: idle stop no-op, idle is_running false, adopted-process stop succeeds, and owned child lifecycle start/stop path passes.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_llama_server_backend_stop_noop_when_idle -- --nocapture",
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_llama_server_backend_not_running_when_idle -- --nocapture",
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_stop_after_adopt_completes_ok -- --nocapture",
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_llama_server_backend_start_returns_correct_backend_info -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-004-noop-stop.txt",
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-004-not-running-when-idle.txt",
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-004-stop-after-adopt.txt",
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-004-owned-child-stop-path.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-005",
+      "title": "adopt() registers PID for orphan recovery",
+      "status": "pass",
+      "reason": "Targeted adopt tests passed (4 total across 2 commands), covering process_info after adopt, live/dead PID running behavior, and stop via kill-by-PID fallback path.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_llama_server_backend_adopt -- --nocapture",
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-engine test_adopt_stores_info_and_stop_uses_pid_kill -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-005-adopt-process-info.txt",
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-005-adopt-stop-pid-kill.txt"
+      ]
+    },
+    {
+      "id": "VAL-TRAIT-009",
+      "title": "StatePersistence save/load roundtrip with backend metadata",
+      "status": "pass",
+      "reason": "Targeted persistence tests passed (4 total across 2 commands), covering save/load roundtrip for backend_type/container_id and reconcile dead PID -> Stopped behavior.",
+      "commands": [
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-core test_state_persistence_ -- --nocapture",
+        "cargo test --manifest-path /home/lance/projects/rookery/Cargo.toml -p rookery-core test_reconcile_dead_pid_returns_stopped_with_vllm -- --nocapture"
+      ],
+      "evidence": [
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-009-state-persistence-tests.txt",
+        "backend-abstraction/rerun-core-evidence/VAL-TRAIT-009-reconcile-dead-pid.txt"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 6 assigned assertions via targeted cargo test evidence: 6 passed, 0 failed, 0 blocked. No flaky retries were required."
+}
