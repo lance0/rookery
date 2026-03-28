@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+echo "pre-commit: checking formatting..."
+cargo fmt --all --check 2>/dev/null || {
+    echo "ERROR: cargo fmt failed. Run 'cargo fmt --all' to fix."
+    exit 1
+}
+
+echo "pre-commit: running clippy..."
+cargo clippy --all-targets -- -D warnings 2>/dev/null || {
+    echo "ERROR: clippy warnings found. Fix them before committing."
+    exit 1
+}
+
+echo "pre-commit: all checks passed"

@@ -84,7 +84,7 @@
 - [x] Partial stream failure: mark incomplete assistant messages with " [incomplete]", filter from API payloads
 
 ### Frontend — UX Reliability
-- [ ] Settings input validation: range checks before save, show errors for invalid values
+- [x] Settings input validation: range checks on sampling params, error toasts for invalid values
 - [ ] Loading/error states for initial data fetch (profiles, agents, logs)
 - [ ] Bench panel: show error toast on failure instead of silent swallow
 - [x] Fix CSS variable: --text-muted → --muted in header connection status
@@ -185,7 +185,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] `cargo fmt` — enforced across workspace
 - [x] `cargo clippy` — zero warnings (27 fixed)
 - [ ] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
-- [ ] Pre-commit hook: run fmt + clippy before commit
+- [x] Pre-commit hook: `.githooks/pre-commit` runs fmt + clippy (configured via `core.hooksPath`)
 
 ### Test Coverage
 - [x] `rookery-core`: config parsing, state serialization, reconciliation (4 tests)
