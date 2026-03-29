@@ -87,29 +87,39 @@ The binary is at `build/bin/llama-server`. Set this path as `llama_server` in yo
 
 **Other NVIDIA GPUs:** The default `cmake` invocation auto-detects your GPU architecture.
 
+## Install
+
+```bash
+sudo make install
+sudo systemctl daemon-reload
+sudo systemctl enable --now rookery
+```
+
+This installs `rookeryd` and `rookery` to `/usr/local/bin`, generates a systemd unit, and starts the daemon. Customize with:
+
+```bash
+sudo make install PREFIX=/opt/rookery SERVICE_USER=myuser HF_HOME=/mnt/models
+```
+
 ## Run
 
 ```bash
-# Start daemon
-./target/release/rookeryd &
-
-# Start inference server
-rookery start
-
 # Check status
 rookery status
 rookery gpu
 
 # Open dashboard
 open http://localhost:3131
+
+# Manual start (if auto_start is not set)
+rookery start
 ```
 
-## Systemd (Recommended)
+With `auto_start = true` in your config, the default profile starts automatically on daemon boot.
+
+## Uninstall
 
 ```bash
-sudo cp rookery.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now rookeryd
+sudo make disable
+sudo make uninstall
 ```
-
-This ensures exactly one daemon instance, proper logging via journald, and auto-restart on failure.

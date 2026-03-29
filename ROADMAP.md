@@ -277,11 +277,13 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Production systemd setup: install binaries to `/usr/local/bin` (not `target/release/`), separate build and deploy steps
 - [ ] Version-tagged releases: `cargo build --release` → `cp` to `/usr/local/bin/` on explicit deploy, not on every build
 - [ ] Systemd unit points to `/usr/local/bin/rookeryd` (stable path, survives `cargo clean`)
-- [ ] Deploy script or `make install` target for clean build → install → restart cycle
+- [x] Deploy script or `make install` target for clean build → install → restart cycle
+- [x] `install.sh` curl-to-shell installer for GitHub releases
+- [x] GitHub release workflow: multi-arch builds, checksums, shell completions
 
 ## Open Source Launch Prep
 - [ ] README polish: feature list, quick demo, screenshots/GIF, comparison to alternatives
-- [ ] LICENSE file (choose license)
+- [x] LICENSE file (MIT)
 - [ ] CONTRIBUTING.md (build instructions, PR guidelines, code style)
 - [ ] Review all docs for accuracy and completeness
 - [ ] Remove any hardcoded paths or lancebox-specific references from code

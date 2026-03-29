@@ -1,0 +1,21 @@
+[Unit]
+Description=Rookery Inference Daemon
+After=network.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=@BINDIR@/rookeryd
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+OOMScoreAdjust=-900
+Environment=RUST_LOG=rookery=info
+Environment=HF_HOME=@HF_HOME@
+StandardOutput=journal
+StandardError=journal
+AmbientCapabilities=CAP_SYS_RESOURCE
+
+[Install]
+WantedBy=multi-user.target
