@@ -4,7 +4,7 @@
 
 - Rust toolchain (stable)
 - NVIDIA GPU with CUDA support
-- llama.cpp built with CUDA ([lancebox-inference setup](https://github.com/lance0/lancebox-inference))
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) built with CUDA (see [Building llama.cpp](#building-llamacpp) below)
 - Trunk (for dashboard): `cargo install trunk`
 
 ## Build
@@ -35,6 +35,30 @@ Edit `config.toml`:
 - Set `llama_server` to your llama-server binary path
 - Set `listen` to your preferred address (default: `127.0.0.1:3000`, use `0.0.0.0:3131` for LAN access)
 - Configure models and profiles (see [Configuration](configuration.md))
+
+## Building llama.cpp
+
+Rookery manages a llama-server process. Build llama.cpp with CUDA support:
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+
+cmake -B build \
+  -DGGML_CUDA=ON \
+  -DGGML_CUDA_FA_ALL_QUANTS=ON \
+  -DGGML_NATIVE=ON \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF
+
+cmake --build build -j$(nproc)
+```
+
+The binary is at `build/bin/llama-server`. Set this path as `llama_server` in your rookery config.
+
+**Blackwell (RTX 5090):** Use CUDA 12.8 toolkit and add `-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES="120"`. Do NOT use CUDA 13.x (compiler bug).
+
+**Other NVIDIA GPUs:** The default `cmake` invocation auto-detects your GPU architecture.
 
 ## Run
 

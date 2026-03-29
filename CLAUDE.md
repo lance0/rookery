@@ -65,7 +65,7 @@ cargo test --workspace   # run all tests
 - **Agent management** — agents are external processes (e.g., coding agents) with config for command, args, workdir, env; restart_on_swap auto-restarts after model swap
 - **Config separates models (what) from profiles (how)** — multiple profiles can share a model
 
-## Dependencies on lancebox-inference
-- `llama_server` path in config points to lancebox-inference's build
-- `chat_template` path in profiles points to the patched jinja template
-- No code dependency — just config file paths
+## External Dependencies
+- `llama_server` path in config points to your llama.cpp build (see docs/quickstart.md)
+- `chat_template` path in profiles points to a Jinja chat template (optional, model-specific)
+- No code dependency on any external repo — just config file paths
