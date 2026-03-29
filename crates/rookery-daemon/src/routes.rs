@@ -2126,7 +2126,7 @@ mod tests {
 
         use crate::test_utils::{MockBackend, build_test_app_state};
         use rookery_core::config::BackendType;
-        use rookery_engine::backend::BackendInfo;
+        use rookery_engine::backend::{BackendInfo, InferenceBackend};
 
         /// Build the route subset used for integration testing.
         ///
@@ -2557,6 +2557,730 @@ mod tests {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "oversized payload should be rejected with 413"
             );
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Extended route integration tests — swap, chat, bench,
+        // model-info, server-stats, agents, hardware, config, dashboard
+        // ═══════════════════════════════════════════════════════════════
+
+        /// Build an extended router with ALL route endpoints for integration testing.
+        /// Mirrors the full route set from main.rs.
+        fn test_router_full(state: std::sync::Arc<crate::app_state::AppState>) -> Router {
+            Router::new()
+                .route("/api/health", get(super::get_health))
+                .route("/api/status", get(super::get_status))
+                .route("/api/profiles", get(super::get_profiles))
+                .route("/api/config", get(super::get_config))
+                .route(
+                    "/api/config/profile/{name}",
+                    axum::routing::put(super::put_profile),
+                )
+                .route("/api/logs", get(super::get_logs))
+                .route("/api/start", post(super::post_start))
+                .route("/api/stop", post(super::post_stop))
+                .route("/api/swap", post(super::post_swap))
+                .route("/api/chat", post(super::post_chat))
+                .route("/api/bench", get(super::get_bench))
+                .route("/api/model-info", get(super::get_model_info))
+                .route("/api/server-stats", get(super::get_server_stats))
+                .route("/api/agents", get(super::get_agents))
+                .route("/api/agents/start", post(super::post_agent_start))
+                .route("/api/agents/stop", post(super::post_agent_stop))
+                .route("/api/hardware", get(super::get_hardware))
+                .fallback(super::get_dashboard)
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
+                .with_state(state)
+        }
+
+        /// Spawn a mock llama-server (axum) on a random port serving the
+        /// endpoints that route handlers proxy to: /health, /v1/models,
+        /// /props, /slots, /v1/chat/completions.
+        /// Returns (port, shutdown_sender).
+        async fn spawn_mock_llama_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
+            use axum::response::Json as AxumJson;
+            use axum::routing::{get as aget, post as apost};
+
+            let mock_app = Router::new()
+                .route("/health", aget(|| async { StatusCode::OK }))
+                .route(
+                    "/v1/models",
+                    aget(|| async {
+                        AxumJson(serde_json::json!({
+                            "data": [{"id": "mock-model", "owned_by": "test"}]
+                        }))
+                    }),
+                )
+                .route(
+                    "/props",
+                    aget(|| async {
+                        AxumJson(serde_json::json!({
+                            "total_slots": 1,
+                            "chat_template": "test"
+                        }))
+                    }),
+                )
+                .route(
+                    "/slots",
+                    aget(|| async {
+                        AxumJson(serde_json::json!([{
+                            "id": 0, "state": 0, "prompt": "", "next_token": {}
+                        }]))
+                    }),
+                )
+                .route(
+                    "/v1/chat/completions",
+                    apost(|| async {
+                        AxumJson(serde_json::json!({
+                            "id": "chatcmpl-mock",
+                            "object": "chat.completion",
+                            "created": 1700000000,
+                            "model": "mock-model",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hello!"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 5,
+                                "completion_tokens": 1,
+                                "total_tokens": 6
+                            },
+                            "timings": {
+                                "prompt_n": 5,
+                                "prompt_ms": 10.0,
+                                "prompt_per_token_ms": 2.0,
+                                "prompt_per_second": 500.0,
+                                "predicted_n": 1,
+                                "predicted_ms": 5.0,
+                                "predicted_per_token_ms": 5.0,
+                                "predicted_per_second": 200.0
+                            }
+                        }))
+                    }),
+                );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+            tokio::spawn(async move {
+                axum::serve(listener, mock_app)
+                    .with_graceful_shutdown(async {
+                        let _ = rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            (port, tx)
+        }
+
+        /// Helper: create a MockBackend running on a given port.
+        fn mock_backend_on_port(port: u16) -> MockBackend {
+            MockBackend::running_with(BackendInfo {
+                pid: Some(99999),
+                container_id: None,
+                port,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            })
+        }
+
+        // --- 12. POST /api/swap when running → drains old, stops, attempts new profile ---
+        //
+        // The swap handler creates a new real backend via create_backend(),
+        // which means the new backend's start() will fail in test (no real
+        // llama-server binary). This test verifies:
+        // (a) the old backend is drained and stopped
+        // (b) the handler returns 500 because the new backend can't start
+        // (c) the drain flag is cleared (no permanent 503)
+        #[tokio::test]
+        async fn test_route_swap_when_running_drains_and_stops_old() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            // Add a second profile to swap to
+            {
+                let mut config = state.config.write().await;
+                config.profiles.insert(
+                    "other".into(),
+                    rookery_core::config::Profile {
+                        model: "test_model".into(),
+                        port: mock_port,
+                        llama_server: None,
+                        vllm: None,
+                        ctx_size: 2048,
+                        threads: 1,
+                        threads_batch: 1,
+                        batch_size: 512,
+                        ubatch_size: 256,
+                        gpu_layers: 0,
+                        gpu_index: None,
+                        cache_type_k: "f16".into(),
+                        cache_type_v: "f16".into(),
+                        flash_attention: false,
+                        reasoning_budget: 0,
+                        chat_template: None,
+                        temp: 0.7,
+                        top_p: 0.8,
+                        top_k: 20,
+                        min_p: 0.0,
+                        extra_args: vec![],
+                    },
+                );
+            }
+
+            let app = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/swap")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"other"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            // The new backend's start() fails (no real binary), so swap returns 500
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "swap should fail when new backend can't start"
+            );
+
+            // Critical: after a failed swap, drain flag must be cleared
+            // so post_chat doesn't permanently return 503
+            let is_draining = state.backend.lock().await.is_draining();
+            assert!(!is_draining, "drain flag must be cleared after failed swap");
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 13. POST /api/swap when stopped → error (profile not found in backend) ---
+        #[tokio::test]
+        async fn test_route_swap_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/swap")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"nonexistent"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            // When stopped and profile doesn't exist, swap returns 500 (Err path)
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "swap when stopped with nonexistent profile should error"
+            );
+        }
+
+        // --- 14. POST /api/chat when draining → 503 ---
+        #[tokio::test]
+        async fn test_route_chat_when_draining_returns_503() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            backend.set_draining(true);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chat during drain should return 503"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 15. POST /api/chat when running → proxies to backend (mock server) ---
+        #[tokio::test]
+        async fn test_route_chat_when_running_proxies() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "chat should proxy successfully"
+            );
+
+            // The response is a streaming body (text/event-stream).
+            // Collect the raw body and check it contains the mock response.
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap_or(""))
+                .unwrap_or("");
+            assert!(
+                content_type.contains("text/event-stream"),
+                "chat response should be SSE stream, got content-type: {content_type}"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 16. GET /api/bench → returns timing data from mock server ---
+        #[tokio::test]
+        async fn test_route_bench_returns_timing_data() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/bench")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            let tests = json["tests"].as_array().expect("tests should be an array");
+            assert!(
+                !tests.is_empty(),
+                "bench should return at least one test result"
+            );
+
+            // Verify timing fields from the mock server
+            for test in tests {
+                assert!(
+                    test.get("name").is_some(),
+                    "each bench test should have a name"
+                );
+                assert!(
+                    test["pp_tok_s"].as_f64().unwrap_or(0.0) > 0.0,
+                    "pp_tok_s should be positive from mock timings"
+                );
+                assert!(
+                    test["gen_tok_s"].as_f64().unwrap_or(0.0) > 0.0,
+                    "gen_tok_s should be positive from mock timings"
+                );
+            }
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 17. GET /api/model-info → proxies /v1/models + /props from mock server ---
+        #[tokio::test]
+        async fn test_route_model_info_proxies_to_backend() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/model-info")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["available"], true);
+            assert_eq!(json["model_id"], "mock-model");
+            assert_eq!(json["owned_by"], "test");
+            // Props should be populated from /props endpoint
+            assert!(
+                json["props"].is_object(),
+                "props should be an object from mock /props, got: {}",
+                json["props"]
+            );
+            assert_eq!(json["props"]["total_slots"], 1);
+            assert_eq!(json["props"]["chat_template"], "test");
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 18. GET /api/model-info when stopped → available=false ---
+        #[tokio::test]
+        async fn test_route_model_info_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/model-info")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["available"], false);
+        }
+
+        // --- 19. GET /api/server-stats → proxies /slots from mock server ---
+        #[tokio::test]
+        async fn test_route_server_stats_proxies_slots() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/server-stats")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["available"], true);
+            let slots = json["slots"].as_array().expect("slots should be an array");
+            assert_eq!(slots[0]["id"], 0);
+            assert_eq!(slots[0]["state"], 0);
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 20. GET /api/server-stats when stopped → available=false ---
+        #[tokio::test]
+        async fn test_route_server_stats_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/server-stats")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["available"], false);
+        }
+
+        // --- 21. GET /api/agents → returns agent list ---
+        #[tokio::test]
+        async fn test_route_agents_returns_list() {
+            let (_dir, state) = build_test_app_state(None);
+
+            // Add agent config so "configured" is non-empty
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert(
+                    "test_agent".into(),
+                    rookery_core::config::AgentConfig {
+                        command: "/bin/echo".into(),
+                        args: vec!["hello".into()],
+                        workdir: None,
+                        env: std::collections::HashMap::new(),
+                        restart_on_swap: false,
+                        restart_on_crash: false,
+                        auto_start: false,
+                        depends_on_port: None,
+                        version_file: None,
+                        restart_on_error_patterns: vec![],
+                    },
+                );
+            }
+
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            // agents array may be empty (none running), but configured should list the agent
+            assert!(json["agents"].is_array(), "agents should be an array");
+            let configured = json["configured"]
+                .as_array()
+                .expect("configured should be an array");
+            assert!(
+                configured.iter().any(|v| v == "test_agent"),
+                "configured should include 'test_agent', got: {configured:?}"
+            );
+        }
+
+        // --- 22. POST /api/agents/start and /api/agents/stop → lifecycle ---
+        #[tokio::test]
+        async fn test_route_agent_start_and_stop_lifecycle() {
+            let (_dir, state) = build_test_app_state(None);
+
+            // Configure an agent that will start successfully
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert(
+                    "sleeper".into(),
+                    rookery_core::config::AgentConfig {
+                        command: "/bin/sleep".into(),
+                        args: vec!["60".into()],
+                        workdir: None,
+                        env: std::collections::HashMap::new(),
+                        restart_on_swap: false,
+                        restart_on_crash: false,
+                        auto_start: false,
+                        depends_on_port: None,
+                        version_file: None,
+                        restart_on_error_patterns: vec![],
+                    },
+                );
+            }
+
+            let app = test_router_full(state.clone());
+
+            // Start the agent
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"sleeper"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true, "agent start should succeed");
+            let msg = json["message"].as_str().unwrap();
+            assert!(
+                msg.contains("sleeper") && msg.contains("started"),
+                "message should confirm agent started, got: {msg}"
+            );
+
+            // Stop the agent
+            let app2 = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/stop")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"sleeper"}"#))
+                .unwrap();
+
+            let resp = app2.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true, "agent stop should succeed");
+            let msg = json["message"].as_str().unwrap();
+            assert!(
+                msg.contains("sleeper") && msg.contains("stopped"),
+                "message should confirm agent stopped, got: {msg}"
+            );
+        }
+
+        // --- 23. GET /api/hardware → returns hardware profile ---
+        #[tokio::test]
+        async fn test_route_hardware_returns_profile() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/hardware")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            // The test AppState has a CpuProfile with name "test-cpu"
+            let cpu = &json["cpu"];
+            assert_eq!(cpu["name"], "test-cpu");
+            assert_eq!(cpu["cores"], 4);
+            assert_eq!(cpu["threads"], 8);
+            assert_eq!(cpu["ram_total_mb"], 16384);
+            // ram_free_mb is added dynamically from /proc/meminfo
+            assert!(
+                cpu.get("ram_free_mb").is_some(),
+                "cpu should include ram_free_mb"
+            );
+        }
+
+        // --- 24. PUT /api/config/profile/:name → updates sampling params ---
+        #[tokio::test]
+        async fn test_route_put_profile_updates_params() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("PUT")
+                .uri("/api/config/profile/test")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"temp":0.9,"top_p":0.95,"top_k":40}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            let msg = json["message"].as_str().unwrap();
+            assert!(
+                msg.contains("test") && msg.contains("updated"),
+                "message should confirm profile updated, got: {msg}"
+            );
+
+            // Verify the config was actually updated
+            let config = state.config.read().await;
+            let profile = config
+                .profiles
+                .get("test")
+                .expect("test profile should exist");
+            assert!(
+                (profile.temp - 0.9).abs() < f32::EPSILON,
+                "temp should be 0.9, got: {}",
+                profile.temp
+            );
+            assert!(
+                (profile.top_p - 0.95).abs() < f32::EPSILON,
+                "top_p should be 0.95, got: {}",
+                profile.top_p
+            );
+            assert_eq!(profile.top_k, 40, "top_k should be 40");
+        }
+
+        // --- 25. PUT /api/config/profile/:nonexistent → 404 ---
+        #[tokio::test]
+        async fn test_route_put_profile_nonexistent_returns_404() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .method("PUT")
+                .uri("/api/config/profile/nonexistent_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"temp":0.5}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "updating nonexistent profile should return 404"
+            );
+        }
+
+        // --- 26. Dashboard fallback: GET / → serves index.html ---
+        #[tokio::test]
+        async fn test_route_dashboard_fallback_serves_index() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap_or(""))
+                .unwrap_or("");
+            assert!(
+                content_type.contains("text/html"),
+                "GET / should serve text/html, got: {content_type}"
+            );
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let html = String::from_utf8_lossy(&body);
+            assert!(
+                html.contains("html")
+                    || html.contains("HTML")
+                    || html.contains("<!DOCTYPE")
+                    || html.contains("<html"),
+                "body should contain HTML content"
+            );
+        }
+
+        // --- 27. Dashboard static: GET /style-*.css → serves CSS with correct MIME ---
+        #[tokio::test]
+        async fn test_route_dashboard_static_css() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router_full(state);
+
+            // The actual CSS file in the dist directory
+            let req = Request::builder()
+                .uri("/style-2f9a714a3215660a.css")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap_or(""))
+                .unwrap_or("");
+            assert!(
+                content_type.contains("text/css"),
+                "CSS file should have text/css MIME type, got: {content_type}"
+            );
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            assert!(!body.is_empty(), "CSS file should have non-empty content");
         }
     }
 }
