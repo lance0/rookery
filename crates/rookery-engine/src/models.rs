@@ -406,50 +406,139 @@ fn quant_preference_index(label: &str) -> usize {
         .unwrap_or(QUANT_PREFERENCE.len())
 }
 
-/// Scan the llama.cpp cache for downloaded GGUF files.
+/// Scan both llama.cpp and HF hub caches for downloaded GGUF files.
 pub fn scan_cache() -> Vec<CachedModel> {
-    let cache_dir = llama_cache_dir();
-    if !cache_dir.exists() {
-        return Vec::new();
-    }
-
     let mut models = Vec::new();
 
-    let entries = match std::fs::read_dir(&cache_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        if !name.ends_with(".gguf") || name.ends_with(".gguf.part") {
-            continue;
-        }
-
-        // Parse llama.cpp cache naming: {owner}_{repo}_{filename}.gguf
-        // The repo uses underscores instead of slashes
-        if let Some((repo, quant_label)) = parse_cache_filename(name) {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            models.push(CachedModel {
-                repo,
-                quant_label,
-                path: path.clone(),
-                size_bytes: size,
-            });
+    // 1. Scan llama.cpp cache (~/.cache/llama.cpp/)
+    let cache_dir = llama_cache_dir();
+    if cache_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&cache_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !name.ends_with(".gguf") || name.ends_with(".gguf.part") {
+                continue;
+            }
+            if let Some((repo, quant_label)) = parse_cache_filename(name) {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                models.push(CachedModel {
+                    repo,
+                    quant_label,
+                    path: path.clone(),
+                    size_bytes: size,
+                });
+            }
         }
     }
+
+    // 2. Scan HF hub cache ($HF_HOME/hub/ or ~/.cache/huggingface/hub/)
+    scan_hf_hub_cache(&mut models);
 
     models.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.quant_label.cmp(&b.quant_label)));
     models
+}
+
+/// Scan the HuggingFace hub cache for GGUF files.
+/// Layout: $HF_HOME/hub/models--{owner}--{repo}/snapshots/{hash}/{file}.gguf
+fn scan_hf_hub_cache(models: &mut Vec<CachedModel>) {
+    let hub_dir = if let Ok(hf_home) = std::env::var("HF_HOME") {
+        PathBuf::from(hf_home).join("hub")
+    } else if let Some(home) = dirs::home_dir() {
+        home.join(".cache").join("huggingface").join("hub")
+    } else {
+        return;
+    };
+
+    if !hub_dir.exists() {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(&hub_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let dir_name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        // Format: models--{owner}--{repo}
+        if !dir_name.starts_with("models--") {
+            continue;
+        }
+
+        let repo = dir_name
+            .strip_prefix("models--")
+            .unwrap()
+            .replacen("--", "/", 1);
+
+        // Look in snapshots/*/
+        let snapshots_dir = entry.path().join("snapshots");
+        if !snapshots_dir.exists() {
+            continue;
+        }
+
+        let snapshot_dirs = match std::fs::read_dir(&snapshots_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for snap_entry in snapshot_dirs.flatten() {
+            if !snap_entry.path().is_dir() {
+                continue;
+            }
+
+            let files = match std::fs::read_dir(snap_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            for file_entry in files.flatten() {
+                let path = file_entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if !name.ends_with(".gguf") || name.ends_with(".gguf.part") {
+                    continue;
+                }
+                // Skip vision projectors
+                if name.starts_with("mmproj") {
+                    continue;
+                }
+
+                let quant_label = extract_quant_label(name.strip_suffix(".gguf").unwrap_or(&name));
+                // Follow symlinks to get real file size (HF hub uses symlinks to blobs)
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+                // Deduplicate — don't add if already found from llama.cpp cache
+                if !models
+                    .iter()
+                    .any(|m| m.repo == repo && m.quant_label == quant_label)
+                {
+                    models.push(CachedModel {
+                        repo: repo.clone(),
+                        quant_label,
+                        path,
+                        size_bytes: size,
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Parse a llama.cpp cache filename into (repo, quant_label).
