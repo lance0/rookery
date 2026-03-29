@@ -281,6 +281,8 @@ The daemon reconciles persisted state on startup, adopts orphan processes, auto-
 - [API Reference](docs/api.md) — REST endpoints
 - [CLI Reference](docs/cli.md) — all commands and flags
 - [Models](docs/models.md) — model sources, discovery, download
+- [GPU Guide](docs/gpu-guide.md) — model recommendations by GPU tier
+- [Compatible Agents](docs/compatible-agents.md) — OpenClaw, SillyTavern, AnythingLLM, and more
 - [Dashboard](docs/dashboard.md) — tabs, shortcuts, features
 - [Architecture](docs/architecture.md) — crate structure, design decisions
 - [vLLM Integration](docs/vllm-integration-summary.md) — Docker backend

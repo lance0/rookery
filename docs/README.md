@@ -5,8 +5,10 @@
 - [Configuration](configuration.md) — config.toml reference (llama-server + vLLM)
 
 ## Guides
-- [Agent Management](agents.md) — managing agents (Hermes, etc.), watchdog, health checks, error patterns
+- [Agent Management](agents.md) — managing agents, watchdog, health checks, error patterns
+- [Compatible Agents](compatible-agents.md) — tools that work with Rookery (OpenClaw, SillyTavern, AnythingLLM, etc.)
 - [Model Management](models.md) — searching, downloading, and managing GGUF models
+- [GPU Guide](gpu-guide.md) — model recommendations by GPU (RTX 3060 through 5090)
 - [Dashboard](dashboard.md) — web dashboard tabs, keyboard shortcuts, mobile layout
 
 ## Reference
