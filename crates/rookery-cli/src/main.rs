@@ -162,6 +162,14 @@ enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show detailed health and metrics for an agent
+    Describe {
+        /// Agent name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // Response types matching daemon API
@@ -246,6 +254,9 @@ async fn main() {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
             AgentCommands::Stop { name } => cmd_agent_stop(&client, &name).await,
             AgentCommands::Status { json } => cmd_agent_status(&client, json).await,
+            AgentCommands::Describe { name, json } => {
+                cmd_agent_describe(&client, &name, json).await
+            }
         },
         Commands::Models { cmd } => match cmd {
             ModelCommands::Search { query, json } => cmd_models_search(&client, &query, json).await,
@@ -578,6 +589,63 @@ async fn cmd_agent_status(
             };
             println!("  {} (PID {}) — {}", agent.name, agent.pid, status);
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_agent_describe(
+    client: &DaemonClient,
+    name: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get(&format!("/api/agents/{name}/health")).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let status = match &resp["status"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(m) => {
+            if let Some(err) = m.get("error") {
+                format!("failed: {}", err.as_str().unwrap_or("unknown"))
+            } else {
+                "unknown".into()
+            }
+        }
+        _ => "unknown".into(),
+    };
+
+    println!("Agent:    {}", resp["name"].as_str().unwrap_or("?"));
+    println!("Status:   {status}");
+    println!("PID:      {}", resp["pid"].as_u64().unwrap_or(0));
+    if let Some(ver) = resp["version"].as_str() {
+        println!("Version:  {ver}");
+    }
+    if let Some(secs) = resp["uptime_secs"].as_i64() {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        let s = secs % 60;
+        println!("Uptime:   {hours}h {mins}m {s}s");
+    }
+    let restarts = resp["total_restarts"].as_u64().unwrap_or(0);
+    if restarts > 0 {
+        let reason = resp["last_restart_reason"].as_str().unwrap_or("unknown");
+        println!("Restarts: {restarts} (last: {reason})");
+    } else {
+        println!("Restarts: 0");
+    }
+    let errors = resp["error_count"].as_u64().unwrap_or(0);
+    let lifetime = resp["lifetime_errors"].as_u64().unwrap_or(0);
+    println!("Errors:   {errors} (lifetime: {lifetime})");
+    if let Some(started) = resp["started_at"].as_str() {
+        println!("Started:  {started}");
     }
 
     Ok(())

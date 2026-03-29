@@ -34,6 +34,7 @@ Define how to run a model. Multiple profiles can share a model.
 ```toml
 [profiles.qwen_fast]
 model = "qwen35"                # references [models.qwen35]
+aliases = ["qwen", "fast"]      # optional alternate names for this profile
 port = 8081                     # llama-server listen port
 ctx_size = 262144               # context window (tokens)
 threads = 4                     # CPU threads for inference

@@ -270,6 +270,9 @@ pub struct Profile {
     pub min_p: f32,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
 }
 
@@ -638,7 +641,13 @@ impl Config {
     }
 
     pub fn resolve_profile_name<'a>(&'a self, name: Option<&'a str>) -> &'a str {
-        name.unwrap_or(&self.default_profile)
+        let name = name.unwrap_or(&self.default_profile);
+        for (profile_name, profile) in &self.profiles {
+            if profile.aliases.iter().any(|a| a == name) {
+                return profile_name;
+            }
+        }
+        name
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1028,6 +1037,7 @@ gpu_memory_utilization = 0.9
                         top_p: default_top_p(),
                         top_k: default_top_k(),
                         min_p: 0.0,
+                        aliases: Vec::new(),
                         extra_args: Vec::new(),
                     },
                 )]),
@@ -1514,6 +1524,7 @@ ctx_size = 262144
                     top_p: default_top_p(),
                     top_k: default_top_k(),
                     min_p: 0.0,
+                    aliases: Vec::new(),
                     extra_args: Vec::new(),
                 },
             )]),
@@ -1583,6 +1594,7 @@ ctx_size = 262144
                     top_p: default_top_p(),
                     top_k: default_top_k(),
                     min_p: 0.0,
+                    aliases: Vec::new(),
                     extra_args: Vec::new(),
                 },
             )]),
@@ -1620,5 +1632,37 @@ docker_image = "vllm/vllm-openai:latest"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.resolve_profile_name(None), "my_default");
         assert_eq!(config.resolve_profile_name(Some("other")), "other");
+    }
+
+    #[test]
+    fn test_resolve_profile_name_alias() {
+        let toml_str = r#"
+default_profile = "qwen_fast"
+
+[models.m]
+source = "hf"
+repo = "test/model"
+
+[profiles.qwen_fast]
+model = "m"
+port = 8081
+aliases = ["fast", "moe"]
+
+[profiles.qwen_dense]
+model = "m"
+port = 8081
+aliases = ["dense", "27b"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.resolve_profile_name(Some("fast")), "qwen_fast");
+        assert_eq!(config.resolve_profile_name(Some("moe")), "qwen_fast");
+        assert_eq!(config.resolve_profile_name(Some("dense")), "qwen_dense");
+        assert_eq!(config.resolve_profile_name(Some("27b")), "qwen_dense");
+        assert_eq!(config.resolve_profile_name(Some("qwen_fast")), "qwen_fast");
+        assert_eq!(
+            config.resolve_profile_name(Some("nonexistent")),
+            "nonexistent"
+        );
+        assert_eq!(config.resolve_profile_name(None), "qwen_fast");
     }
 }

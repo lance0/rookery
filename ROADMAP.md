@@ -166,7 +166,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] `rookery agent update hermes --to <version>` — set desired version, trigger hermes update, restart
 - [ ] `rookery agent update hermes --latest` — update to latest available version
 - [ ] `rookery agent version hermes` — show desired vs actual version, update available
-- [ ] `rookery agent describe hermes` — full status (PID, uptime, version, restart count, health, errors)
+- [x] `rookery agent describe hermes` — full status (PID, uptime, version, restart count, health, errors)
 
 ### Observability — "kubectl describe" for Hermes
 - [ ] `/api/agents/{name}/describe` — detailed agent status endpoint
@@ -205,8 +205,8 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] vLLM integration tests (gated behind `ROOKERY_INTEGRATION=1`, needs Docker + free GPU)
 
 ### CI Pipeline
-- [ ] GitHub Actions workflow: build + test + clippy + fmt on push/PR
-- [ ] Cache cargo registry + build artifacts for fast CI
+- [x] GitHub Actions workflow: build + test + clippy + fmt on push/PR
+- [x] Cache cargo registry + build artifacts via `rust-cache` action
 - [ ] Test matrix: stable + nightly Rust
 
 ## vLLM Backend Support (Done — Core)
@@ -262,7 +262,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] KV cache usage gauge in dashboard (requires `--metrics` flag on llama-server)
 
 ## Quality of Life (Inspired by Competitive Research)
-- [ ] Model aliasing: friendly names in API requests (e.g., "fast" → qwen_fast profile)
+- [x] Model aliasing: `aliases` field on profiles, resolved in CLI and API (e.g., "fast" → qwen_fast)
 - [ ] Auto-sleep: unload model after idle timeout, reload on first request
 - [ ] API key auth: optional bearer token for dashboard and API access
 - [ ] Swagger/OpenAPI spec generation for the REST API

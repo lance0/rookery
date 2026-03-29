@@ -207,6 +207,7 @@ pub fn build_test_app_state(
                 top_p: 0.8,
                 top_k: 20,
                 min_p: 0.0,
+                aliases: vec![],
                 extra_args: vec![],
             },
         )]),

@@ -34,6 +34,7 @@ rookery gpu                   # VRAM, temp, utilization, power, processes
 rookery agent start <name>    # start an agent
 rookery agent stop <name>     # stop an agent
 rookery agent status          # list agents with status
+rookery agent describe <name> # detailed health, uptime, restarts, errors
 ```
 
 ### Models
