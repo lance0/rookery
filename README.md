@@ -37,7 +37,7 @@ rookery completions bash    # generate shell completions
 
 ## Dashboard
 
-Open the dashboard at your configured `listen` address (default: `http://localhost:3131/`):
+Open the dashboard at your configured `listen` address (default: `http://127.0.0.1:3000/`):
 
 - **Overview** — GPU gauges, server status, model info, server stats, agent panel with health metrics
 - **Settings** — profile switcher, sampling param editor (saves to config.toml), agent controls
@@ -52,7 +52,7 @@ Keyboard shortcuts: `1`-`6` switch tabs, `s` start, `x` stop, `t` toggle theme. 
 
 Two binaries:
 
-- **`rookeryd`** — long-running daemon (axum REST API on configured `listen` address, default `0.0.0.0:3131`)
+- **`rookeryd`** — long-running daemon (axum REST API on configured `listen` address, default `127.0.0.1:3000`)
 - **`rookery`** — thin CLI that talks to the daemon over HTTP
 
 The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures logs, manages agents, and persists state across restarts. On startup it reconciles persisted state (both server and agent PIDs), adopts orphan processes, auto-starts configured agents, and cleans up stale llama-servers hogging VRAM.
