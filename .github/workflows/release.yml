@@ -55,7 +55,7 @@ jobs:
           cd -
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rookery-${{ matrix.target }}
           path: rookery-${{ matrix.target }}.tar.gz
@@ -80,7 +80,7 @@ jobs:
           tar czvf completions.tar.gz completions/
 
       - name: Upload completions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: completions
           path: completions.tar.gz
