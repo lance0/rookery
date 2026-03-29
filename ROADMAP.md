@@ -282,8 +282,9 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] GitHub release workflow: multi-arch builds, checksums, shell completions
 
 ## Open Source Launch Prep
-- [ ] README polish: feature list, quick demo, screenshots/GIF, comparison to alternatives
-- [x] LICENSE file (MIT)
+- [x] README polish: feature list, comparison table, real-world use cases, install methods, full reference
+- [x] LICENSE file (dual MIT/Apache-2.0)
+- [x] CONTRIBUTING.md (dev setup, code style, project structure, PR guidelines)
 - [ ] CONTRIBUTING.md (build instructions, PR guidelines, code style)
 - [ ] Review all docs for accuracy and completeness
 - [ ] Remove any hardcoded paths or lancebox-specific references from code
