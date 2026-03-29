@@ -8,21 +8,17 @@ Local inference command center. Manage llama-server and vLLM backends, hot-swap 
 ## Quick Start
 
 ```bash
-git clone https://github.com/lance0/rookery.git
-cd rookery
-sudo make install                  # build, install to /usr/local/bin, set up systemd
-sudo systemctl enable --now rookery
-
-# Use the CLI
 rookery status                     # server state + uptime
 rookery gpu                        # VRAM, temp, power, processes
+rookery start                      # start default profile
 rookery swap qwen_thinking         # hot-swap to another model profile
 rookery bench                      # quick PP + gen speed benchmark
+rookery agent start my_agent       # start a managed agent
 ```
 
 Open the dashboard at your configured address (default `http://localhost:3000`) — live GPU gauges, profile switcher, agent controls, chat playground, model browser.
 
-See [Installation](#installation) below for all methods.
+See [Installation](#installation) below for setup instructions.
 
 ## Features
 
@@ -89,21 +85,15 @@ rookery models pull Qwen3.5-27B    # downloads best-fit quant
 
 ## Installation
 
-### From Source (Recommended)
+### Quick Install Script
 
-Requires [Rust 1.85+](https://www.rust-lang.org/tools/install) and an NVIDIA GPU with CUDA drivers.
-
-```bash
-git clone https://github.com/lance0/rookery.git
-cd rookery
-sudo make install
-```
-
-This builds both binaries, installs them to `/usr/local/bin`, and sets up a systemd unit. Customize with:
+> **Note**: Review scripts before piping to sh. See the [install script](install.sh) source.
 
 ```bash
-sudo make install PREFIX=/opt/rookery SERVICE_USER=myuser HF_HOME=/mnt/models
+curl -fsSL https://raw.githubusercontent.com/lance0/rookery/main/install.sh | sh
 ```
+
+Installs binaries to `/usr/local/bin` and seeds a default config at `~/.config/rookery/config.toml`.
 
 ### Pre-built Binaries
 
@@ -120,12 +110,25 @@ tar xzf rookery-*.tar.gz
 sudo mv rookeryd rookery /usr/local/bin/
 ```
 
-### Quick Install Script
+### From Source
 
-> **Note**: Review scripts before piping to sh. See the [install script](install.sh) source.
+Requires [Rust 1.85+](https://www.rust-lang.org/tools/install) and an NVIDIA GPU with CUDA drivers.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lance0/rookery/main/install.sh | sh
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Build and install
+git clone https://github.com/lance0/rookery.git
+cd rookery
+sudo make install
+```
+
+This builds both binaries, installs them to `/usr/local/bin`, and sets up a systemd unit. Customize with:
+
+```bash
+sudo make install PREFIX=/opt/rookery SERVICE_USER=myuser HF_HOME=/mnt/models
 ```
 
 ## Configuration
