@@ -273,18 +273,9 @@ async fn main() {
         }
     }
 
-    // Auto-start agents configured with auto_start = true
-    for (name, agent_config) in &config.agents {
-        if agent_config.auto_start && !agent_manager.is_running(name).await {
-            tracing::info!(agent = %name, "auto-starting agent");
-            match agent_manager.start(name, agent_config).await {
-                Ok(info) => tracing::info!(agent = %name, pid = info.pid, "agent auto-started"),
-                Err(e) => tracing::warn!(agent = %name, error = %e, "failed to auto-start agent"),
-            }
-        }
-    }
-
     // Spawn agent watchdog for restart_on_crash support
+    // Note: agent auto-start is deferred until after profile auto-start (below)
+    // so agents that depend on the inference port can connect immediately.
     let watchdog_configs: std::collections::HashMap<String, _> = config
         .agents
         .iter()
@@ -341,6 +332,23 @@ async fn main() {
             Ok(_) => tracing::info!(profile = %auto_start_profile, "default profile auto-started"),
             Err(e) => {
                 tracing::warn!(profile = %auto_start_profile, error = %e, "failed to auto-start default profile")
+            }
+        }
+    }
+
+    // Auto-start agents configured with auto_start = true
+    // This happens AFTER profile auto-start so agents that depend_on_port can connect.
+    {
+        let config = state.config.read().await;
+        for (name, agent_config) in &config.agents {
+            if agent_config.auto_start && !state.agent_manager.is_running(name).await {
+                tracing::info!(agent = %name, "auto-starting agent");
+                match state.agent_manager.start(name, agent_config).await {
+                    Ok(info) => tracing::info!(agent = %name, pid = info.pid, "agent auto-started"),
+                    Err(e) => {
+                        tracing::warn!(agent = %name, error = %e, "failed to auto-start agent")
+                    }
+                }
             }
         }
     }
