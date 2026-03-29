@@ -296,6 +296,7 @@ async fn main() {
     let hf_client = rookery_engine::models::HfClient::new();
 
     let state = Arc::new(AppState {
+        config_path: rookery_core::config::Config::config_path(),
         config: Arc::new(RwLock::new(config)),
         backend,
         agent_manager,

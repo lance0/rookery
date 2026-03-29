@@ -535,7 +535,7 @@ pub async fn put_profile(
         profile.cache_type_v = v;
     }
 
-    if let Err(e) = config.save() {
+    if let Err(e) = config.save_to(&state.config_path) {
         tracing::error!(error = %e, "failed to save config");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }

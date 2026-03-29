@@ -6,11 +6,13 @@ use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::hardware::HardwareProfile;
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::models::HfClient;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
+    pub config_path: PathBuf,
     pub backend: Arc<tokio::sync::Mutex<Box<dyn InferenceBackend>>>,
     pub agent_manager: Arc<AgentManager>,
     pub gpu_monitor: Option<GpuMonitor>,

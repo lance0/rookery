@@ -221,7 +221,9 @@ pub fn build_test_app_state(
         },
     };
 
+    let config_path = dir.path().join("config.toml");
     let app_state = Arc::new(AppState {
+        config_path,
         config: Arc::new(RwLock::new(config)),
         backend: Arc::new(tokio::sync::Mutex::new(backend)),
         agent_manager,

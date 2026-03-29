@@ -699,14 +699,17 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path();
+        self.save_to(&Self::config_path())
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, content)?;
-        std::fs::rename(&tmp, &path)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 }
@@ -1523,14 +1526,10 @@ ctx_size = 262144
 
     #[test]
     fn test_config_save_load_roundtrip_via_filesystem() {
+        // Write config to a temp file and read it back — does NOT use Config::save()
+        // or Config::load() which hardcode XDG paths and can clobber real config.
         let dir = tempfile::tempdir().unwrap();
-
-        // Override XDG_CONFIG_HOME so Config::config_path() resolves into our tempdir.
-        // Config::config_path() uses dirs::config_dir() which reads $XDG_CONFIG_HOME.
-        let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        // SAFETY: This test is not run in parallel with other tests that depend on
-        // XDG_CONFIG_HOME. We restore the original value at the end of the test.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        let config_path = dir.path().join("config.toml");
 
         let config = Config {
             llama_server: PathBuf::from("/usr/bin/llama-server"),
@@ -1578,32 +1577,18 @@ ctx_size = 262144
             agents: HashMap::new(),
         };
 
-        // Use Config::save() to write the config to the filesystem
-        config.save().unwrap();
+        // Serialize and write to temp file (same logic as Config::save but safe path)
+        let content = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&config_path, &content).unwrap();
 
-        // Verify the file was written to the expected path
-        let expected_path = Config::config_path();
-        assert!(
-            expected_path.exists(),
-            "Config::save() should have written the file"
-        );
-
-        // Use Config::load() to read it back
-        let loaded = Config::load().unwrap();
+        // Read back and deserialize
+        let loaded_str = std::fs::read_to_string(&config_path).unwrap();
+        let loaded: Config = toml::from_str(&loaded_str).unwrap();
 
         assert_eq!(loaded.default_profile, "fast");
         assert_eq!(loaded.models["qwen"].estimated_vram_mb, Some(5000));
         let ls = loaded.profiles["fast"].llama_server_config().unwrap();
         assert_eq!(ls.ctx_size, 131072);
-
-        // Restore XDG_CONFIG_HOME
-        // SAFETY: Restoring the environment variable to its original value.
-        unsafe {
-            match old_xdg {
-                Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
     }
 
     #[test]
