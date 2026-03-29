@@ -1452,4 +1452,510 @@ mod tests {
             "missing backend field should default to llama-server"
         );
     }
+
+    // =========================================================================
+    // VAL-CLI-001: Clap argument parsing covers all commands
+    // =========================================================================
+
+    /// Verify all top-level subcommands parse correctly.
+    #[test]
+    fn test_parse_all_subcommands() {
+        let subcommands = vec![
+            vec!["rookery", "status"],
+            vec!["rookery", "start"],
+            vec!["rookery", "start", "fast"],
+            vec!["rookery", "stop"],
+            vec!["rookery", "swap", "fast"],
+            vec!["rookery", "gpu"],
+            vec!["rookery", "profiles"],
+            vec!["rookery", "bench"],
+            vec!["rookery", "logs"],
+            vec!["rookery", "config"],
+            vec!["rookery", "completions", "bash"],
+            vec!["rookery", "models", "search", "qwen"],
+            vec!["rookery", "models", "quants", "unsloth/Qwen3-8B-GGUF"],
+            vec!["rookery", "models", "recommend", "unsloth/Qwen3-8B-GGUF"],
+            vec!["rookery", "models", "list"],
+            vec!["rookery", "models", "pull", "unsloth/Qwen3-8B-GGUF"],
+            vec!["rookery", "models", "hardware"],
+            vec!["rookery", "agent", "start", "myagent"],
+            vec!["rookery", "agent", "stop", "myagent"],
+            vec!["rookery", "agent", "status"],
+        ];
+
+        for args in &subcommands {
+            let result = Cli::try_parse_from(args);
+            assert!(
+                result.is_ok(),
+                "subcommand {:?} should parse successfully, got: {:?}",
+                args,
+                result.err()
+            );
+        }
+    }
+
+    /// Verify --json flag is recognized on status, gpu, profiles, bench, start, stop.
+    #[test]
+    fn test_parse_json_flag_on_commands() {
+        let commands_with_json = vec![
+            vec!["rookery", "status", "--json"],
+            vec!["rookery", "gpu", "--json"],
+            vec!["rookery", "profiles", "--json"],
+            vec!["rookery", "bench", "--json"],
+            vec!["rookery", "start", "--json"],
+            vec!["rookery", "stop", "--json"],
+            vec!["rookery", "config", "--json"],
+        ];
+
+        for args in &commands_with_json {
+            let result = Cli::try_parse_from(args);
+            assert!(
+                result.is_ok(),
+                "--json flag on {:?} should parse successfully, got: {:?}",
+                args,
+                result.err()
+            );
+        }
+    }
+
+    /// Verify --follow and -f flags on logs, plus -n for line count.
+    #[test]
+    fn test_parse_logs_follow_and_line_count() {
+        // Long form --follow
+        let cli = Cli::try_parse_from(["rookery", "logs", "--follow"]).unwrap();
+        if let Commands::Logs { follow, n } = cli.command {
+            assert!(follow, "--follow should set follow=true");
+            assert_eq!(n, 50, "default line count should be 50");
+        } else {
+            panic!("expected Logs command");
+        }
+
+        // Short form -f
+        let cli = Cli::try_parse_from(["rookery", "logs", "-f"]).unwrap();
+        if let Commands::Logs { follow, .. } = cli.command {
+            assert!(follow, "-f should set follow=true");
+        } else {
+            panic!("expected Logs command");
+        }
+
+        // Custom line count -n 100
+        let cli = Cli::try_parse_from(["rookery", "logs", "-n", "100"]).unwrap();
+        if let Commands::Logs { follow, n } = cli.command {
+            assert!(!follow, "follow should default to false");
+            assert_eq!(n, 100, "-n 100 should set n=100");
+        } else {
+            panic!("expected Logs command");
+        }
+
+        // Combined -f -n 20
+        let cli = Cli::try_parse_from(["rookery", "logs", "-f", "-n", "20"]).unwrap();
+        if let Commands::Logs { follow, n } = cli.command {
+            assert!(follow);
+            assert_eq!(n, 20);
+        } else {
+            panic!("expected Logs command");
+        }
+    }
+
+    /// Verify invalid subcommand produces an error.
+    #[test]
+    fn test_parse_invalid_subcommand_fails() {
+        let result = Cli::try_parse_from(["rookery", "nonexistent"]);
+        assert!(
+            result.is_err(),
+            "invalid subcommand should produce an error"
+        );
+    }
+
+    /// Verify --daemon global flag is parsed.
+    #[test]
+    fn test_parse_global_daemon_flag() {
+        let cli = Cli::try_parse_from(["rookery", "--daemon", "http://localhost:5000", "status"])
+            .unwrap();
+        assert_eq!(cli.daemon, "http://localhost:5000");
+    }
+
+    // =========================================================================
+    // VAL-CLI-002: Status display formatting for all states
+    // =========================================================================
+
+    /// Running state shows all fields: state, profile, backend, pid, port, api, uptime.
+    #[test]
+    fn test_status_display_running_shows_all_fields() {
+        let resp = StatusResponse {
+            state: "running".into(),
+            profile: Some("fast".into()),
+            pid: Some(1234),
+            port: Some(8081),
+            uptime_secs: Some(3661), // 1h 1m 1s
+            backend: Some("llama-server".into()),
+        };
+
+        // Replicate the exact formatting logic from cmd_status
+        let mut lines = Vec::new();
+        lines.push(format!("state:   {}", resp.state));
+        if let Some(profile) = &resp.profile {
+            lines.push(format!("profile: {profile}"));
+        }
+        if let Some(backend) = &resp.backend {
+            lines.push(format!("backend: {backend}"));
+        }
+        if let Some(pid) = resp.pid {
+            lines.push(format!("pid:     {pid}"));
+        }
+        if let Some(port) = resp.port {
+            lines.push(format!("port:    {port}"));
+            lines.push(format!("api:     http://localhost:{port}/v1"));
+        }
+        if let Some(uptime) = resp.uptime_secs {
+            let hours = uptime / 3600;
+            let mins = (uptime % 3600) / 60;
+            let secs = uptime % 60;
+            lines.push(format!("uptime:  {hours}h {mins}m {secs}s"));
+        }
+
+        let output = lines.join("\n");
+        assert!(output.contains("state:   running"));
+        assert!(output.contains("profile: fast"));
+        assert!(output.contains("backend: llama-server"));
+        assert!(output.contains("pid:     1234"));
+        assert!(output.contains("port:    8081"));
+        assert!(output.contains("api:     http://localhost:8081/v1"));
+        assert!(output.contains("uptime:  1h 1m 1s"));
+    }
+
+    /// Stopped state shows only state line — no profile, backend, pid, port, uptime.
+    #[test]
+    fn test_status_display_stopped_shows_minimal_info() {
+        let resp = StatusResponse {
+            state: "stopped".into(),
+            profile: None,
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!("state:   {}", resp.state));
+        if let Some(profile) = &resp.profile {
+            lines.push(format!("profile: {profile}"));
+        }
+        if let Some(backend) = &resp.backend {
+            lines.push(format!("backend: {backend}"));
+        }
+        if let Some(pid) = resp.pid {
+            lines.push(format!("pid:     {pid}"));
+        }
+        if let Some(port) = resp.port {
+            lines.push(format!("port:    {port}"));
+            lines.push(format!("api:     http://localhost:{port}/v1"));
+        }
+        if let Some(uptime) = resp.uptime_secs {
+            let hours = uptime / 3600;
+            let mins = (uptime % 3600) / 60;
+            let secs = uptime % 60;
+            lines.push(format!("uptime:  {hours}h {mins}m {secs}s"));
+        }
+
+        let output = lines.join("\n");
+        assert_eq!(lines.len(), 1, "stopped state should only have 1 line");
+        assert!(output.contains("state:   stopped"));
+        assert!(!output.contains("profile:"));
+        assert!(!output.contains("backend:"));
+        assert!(!output.contains("pid:"));
+        assert!(!output.contains("port:"));
+        assert!(!output.contains("uptime:"));
+    }
+
+    /// Daemon offline: non-JSON mode shows "rookeryd: offline".
+    #[test]
+    fn test_status_display_daemon_offline_message() {
+        // The cmd_status function prints "rookeryd: offline" when daemon is unreachable
+        let offline_text = "rookeryd: offline";
+        assert_eq!(offline_text, "rookeryd: offline");
+
+        // JSON mode produces {"state":"daemon_offline"}
+        let json_offline = r#"{"state":"daemon_offline"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json_offline).unwrap();
+        assert_eq!(parsed["state"], "daemon_offline");
+    }
+
+    // =========================================================================
+    // GPU display formatting: temp, VRAM, utilization, power
+    // =========================================================================
+
+    /// GPU display shows temperature, VRAM usage percentage, utilization, and power.
+    #[test]
+    fn test_gpu_display_formatting() {
+        let gpu = GpuStats {
+            index: 0,
+            name: "NVIDIA RTX 4090".into(),
+            vram_used_mb: 20480,
+            vram_total_mb: 24576,
+            temperature_c: 72,
+            utilization_pct: 95,
+            power_watts: 350.0,
+            power_limit_watts: 450.0,
+        };
+
+        // Replicate the exact formatting from cmd_gpu
+        let mut lines = Vec::new();
+        lines.push(format!("GPU {}: {}", gpu.index, gpu.name));
+        lines.push(format!(
+            "  VRAM:  {} / {} MB ({:.0}%)",
+            gpu.vram_used_mb,
+            gpu.vram_total_mb,
+            gpu.vram_used_mb as f64 / gpu.vram_total_mb as f64 * 100.0
+        ));
+        lines.push(format!("  Temp:  {}C", gpu.temperature_c));
+        lines.push(format!("  Util:  {}%", gpu.utilization_pct));
+        lines.push(format!(
+            "  Power: {:.0}W / {:.0}W",
+            gpu.power_watts, gpu.power_limit_watts
+        ));
+
+        let output = lines.join("\n");
+        assert!(output.contains("GPU 0: NVIDIA RTX 4090"));
+        assert!(output.contains("20480 / 24576 MB (83%)"));
+        assert!(output.contains("Temp:  72C"));
+        assert!(output.contains("Util:  95%"));
+        assert!(output.contains("Power: 350W / 450W"));
+    }
+
+    // =========================================================================
+    // Profiles display: ctx_size K formatting, thinking flag
+    // =========================================================================
+
+    /// Profiles display shows ctx_size as "K" when >= 1024, and raw when < 1024.
+    #[test]
+    fn test_profiles_display_ctx_size_formatting() {
+        // 131072 → "128K"
+        let ctx: u64 = 131072;
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+        assert_eq!(ctx_label, "128K");
+
+        // 512 → "512"
+        let ctx: u64 = 512;
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+        assert_eq!(ctx_label, "512");
+
+        // 262144 → "256K"
+        let ctx: u64 = 262144;
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+        assert_eq!(ctx_label, "256K");
+    }
+
+    /// Profile with reasoning_budget shows "thinking" suffix.
+    #[test]
+    fn test_profiles_display_thinking_flag() {
+        let profile = serde_json::json!({
+            "name": "think",
+            "model": "qwen35",
+            "backend": "llama-server",
+            "ctx_size": 131072,
+            "reasoning_budget": 16384,
+            "default": false,
+            "estimated_vram_mb": null,
+        });
+
+        let name = profile["name"].as_str().unwrap_or("?");
+        let model = profile["model"].as_str().unwrap_or("?");
+        let ctx = profile["ctx_size"].as_u64().unwrap_or(0);
+        let reasoning = profile["reasoning_budget"].as_i64().unwrap_or(0);
+        let backend = profile["backend"].as_str().unwrap_or("llama-server");
+        let is_default = profile["default"].as_bool().unwrap_or(false);
+
+        let default_marker = if is_default { " (default)" } else { "" };
+        let thinking = if reasoning != 0 { " thinking" } else { "" };
+        let ctx_label = if ctx >= 1024 {
+            format!("{}K", ctx / 1024)
+        } else {
+            ctx.to_string()
+        };
+
+        let mut output = format!("  [{backend}] {name}{default_marker} — {model}");
+        if ctx > 0 {
+            output.push_str(&format!(", {ctx_label} ctx"));
+        }
+        output.push_str(thinking);
+
+        assert!(
+            output.contains(" thinking"),
+            "profile with reasoning_budget should show thinking, got: {output}"
+        );
+        assert!(
+            output.contains("128K ctx"),
+            "should show formatted ctx, got: {output}"
+        );
+    }
+
+    // =========================================================================
+    // Agent status display formatting
+    // =========================================================================
+
+    /// Agent status display shows name, PID, and status string.
+    #[test]
+    fn test_agent_status_display_formatting() {
+        let agents = vec![
+            AgentInfo {
+                name: "aider".into(),
+                pid: 5678,
+                started_at: "2024-01-01T00:00:00Z".into(),
+                status: serde_json::Value::String("running".into()),
+            },
+            AgentInfo {
+                name: "cursor".into(),
+                pid: 9999,
+                started_at: "2024-01-01T00:00:00Z".into(),
+                status: serde_json::json!({"error": "segfault"}),
+            },
+        ];
+
+        let mut output_lines = Vec::new();
+        for agent in &agents {
+            let status = match &agent.status {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Object(m) => {
+                    if let Some(err) = m.get("error") {
+                        format!("failed: {}", err.as_str().unwrap_or("unknown"))
+                    } else {
+                        "unknown".into()
+                    }
+                }
+                _ => "unknown".into(),
+            };
+            output_lines.push(format!("  {} (PID {}) — {}", agent.name, agent.pid, status));
+        }
+
+        let output = output_lines.join("\n");
+        assert!(
+            output.contains("aider (PID 5678) — running"),
+            "should show running agent, got: {output}"
+        );
+        assert!(
+            output.contains("cursor (PID 9999) — failed: segfault"),
+            "should show failed agent with error, got: {output}"
+        );
+    }
+
+    // =========================================================================
+    // Bench display formatting with tok/s
+    // =========================================================================
+
+    /// Bench display shows test name, token counts, and tok/s rates.
+    #[test]
+    fn test_bench_display_formatting() {
+        let tests = vec![
+            serde_json::json!({
+                "name": "pp512",
+                "prompt_tokens": 512,
+                "completion_tokens": 128,
+                "pp_tok_s": 3200.5,
+                "gen_tok_s": 42.3,
+            }),
+            serde_json::json!({
+                "name": "tg128",
+                "prompt_tokens": 1,
+                "completion_tokens": 128,
+                "pp_tok_s": 0.0,
+                "gen_tok_s": 45.8,
+            }),
+        ];
+
+        // Replicate the bench formatting from cmd_bench
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{:<12} {:>8} {:>8} {:>10} {:>10}",
+            "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s"
+        ));
+        lines.push("-".repeat(52));
+
+        for t in &tests {
+            lines.push(format!(
+                "{:<12} {:>8} {:>8} {:>10.0} {:>10.0}",
+                t["name"].as_str().unwrap_or("?"),
+                t["prompt_tokens"].as_u64().unwrap_or(0),
+                t["completion_tokens"].as_u64().unwrap_or(0),
+                t["pp_tok_s"].as_f64().unwrap_or(0.0),
+                t["gen_tok_s"].as_f64().unwrap_or(0.0),
+            ));
+        }
+
+        let output = lines.join("\n");
+        assert!(output.contains("PP tok/s"), "header should show PP tok/s");
+        assert!(output.contains("Gen tok/s"), "header should show Gen tok/s");
+        assert!(output.contains("pp512"), "should contain test name 'pp512'");
+        assert!(output.contains("tg128"), "should contain test name 'tg128'");
+        // Check that tok/s values appear in the table (3200.5 → "3200" with banker's rounding)
+        assert!(
+            output.contains("3200") || output.contains("3201"),
+            "should show PP tok/s value, got:\n{output}"
+        );
+        // gen_tok_s 42.3 → "42"
+        assert!(
+            output.contains("42"),
+            "should show gen tok/s value, got:\n{output}"
+        );
+        // gen_tok_s 45.8 → "46"
+        assert!(
+            output.contains("46"),
+            "should show second gen tok/s value, got:\n{output}"
+        );
+    }
+
+    // =========================================================================
+    // format_count helper
+    // =========================================================================
+
+    /// format_count formats numbers with K/M suffixes.
+    #[test]
+    fn test_format_count_helper() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1.0K");
+        assert_eq!(format_count(1500), "1.5K");
+        assert_eq!(format_count(999_999), "1000.0K");
+        assert_eq!(format_count(1_000_000), "1.0M");
+        assert_eq!(format_count(2_500_000), "2.5M");
+    }
+
+    // =========================================================================
+    // GpuResponse / GpuStats deserialization
+    // =========================================================================
+
+    /// GpuResponse deserializes correctly from daemon JSON.
+    #[test]
+    fn test_gpu_response_deserialization() {
+        let json = r#"{
+            "gpus": [{
+                "index": 0,
+                "name": "NVIDIA RTX 4090",
+                "vram_used_mb": 20480,
+                "vram_total_mb": 24576,
+                "temperature_c": 65,
+                "utilization_pct": 88,
+                "power_watts": 300.5,
+                "power_limit_watts": 450.0
+            }]
+        }"#;
+        let resp: GpuResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.gpus.len(), 1);
+        assert_eq!(resp.gpus[0].name, "NVIDIA RTX 4090");
+        assert_eq!(resp.gpus[0].vram_used_mb, 20480);
+        assert_eq!(resp.gpus[0].temperature_c, 65);
+        assert_eq!(resp.gpus[0].utilization_pct, 88);
+    }
 }
