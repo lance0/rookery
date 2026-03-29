@@ -20,6 +20,33 @@ Open the dashboard at your configured address (default `http://localhost:3000`) 
 
 See [Installation](#installation) below for setup instructions.
 
+## Dashboard
+
+<p align="center">
+  <img src="screenshots/overview.png" alt="Rookery Overview" width="800">
+</p>
+
+<details>
+<summary>More screenshots</summary>
+
+**Settings** — profile switcher and sampling param editor
+
+<img src="screenshots/settings.png" alt="Settings" width="800">
+
+**Agents** — agent cards, controls, filtered logs
+
+<img src="screenshots/agents.png" alt="Agents" width="800">
+
+**Models** — hardware profile, HuggingFace search, cached models
+
+<img src="screenshots/models.png" alt="Models" width="800">
+
+**Logs** — live streaming log viewer
+
+<img src="screenshots/logs.png" alt="Logs" width="800">
+
+</details>
+
 ## Features
 
 - **Multi-backend** — manage llama-server (GGUF) and vLLM (safetensors, AWQ, GPTQ, NVFP4) from the same config
