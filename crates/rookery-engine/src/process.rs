@@ -389,6 +389,9 @@ mod tests {
         f.sync_all().unwrap();
         drop(f);
         std::fs::set_permissions(path, PermissionsExt::from_mode(0o755)).unwrap();
+        // Brief pause to ensure filesystem has fully released the file handle.
+        // Prevents ETXTBSY on Linux when multiple test threads write scripts.
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     /// Create a temp script that ignores all arguments and just sleeps.
