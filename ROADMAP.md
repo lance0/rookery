@@ -211,6 +211,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] GitHub Actions workflow: build + test + clippy + fmt on push/PR
 - [x] Cache cargo registry + build artifacts via `rust-cache` action
 - [ ] Test matrix: stable + nightly Rust
+- [ ] Dashboard CI job: trunk build + wasm32 validation in GitHub Actions
 
 ## vLLM Backend Support (Done — Core)
 
