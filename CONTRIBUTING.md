@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Rust 1.85+ (stable)
+- Rust 1.88+ (stable)
 - NVIDIA GPU with CUDA drivers (for NVML)
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) built with CUDA
 - [Trunk](https://trunkrs.dev/) for dashboard: `cargo install trunk`

@@ -139,7 +139,7 @@ sudo mv rookeryd rookery /usr/local/bin/
 
 ### From Source
 
-Requires [Rust 1.85+](https://www.rust-lang.org/tools/install) and an NVIDIA GPU with CUDA drivers.
+Requires [Rust 1.88+](https://www.rust-lang.org/tools/install) and an NVIDIA GPU with CUDA drivers.
 
 ```bash
 # Install Rust (if not already installed)
