@@ -843,6 +843,22 @@ pub enum AgentError {
 mod tests {
     use super::*;
 
+    /// Create an AgentManager with temp-dir-backed persistence.
+    /// Returns (TempDir, AgentManager) — keep TempDir alive for the test duration.
+    fn test_manager(log_buffer: Arc<LogBuffer>) -> (tempfile::TempDir, AgentManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let persistence = rookery_core::state::AgentPersistence {
+            path: dir.path().join("agents.json"),
+        };
+        (dir, AgentManager::with_persistence(log_buffer, persistence))
+    }
+
+    /// Same as test_manager but returns Arc<AgentManager>.
+    fn test_manager_arc(log_buffer: Arc<LogBuffer>) -> (tempfile::TempDir, Arc<AgentManager>) {
+        let (dir, mgr) = test_manager(log_buffer);
+        (dir, Arc::new(mgr))
+    }
+
     #[test]
     fn test_read_version_pyproject() {
         let dir = tempfile::tempdir().unwrap();
@@ -915,7 +931,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_manager_start_stop() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "sleep".to_string(),
@@ -944,7 +960,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_manager_already_running() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "sleep".to_string(),
@@ -969,7 +985,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_manager_get_health() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "sleep".to_string(),
@@ -1003,7 +1019,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_manager_remove_tracking() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "sleep".to_string(),
@@ -1038,7 +1054,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_manager_record_restart() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "sleep".to_string(),
@@ -1067,7 +1083,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_fatal_error_pattern_detection() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "bash".to_string(),
@@ -1103,7 +1119,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_no_false_fatal_trigger() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let config = AgentConfig {
             command: "bash".to_string(),
@@ -1191,7 +1207,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_adopt_registers_pid_and_is_tracked() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Spawn a real process to get a valid PID
         let child = tokio::process::Command::new("sleep")
@@ -1228,7 +1244,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_stop_adopted_kills_by_pid() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Spawn a real process
         let child = tokio::process::Command::new("sleep")
@@ -1266,7 +1282,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_stop_all_stops_multiple_agents() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
         let config = test_agent_config();
 
         let info1 = manager.start("agent-1", &config).await.unwrap();
@@ -1296,7 +1312,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_watchdog_shutdown_notify_wakes_immediately() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = Arc::new(AgentManager::new(log_buffer));
+        let (_adir, manager) = test_manager_arc(log_buffer);
 
         let handle = manager.spawn_watchdog(HashMap::new());
 
@@ -1315,7 +1331,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_list_returns_status_and_cleans_dead() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Start an agent that exits immediately
         let short_config = AgentConfig {
@@ -1443,7 +1459,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_env_var_passing() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer.clone());
+        let (_adir, manager) = test_manager(log_buffer.clone());
 
         let dir = tempfile::tempdir().unwrap();
         let marker_path = dir.path().join("env_output.txt");
@@ -1488,7 +1504,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_workdir_setting() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer.clone());
+        let (_adir, manager) = test_manager(log_buffer.clone());
 
         let workdir = tempfile::tempdir().unwrap();
         let output_path = workdir.path().join("workdir_output.txt");
@@ -1523,7 +1539,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_is_running_adopted_vs_owned() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Start an owned agent
         let config = test_agent_config();
@@ -1559,7 +1575,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_crash_detected_on_list() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Start an agent that exits after a brief delay
         let config = AgentConfig {
@@ -1602,7 +1618,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_error_count_tracking() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         // Start an agent that writes error lines to stderr then sleeps
         let config = AgentConfig {
@@ -1650,7 +1666,7 @@ name = "test-agent"
     #[tokio::test]
     async fn test_agent_stop_not_found() {
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let manager = AgentManager::new(log_buffer);
+        let (_adir, manager) = test_manager(log_buffer);
 
         let err = manager.stop("nonexistent").await.unwrap_err();
         assert!(matches!(err, AgentError::NotFound(_)));
