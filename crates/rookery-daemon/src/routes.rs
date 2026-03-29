@@ -2111,4 +2111,452 @@ mod tests {
             "500 should NOT be success → props/slots set to null"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Route integration tests — real HTTP requests via axum oneshot
+    // ═══════════════════════════════════════════════════════════════════
+
+    mod route_integration {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::{get, post};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        use crate::test_utils::{MockBackend, build_test_app_state};
+        use rookery_core::config::BackendType;
+        use rookery_engine::backend::BackendInfo;
+
+        /// Build the route subset used for integration testing.
+        ///
+        /// Mirrors the routes from main.rs relevant to core endpoint tests,
+        /// including the 1MB request body limit.
+        fn test_router(state: std::sync::Arc<crate::app_state::AppState>) -> Router {
+            Router::new()
+                .route("/api/health", get(super::get_health))
+                .route("/api/status", get(super::get_status))
+                .route("/api/profiles", get(super::get_profiles))
+                .route("/api/config", get(super::get_config))
+                .route("/api/logs", get(super::get_logs))
+                .route("/api/start", post(super::post_start))
+                .route("/api/stop", post(super::post_stop))
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
+                .with_state(state)
+        }
+
+        // --- 1. GET /api/health → 200 always ---
+        #[tokio::test]
+        async fn test_route_health_returns_200() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // --- 2. GET /api/status when stopped → 200 with state="stopped", backend=null ---
+        #[tokio::test]
+        async fn test_route_status_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["state"], "stopped");
+            assert!(
+                json["backend"].is_null(),
+                "backend should be null when stopped"
+            );
+            assert!(
+                json["profile"].is_null(),
+                "profile should be null when stopped"
+            );
+            assert!(json["pid"].is_null(), "pid should be null when stopped");
+            assert!(json["port"].is_null(), "port should be null when stopped");
+        }
+
+        // --- 3. GET /api/status when running → 200 with state="running", backend, profile, pid, port ---
+        #[tokio::test]
+        async fn test_route_status_when_running() {
+            let running_info = BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 8081,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            };
+            let backend = MockBackend::running_with(running_info);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["state"], "running");
+            assert_eq!(json["backend"], "llama-server");
+            assert_eq!(json["profile"], "test");
+            assert_eq!(json["pid"], 12345);
+            assert_eq!(json["port"], 8081);
+            assert!(
+                json["uptime_secs"].is_number(),
+                "uptime_secs should be a number"
+            );
+        }
+
+        // --- 4. GET /api/profiles → 200 with profile list including backend field ---
+        #[tokio::test]
+        async fn test_route_profiles_returns_list_with_backend() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/profiles")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            let profiles = json["profiles"]
+                .as_array()
+                .expect("profiles should be an array");
+            assert!(!profiles.is_empty(), "should have at least one profile");
+
+            for profile in profiles {
+                assert!(
+                    profile.get("backend").is_some(),
+                    "each profile should have a 'backend' field"
+                );
+                assert!(
+                    profile.get("name").is_some(),
+                    "each profile should have a 'name' field"
+                );
+                assert!(
+                    profile.get("model").is_some(),
+                    "each profile should have a 'model' field"
+                );
+            }
+
+            // The default test config has a "test" profile with llama-server backend
+            let test_profile = profiles
+                .iter()
+                .find(|p| p["name"] == "test")
+                .expect("should have 'test' profile");
+            assert_eq!(test_profile["backend"], "llama-server");
+        }
+
+        // --- 5. GET /api/config → 200 with redacted agent env vars ---
+        #[tokio::test]
+        async fn test_route_config_redacts_agent_env() {
+            let (_dir, state) = build_test_app_state(None);
+
+            // Add an agent with env vars to the config
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert(
+                    "test_agent".into(),
+                    rookery_core::config::AgentConfig {
+                        command: "/bin/echo".into(),
+                        args: vec![],
+                        workdir: None,
+                        env: std::collections::HashMap::from([
+                            ("SECRET_KEY".into(), "super-secret-value".into()),
+                            ("API_TOKEN".into(), "another-secret".into()),
+                        ]),
+                        restart_on_swap: false,
+                        restart_on_crash: false,
+                        auto_start: false,
+                        depends_on_port: None,
+                        version_file: None,
+                        restart_on_error_patterns: vec![],
+                    },
+                );
+            }
+
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/config")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            // Agent env vars should be redacted
+            let agent_env = &json["agents"]["test_agent"]["env"];
+            let env_str = agent_env.as_str().expect("env should be a redacted string");
+            assert!(
+                env_str.contains("2 vars redacted"),
+                "env should show redacted count, got: {env_str}"
+            );
+            // Must NOT contain the actual secret values
+            let body_str = String::from_utf8_lossy(&body);
+            assert!(
+                !body_str.contains("super-secret-value"),
+                "response must not contain actual secret values"
+            );
+            assert!(
+                !body_str.contains("another-secret"),
+                "response must not contain actual secret values"
+            );
+        }
+
+        // --- 6. GET /api/logs?n=10 → 200 with last N log lines ---
+        #[tokio::test]
+        async fn test_route_logs_returns_last_n_lines() {
+            let (_dir, state) = build_test_app_state(None);
+
+            // Push some log lines
+            for i in 0..20 {
+                state.log_buffer.push(format!("log line {i}"));
+            }
+
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/api/logs?n=5")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            let lines = json["lines"].as_array().expect("lines should be an array");
+            assert_eq!(lines.len(), 5, "should return exactly 5 lines");
+            // Should be the last 5 lines
+            assert_eq!(lines[0], "log line 15");
+            assert_eq!(lines[4], "log line 19");
+        }
+
+        // --- 7. POST /api/start when stopped → triggers backend.start(), transitions to Running ---
+        //
+        // Uses a simple health endpoint to satisfy the wait_for_health check.
+        // The config profile port is updated to match the mock server's port.
+        #[tokio::test]
+        async fn test_route_start_when_stopped() {
+            // Start a minimal HTTP server to satisfy the health check
+            let health_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mock_port = health_listener.local_addr().unwrap().port();
+
+            let health_app = axum::Router::new().route("/health", get(|| async { StatusCode::OK }));
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                axum::serve(health_listener, health_app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            let (_dir, state) = build_test_app_state(None);
+
+            // Update the config profile port to match the mock server
+            {
+                let mut config = state.config.write().await;
+                if let Some(profile) = config.profiles.get_mut("test") {
+                    profile.port = mock_port;
+                }
+            }
+
+            let app = test_router(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"test"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true, "start should succeed");
+            let msg = json["message"].as_str().unwrap();
+            assert!(
+                msg.contains("started"),
+                "message should indicate server started, got: {msg}"
+            );
+            assert_eq!(json["status"]["state"], "running");
+
+            // Verify backend is now running
+            let backend_state = state.backend.lock().await.to_server_state().await;
+            assert!(
+                matches!(
+                    backend_state,
+                    rookery_core::state::ServerState::Running { .. }
+                ),
+                "backend should be running after POST /api/start"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 8. POST /api/start when already running same profile → 200 no-op ---
+        #[tokio::test]
+        async fn test_route_start_idempotent_same_profile() {
+            let running_info = BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 8081,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            };
+            let backend = MockBackend::running_with(running_info);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"test"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true, "should succeed as no-op");
+            let msg = json["message"].as_str().unwrap();
+            assert!(
+                msg.contains("already running"),
+                "message should indicate already running, got: {msg}"
+            );
+        }
+
+        // --- 9. POST /api/stop when running → triggers backend.stop(), transitions to Stopped ---
+        #[tokio::test]
+        async fn test_route_stop_when_running() {
+            let running_info = BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 8081,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            };
+            let backend = MockBackend::running_with(running_info);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            let app = test_router(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/stop")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            assert_eq!(json["message"], "server stopped");
+            assert_eq!(json["status"]["state"], "stopped");
+
+            // Verify backend is now stopped
+            let backend_state = state.backend.lock().await.to_server_state().await;
+            assert!(
+                matches!(backend_state, rookery_core::state::ServerState::Stopped),
+                "backend should be stopped after POST /api/stop"
+            );
+        }
+
+        // --- 10. POST /api/stop when stopped → 200 no-op ---
+        #[tokio::test]
+        async fn test_route_stop_when_already_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/stop")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            assert_eq!(json["status"]["state"], "stopped");
+        }
+
+        // --- 11. Request body size limit → 413 on oversized payload ---
+        #[tokio::test]
+        async fn test_route_body_size_limit_returns_413() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            // Create a payload larger than 1MB (the configured body limit)
+            let oversized = "x".repeat(2 * 1024 * 1024); // 2MB
+            let body_str = format!(r#"{{"profile":"{}"}}"#, oversized);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/start")
+                .header("content-type", "application/json")
+                .body(Body::from(body_str))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "oversized payload should be rejected with 413"
+            );
+        }
+    }
 }
