@@ -2,6 +2,20 @@ use leptos::prelude::*;
 use crate::{ServerStatus, ProfileInfo, AgentsData, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
 
+fn spawn_refresh_lists(
+    set_profiles: WriteSignal<Vec<ProfileInfo>>,
+    set_agents: WriteSignal<AgentsData>,
+) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Ok(p) = api::fetch_profiles().await {
+            set_profiles.set(p);
+        }
+        if let Ok(a) = api::fetch_agents().await {
+            set_agents.set(a);
+        }
+    });
+}
+
 #[component]
 pub fn StatusCard(
     status: ReadSignal<ServerStatus>,
@@ -17,6 +31,10 @@ pub fn StatusCard(
 
     let state_text = move || status.get().state.clone();
     let profile_text = move || status.get().profile.clone().unwrap_or_else(|| "—".into());
+    let can_start = move || matches!(status.get().state.as_str(), "stopped" | "failed");
+    let can_stop = move || status.get().state != "stopped";
+    let can_sleep = move || status.get().state == "running";
+    let can_wake = move || status.get().state == "sleeping";
 
     let backend_badge = move || {
         let s = status.get();
@@ -61,12 +79,13 @@ pub fn StatusCard(
                 }
                 Err(e) => show_toast(set_toasts, format!("start failed: {e}"), ToastKind::Error),
             }
-            if let Ok(p) = api::fetch_profiles().await { set_profiles.set(p); }
-            if let Ok(a) = api::fetch_agents().await { set_agents.set(a); }
         });
+        spawn_refresh_lists(set_profiles, set_agents);
     };
 
     let on_stop = move |_| {
+        let set_profiles = set_profiles.clone();
+        let set_agents = set_agents.clone();
         let set_toasts = set_toasts.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match api::stop_server().await {
@@ -77,6 +96,49 @@ pub fn StatusCard(
                 Err(e) => show_toast(set_toasts, format!("stop failed: {e}"), ToastKind::Error),
             }
         });
+        spawn_refresh_lists(set_profiles, set_agents);
+    };
+
+    let on_sleep = move |_| {
+        let set_profiles = set_profiles.clone();
+        let set_agents = set_agents.clone();
+        let set_toasts = set_toasts.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match api::sleep_server().await {
+                Ok(resp) => {
+                    let msg = resp["message"].as_str().unwrap_or("server sleeping").to_string();
+                    let success = resp["success"].as_bool().unwrap_or(false);
+                    show_toast(
+                        set_toasts,
+                        msg,
+                        if success { ToastKind::Success } else { ToastKind::Error },
+                    );
+                }
+                Err(e) => show_toast(set_toasts, format!("sleep failed: {e}"), ToastKind::Error),
+            }
+        });
+        spawn_refresh_lists(set_profiles, set_agents);
+    };
+
+    let on_wake = move |_| {
+        let set_profiles = set_profiles.clone();
+        let set_agents = set_agents.clone();
+        let set_toasts = set_toasts.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match api::wake_server().await {
+                Ok(resp) => {
+                    let msg = resp["message"].as_str().unwrap_or("server woke").to_string();
+                    let success = resp["success"].as_bool().unwrap_or(false);
+                    show_toast(
+                        set_toasts,
+                        msg,
+                        if success { ToastKind::Success } else { ToastKind::Error },
+                    );
+                }
+                Err(e) => show_toast(set_toasts, format!("wake failed: {e}"), ToastKind::Error),
+            }
+        });
+        spawn_refresh_lists(set_profiles, set_agents);
     };
 
     view! {
@@ -104,8 +166,10 @@ pub fn StatusCard(
                 <div class="stat-value mono">{uptime}</div>
             </div>
             <div class="btn-row">
-                <button class="btn" on:click=on_start>"Start"</button>
-                <button class="btn danger" on:click=on_stop>"Stop"</button>
+                <button class="btn" on:click=on_start disabled=move || !can_start()>"Start"</button>
+                <button class="btn" on:click=on_wake disabled=move || !can_wake()>"Wake"</button>
+                <button class="btn" on:click=on_sleep disabled=move || !can_sleep()>"Sleep"</button>
+                <button class="btn danger" on:click=on_stop disabled=move || !can_stop()>"Stop"</button>
             </div>
         </div>
     }

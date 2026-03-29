@@ -17,7 +17,7 @@ use rookery_engine::hardware::{CpuProfile, HardwareProfile};
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::models::HfClient;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use crate::app_state::AppState;
@@ -68,14 +68,20 @@ impl MockBackend {
 
 #[async_trait]
 impl InferenceBackend for MockBackend {
-    async fn start(&self, _config: &Config, profile: &str) -> Result<BackendInfo> {
+    async fn start(&self, config: &Config, profile: &str) -> Result<BackendInfo> {
+        let backend_type = config
+            .profiles
+            .get(profile)
+            .map(|p| p.backend_type())
+            .unwrap_or(BackendType::LlamaServer);
+        let port = config.profiles.get(profile).map(|p| p.port).unwrap_or(0);
         let info = BackendInfo {
             pid: Some(99999),
             container_id: None,
-            port: 0,
+            port,
             profile: profile.to_string(),
             started_at: chrono::Utc::now(),
-            backend_type: BackendType::LlamaServer,
+            backend_type,
             command_line: vec!["mock-server".into()],
             exe_path: Some(PathBuf::from("/mock/llama-server")),
         };
@@ -169,11 +175,13 @@ pub fn build_test_app_state(
 
     let backend: Box<dyn InferenceBackend> =
         backend.unwrap_or_else(|| Box::new(MockBackend::new()));
+    let initial_server_state = ServerState::Stopped;
 
     let config = Config {
         llama_server: PathBuf::from("/mock/llama-server"),
         default_profile: "test".into(),
         listen: "127.0.0.1:19876".parse().unwrap(),
+        idle_timeout: None,
         models: HashMap::from([(
             "test_model".into(),
             Model {
@@ -239,11 +247,18 @@ pub fn build_test_app_state(
         gpu_monitor: None,
         log_buffer,
         state_persistence,
+        server_state: RwLock::new(initial_server_state),
         state_tx,
+        last_inference_at: AtomicI64::new(0),
         op_lock: Mutex::new(()),
         hf_client: HfClient::new(),
         hardware_profile,
     });
 
     (dir, app_state)
+}
+
+pub async fn sync_state_from_backend(state: &Arc<AppState>) {
+    let current = state.backend.lock().await.to_server_state().await;
+    state.set_server_state(current).await;
 }

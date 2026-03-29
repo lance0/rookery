@@ -30,6 +30,10 @@ pub enum ServerState {
         #[serde(default)]
         container_id: Option<String>,
     },
+    Sleeping {
+        profile: String,
+        since: DateTime<Utc>,
+    },
     Stopping {
         since: DateTime<Utc>,
     },
@@ -45,10 +49,15 @@ impl ServerState {
         matches!(self, ServerState::Running { .. })
     }
 
+    pub fn is_sleeping(&self) -> bool {
+        matches!(self, ServerState::Sleeping { .. })
+    }
+
     pub fn profile_name(&self) -> Option<&str> {
         match self {
             ServerState::Starting { profile, .. }
             | ServerState::Running { profile, .. }
+            | ServerState::Sleeping { profile, .. }
             | ServerState::Failed { profile, .. } => Some(profile),
             _ => None,
         }

@@ -1442,6 +1442,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "vllm_test".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -1551,6 +1552,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "vllm_test".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -1984,6 +1986,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "vllm_test".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -2165,6 +2168,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "bad".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "good_model".into(),
                 Model {
@@ -2296,6 +2300,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "vllm_test".into(),
             listen: "127.0.0.1:19998".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -2487,6 +2492,7 @@ mod tests {
             llama_server: PathBuf::from(binary),
             default_profile: "test".into(),
             listen: format!("127.0.0.1:{port}").parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -3022,6 +3028,7 @@ mod tests {
             llama_server: PathBuf::new(),
             default_profile: "integration_vllm".into(),
             listen: listen_addr.parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "opt_125m".into(),
                 Model {

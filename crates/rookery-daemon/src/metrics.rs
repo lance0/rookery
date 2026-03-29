@@ -220,7 +220,7 @@ pub async fn encode_metrics(state: &AppState) -> String {
         }
     }
 
-    let server_state = state.backend.lock().await.to_server_state().await;
+    let server_state = state.current_state().await;
     match server_state {
         rookery_core::state::ServerState::Running {
             profile,
@@ -237,6 +237,14 @@ pub async fn encode_metrics(state: &AppState) -> String {
             server_uptime_seconds
                 .get_or_create(&ProfileLabels { profile })
                 .set(Utc::now().signed_duration_since(since).num_seconds().max(0) as u64);
+        }
+        rookery_core::state::ServerState::Sleeping { profile, .. } => {
+            server_up
+                .get_or_create(&ServerLabels {
+                    profile,
+                    backend: String::new(),
+                })
+                .set(0);
         }
         _ => {
             server_up

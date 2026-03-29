@@ -56,7 +56,7 @@ pub async fn get_events(
     });
 
     // Send initial state immediately
-    let current_state = state.backend.lock().await.to_server_state().await;
+    let current_state = state.current_state().await;
     let initial_status = crate::routes::status_json_from_state(&current_state);
     let initial_event = stream::once(futures_util::future::ready(Ok(Event::default()
         .event("state")
@@ -93,7 +93,7 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    use crate::test_utils::{MockBackend, build_test_app_state};
+    use crate::test_utils::{MockBackend, build_test_app_state, sync_state_from_backend};
     use rookery_core::config::BackendType;
     use rookery_engine::backend::BackendInfo;
 
@@ -203,6 +203,7 @@ mod tests {
         };
         let backend = MockBackend::running_with(running_info);
         let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+        sync_state_from_backend(&state).await;
         let app = sse_router(state);
 
         let req = Request::builder()

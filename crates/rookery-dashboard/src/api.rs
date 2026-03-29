@@ -53,6 +53,26 @@ pub async fn stop_server() -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+pub async fn sleep_server() -> Result<serde_json::Value, String> {
+    let resp = Request::post("/api/sleep")
+        .json(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn wake_server() -> Result<serde_json::Value, String> {
+    let resp = Request::post("/api/wake")
+        .json(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 pub async fn swap_profile(profile: &str) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "profile": profile });
     let resp = Request::post("/api/swap")

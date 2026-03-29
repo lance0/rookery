@@ -4,14 +4,10 @@
 //! The canary logic was extracted from the `tokio::spawn` block in `main()`
 //! so it can be unit-tested without starting the full daemon.
 
-use rookery_core::config::Config;
-use rookery_core::state::StatePersistence;
-use rookery_engine::backend::InferenceBackend;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
 
-use crate::metrics::RuntimeMetrics;
+use crate::app_state::AppState;
 
 /// Timeout for inference canary requests.
 pub const CANARY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,27 +28,21 @@ pub const CANARY_HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Returns `false` if no restart was needed (server healthy, not running,
 /// draining, or already stopped by someone else).
 pub async fn run_canary_check(
-    backend: &Arc<Mutex<Box<dyn InferenceBackend>>>,
-    config: &Arc<RwLock<Config>>,
-    state_persistence: &StatePersistence,
-    op_lock: &Mutex<()>,
+    state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
-    metrics: Option<&RuntimeMetrics>,
 ) -> bool {
     let is_shutdown = || {
         shutdown
             .map(|s| s.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or(false)
     };
-    if let Some(metrics) = metrics {
-        metrics.record_canary_check();
-    }
+    state.metrics.record_canary_check();
 
     // Only check when server is running and not mid-swap
-    if backend.lock().await.is_draining() || is_shutdown() {
+    if state.backend.lock().await.is_draining() || is_shutdown() {
         return false;
     }
-    let current = backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     let (profile, port) = match current {
         rookery_core::state::ServerState::Running {
             ref profile, port, ..
@@ -69,9 +59,7 @@ pub async fn run_canary_check(
     if is_shutdown() {
         return false;
     }
-    if let Some(metrics) = metrics {
-        metrics.inc_canary_failure();
-    }
+    state.metrics.inc_canary_failure();
     tracing::warn!(port, "inference canary failed, retrying in 5s");
     tokio::time::sleep(CANARY_RETRY_DELAY).await;
     if is_shutdown() {
@@ -87,69 +75,37 @@ pub async fn run_canary_check(
     if is_shutdown() {
         return false;
     }
-    if let Some(metrics) = metrics {
-        metrics.inc_canary_restart();
-    }
+    state.metrics.inc_canary_restart();
     tracing::error!(port, profile = %profile, "inference canary failed twice, restarting server");
 
     // Acquire op_lock to serialize with manual start/stop/swap
-    let _op_guard = op_lock.lock().await;
+    let _op_guard = state.op_lock.lock().await;
     if is_shutdown() {
         return false;
     }
 
     // Re-check state under lock — someone may have stopped/swapped already
-    let current = backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     if !current.is_running() {
         tracing::info!("server already stopped, skipping canary restart");
         return false;
     }
 
-    let _ = backend.lock().await.stop().await;
+    let _ = state.backend.lock().await.stop().await;
     let stopped = rookery_core::state::ServerState::Stopped;
-    let _ = state_persistence.save(&stopped);
+    state.set_server_state(stopped).await;
 
     if is_shutdown() {
         tracing::info!("canary: shutdown during restart, aborting");
         return true;
     }
 
-    let config = config.read().await;
-    let backend_guard = backend.lock().await;
-    match backend_guard.start(&config, &profile).await {
-        Ok(_info) => {
-            let port_for_health = config
-                .profiles
-                .get(&profile)
-                .map(|p| p.port)
-                .unwrap_or(port);
-            drop(backend_guard);
-            drop(config);
-            match rookery_engine::health::wait_for_health(port_for_health, CANARY_HEALTH_TIMEOUT)
-                .await
-            {
-                Ok(()) => {
-                    let server_state = backend.lock().await.to_server_state().await;
-                    let _ = state_persistence.save(&server_state);
-                    if server_state.is_running() {
-                        if let Some(metrics) = metrics {
-                            metrics.inc_server_restart();
-                        }
-                        tracing::info!(profile = %profile, "server restarted by inference canary");
-                    } else {
-                        tracing::error!(profile = %profile, "server failed to restart after canary");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, profile = %profile, "health check failed after canary restart");
-                    let _ = backend.lock().await.stop().await;
-                    let failed = rookery_core::state::ServerState::Failed {
-                        last_error: e.to_string(),
-                        profile: profile.clone(),
-                        since: chrono::Utc::now(),
-                    };
-                    let _ = state_persistence.save(&failed);
-                }
+    match state.start_profile(&profile, false).await {
+        Ok(server_state) => {
+            if server_state.is_running() {
+                tracing::info!(profile = %profile, "server restarted by inference canary");
+            } else {
+                tracing::error!(profile = %profile, "server failed to restart after canary");
             }
         }
         Err(e) => {
@@ -173,6 +129,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use tokio::sync::watch;
+
+    use crate::test_utils::build_test_app_state;
 
     // ── Minimal mock HTTP server for canary tests ─────────────────────
 
@@ -399,6 +357,7 @@ mod tests {
             llama_server: PathBuf::from("/mock/llama-server"),
             default_profile: "test".into(),
             listen: "127.0.0.1:19876".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),
                 Model {
@@ -448,6 +407,17 @@ mod tests {
         port
     }
 
+    async fn build_canary_state(
+        backend: Box<dyn InferenceBackend>,
+        config: Config,
+    ) -> (tempfile::TempDir, Arc<AppState>) {
+        let (dir, state) = build_test_app_state(Some(backend));
+        *state.config.write().await = config;
+        let current = state.backend.lock().await.to_server_state().await;
+        state.set_server_state(current).await;
+        (dir, state)
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────
 
     // === Test 1: Canary check succeeds when backend is healthy — no restart
@@ -456,20 +426,13 @@ mod tests {
         let server = MockHttpServer::healthy().await;
         let port = server.port();
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(CanaryMockBackend::new(port))));
-        let config = Arc::new(RwLock::new(test_config(port)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
+        let (_dir, state) =
+            build_canary_state(Box::new(CanaryMockBackend::new(port)), test_config(port)).await;
 
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
 
         assert!(!restarted, "healthy backend should not trigger restart");
-        assert!(backend.lock().await.is_running().await);
+        assert!(state.current_state().await.is_running());
 
         server.shutdown().await;
     }
@@ -485,22 +448,14 @@ mod tests {
 
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_port(healthy_port).await;
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
+        let (_dir, state) =
+            build_canary_state(Box::new(mock_backend), test_config(healthy_port)).await;
 
-        let config = Arc::new(RwLock::new(test_config(healthy_port)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
-
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
 
         assert!(restarted, "should restart after two inference failures");
         assert!(
-            backend.lock().await.is_running().await,
+            state.current_state().await.is_running(),
             "backend should be running after successful restart"
         );
 
@@ -514,17 +469,9 @@ mod tests {
         let mock_backend = CanaryMockBackend::new(1);
         mock_backend.draining.store(true, Ordering::SeqCst);
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(1)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
+        let (_dir, state) = build_canary_state(Box::new(mock_backend), test_config(1)).await;
 
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
 
         assert!(!restarted, "should skip check when draining");
     }
@@ -536,17 +483,9 @@ mod tests {
         let mock_backend = CanaryMockBackend::new(1);
         mock_backend.set_running(false);
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(1)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
+        let (_dir, state) = build_canary_state(Box::new(mock_backend), test_config(1)).await;
 
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
 
         assert!(!restarted, "should skip check when not running");
     }
@@ -589,40 +528,17 @@ mod tests {
 
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_port(healthy_port).await;
-
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(healthy_port)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("state.json");
-
-        // Use Arc<Mutex> so we can share the lock between test and canary
-        let op_lock = Arc::new(Mutex::new(()));
+        let (_dir, state) =
+            build_canary_state(Box::new(mock_backend), test_config(healthy_port)).await;
 
         // Hold the op_lock — canary should block until we release it
-        let guard = op_lock.lock().await;
-
-        let backend_clone = backend.clone();
-        let config_clone = config.clone();
-        let sp = StatePersistence {
-            path: state_path.clone(),
-        };
-        let op_lock_clone = op_lock.clone();
+        let guard = state.op_lock.lock().await;
 
         // Spawn canary — it will block on op_lock after two failed inference checks.
         // With paused time, the CANARY_RETRY_DELAY auto-advances instantly, so the
         // canary quickly reaches the lock acquisition point.
-        let canary_handle = tokio::spawn(async move {
-            run_canary_check(
-                &backend_clone,
-                &config_clone,
-                &sp,
-                &op_lock_clone,
-                None,
-                None,
-            )
-            .await
-        });
+        let state_clone = state.clone();
+        let canary_handle = tokio::spawn(async move { run_canary_check(&state_clone, None).await });
 
         // Yield to let the canary task run through inference checks and reach the lock.
         // With paused time, all sleeps complete instantly, but the canary will block
@@ -660,29 +576,21 @@ mod tests {
 
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_port(healthy_port).await;
-
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(healthy_port)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
+        let (_dir, state) =
+            build_canary_state(Box::new(mock_backend), test_config(healthy_port)).await;
 
         // Initial state: Running
-        assert!(backend.lock().await.to_server_state().await.is_running());
+        assert!(state.current_state().await.is_running());
 
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
         assert!(restarted, "should have restarted");
 
         // Final state: Running again
-        let final_state = backend.lock().await.to_server_state().await;
+        let final_state = state.current_state().await;
         assert!(final_state.is_running(), "should be Running after restart");
 
         // Persisted state should also be Running
-        let persisted = state_persistence.load().unwrap();
+        let persisted = state.state_persistence.load().unwrap();
         assert!(persisted.is_running(), "persisted state should be Running");
 
         healthy_server.shutdown().await;
@@ -700,21 +608,12 @@ mod tests {
         // After start(), port still points to dead port → wait_for_health fails
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_port(dead).await;
+        let (_dir, state) = build_canary_state(Box::new(mock_backend), test_config(dead)).await;
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(dead)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
-
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
         assert!(restarted, "should have attempted restart");
 
-        let persisted = state_persistence.load().unwrap();
+        let persisted = state.state_persistence.load().unwrap();
         assert!(
             matches!(persisted, ServerState::Failed { .. }),
             "persisted state should be Failed, got {persisted:?}"
@@ -726,41 +625,21 @@ mod tests {
     async fn test_canary_skips_restart_if_stopped_during_lock_wait() {
         let dead = dead_port().await;
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(CanaryMockBackend::new(dead))));
-        let config = Arc::new(RwLock::new(test_config(dead)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("state.json");
-
-        let op_lock = Arc::new(Mutex::new(()));
+        let (_dir, state) =
+            build_canary_state(Box::new(CanaryMockBackend::new(dead)), test_config(dead)).await;
 
         // Hold the lock
-        let guard = op_lock.lock().await;
+        let guard = state.op_lock.lock().await;
 
-        let backend_clone = backend.clone();
-        let config_clone = config.clone();
-        let sp = StatePersistence {
-            path: state_path.clone(),
-        };
-        let op_lock_clone = op_lock.clone();
-
-        let canary_handle = tokio::spawn(async move {
-            run_canary_check(
-                &backend_clone,
-                &config_clone,
-                &sp,
-                &op_lock_clone,
-                None,
-                None,
-            )
-            .await
-        });
+        let state_clone = state.clone();
+        let canary_handle = tokio::spawn(async move { run_canary_check(&state_clone, None).await });
 
         // Wait for canary to reach the lock
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Stop the backend while holding the lock (simulating manual stop)
-        backend.lock().await.stop().await.unwrap();
+        state.backend.lock().await.stop().await.unwrap();
+        state.set_server_state(ServerState::Stopped).await;
 
         // Release the lock — canary re-checks state and finds it stopped
         drop(guard);
@@ -780,23 +659,14 @@ mod tests {
 
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_succeeds(false);
+        let (_dir, state) = build_canary_state(Box::new(mock_backend), test_config(dead)).await;
 
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> =
-            Arc::new(Mutex::new(Box::new(mock_backend)));
-        let config = Arc::new(RwLock::new(test_config(dead)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
-
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        let restarted = run_canary_check(&state, None).await;
         assert!(restarted, "should return true even when start() fails");
 
         // Backend should be stopped (stop was called before start attempt)
         assert!(
-            !backend.lock().await.is_running().await,
+            !state.current_state().await.is_running(),
             "backend should be stopped after failed restart"
         );
     }
@@ -809,19 +679,11 @@ mod tests {
         let server = MockHttpServer::healthy().await;
         let port = server.port();
 
-        let backend: Box<dyn InferenceBackend> = Box::new(CanaryMockBackend::new(port));
-        let backend: Arc<Mutex<Box<dyn InferenceBackend>>> = Arc::new(Mutex::new(backend));
+        let (_dir, state) =
+            build_canary_state(Box::new(CanaryMockBackend::new(port)), test_config(port)).await;
 
-        let config = Arc::new(RwLock::new(test_config(port)));
-        let dir = tempfile::tempdir().unwrap();
-        let state_persistence = StatePersistence {
-            path: dir.path().join("state.json"),
-        };
-        let op_lock = Mutex::new(());
-
-        // run_canary_check accepts &Arc<Mutex<Box<dyn InferenceBackend>>>
-        let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
+        // run_canary_check operates through AppState's boxed InferenceBackend.
+        let restarted = run_canary_check(&state, None).await;
         assert!(!restarted, "healthy backend via trait should not restart");
 
         server.shutdown().await;

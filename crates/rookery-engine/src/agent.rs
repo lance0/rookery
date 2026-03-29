@@ -4,7 +4,7 @@ use rookery_core::state::{AgentEntry, AgentPersistence, AgentState};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -70,6 +70,8 @@ pub struct AgentManager {
     shutting_down: std::sync::atomic::AtomicBool,
     /// Notifies the watchdog to wake up immediately (used during shutdown).
     shutdown_notify: tokio::sync::Notify,
+    /// Suppresses dependency port bounce logic while the backend is intentionally sleeping.
+    dependency_bounce_suppressed: AtomicBool,
 }
 
 impl AgentManager {
@@ -87,8 +89,18 @@ impl AgentManager {
             fatal_error_rx,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),
+            dependency_bounce_suppressed: AtomicBool::new(false),
             crash_counts: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_dependency_bounce_suppressed(&self, suppressed: bool) {
+        self.dependency_bounce_suppressed
+            .store(suppressed, Ordering::SeqCst);
+    }
+
+    pub fn is_dependency_bounce_suppressed(&self) -> bool {
+        self.dependency_bounce_suppressed.load(Ordering::SeqCst)
     }
 
     /// Adopt a previously-running agent by PID (used after daemon restart).
@@ -564,7 +576,7 @@ impl AgentManager {
 
                 // Check dependency ports for down→up transitions (server restarted).
                 // Agents holding stale connections need to be bounced.
-                if !tracked_ports.is_empty() {
+                if !tracked_ports.is_empty() && !manager.is_dependency_bounce_suppressed() {
                     let mut ports_recovered: Vec<u16> = Vec::new();
 
                     for &port in &tracked_ports {

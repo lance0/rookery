@@ -10,6 +10,8 @@ All endpoints are served by the rookeryd daemon.
 | `/api/status` | GET | Server state, profile, PID, uptime |
 | `/api/start` | POST | Start server `{"profile": "name"}` |
 | `/api/stop` | POST | Stop server |
+| `/api/sleep` | POST | Put the running server into `sleeping` state |
+| `/api/wake` | POST | Wake the sleeping server using its last profile |
 | `/api/swap` | POST | Hot-swap profile `{"profile": "name"}` |
 | `/api/profiles` | GET | List available profiles |
 | `/api/bench` | GET | Run PP + gen speed benchmark |
@@ -54,9 +56,11 @@ All endpoints are served by the rookeryd daemon.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/events` | GET | SSE stream (gpu stats, state changes, log lines) |
-| `/api/chat` | POST | Streaming chat proxy to llama-server (60s per-chunk timeout) |
+| `/api/chat` | POST | Streaming chat proxy to llama-server (auto-wakes sleeping backends, 60s per-chunk timeout) |
 | `/api/logs?n=50` | GET | Fetch last N log lines |
 | `/metrics` | GET | Prometheus/OpenMetrics text exposition |
+
+`/api/status` may return `state: "sleeping"` with the last active `profile` and no PID/port. `POST /api/wake` or the next `/api/chat` request transitions that profile back to `running`.
 
 ## Metrics
 

@@ -10,12 +10,13 @@ use app_state::AppState;
 use axum::Router;
 use axum::routing::{get, post, put};
 use rookery_core::config::Config;
-use rookery_core::state::{AgentPersistence, StatePersistence};
+use rookery_core::state::{AgentPersistence, ServerState, StatePersistence};
 use rookery_engine::agent::AgentManager;
 use rookery_engine::backend::{self, BackendInfo, InferenceBackend};
 use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 #[tokio::main]
@@ -86,11 +87,10 @@ async fn main() {
 
     // Load and reconcile persisted state
     let state_persistence = StatePersistence::new();
-    let tracked_pid = if let Ok(prev_state) = state_persistence.load() {
+    let initial_server_state = if let Ok(prev_state) = state_persistence.load() {
         let reconciled = state_persistence.reconcile(prev_state);
-        let pid = reconciled.pid();
+        let mut final_state = reconciled.clone();
         tracing::info!(state = ?format!("{:?}", reconciled), "reconciled previous state");
-        let _ = state_persistence.save(&reconciled);
 
         // Adopt the running process via the backend trait — but verify it's actually healthy first
         if let rookery_core::state::ServerState::Running {
@@ -110,8 +110,7 @@ async fn main() {
                     pid = running_pid,
                     "adopted process is a zombie — marking stopped"
                 );
-                let stopped = rookery_core::state::ServerState::Stopped;
-                let _ = state_persistence.save(&stopped);
+                final_state = ServerState::Stopped;
             } else if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3))
                 .await
             {
@@ -162,8 +161,7 @@ async fn main() {
                         port,
                         "adopted process failed inference canary — marking stopped"
                     );
-                    let stopped = rookery_core::state::ServerState::Stopped;
-                    let _ = state_persistence.save(&stopped);
+                    final_state = ServerState::Stopped;
                 }
             } else {
                 tracing::warn!(
@@ -171,15 +169,16 @@ async fn main() {
                     port,
                     "adopted process failed health check — marking stopped"
                 );
-                let stopped = rookery_core::state::ServerState::Stopped;
-                let _ = state_persistence.save(&stopped);
+                final_state = ServerState::Stopped;
             }
         }
 
-        pid
+        let _ = state_persistence.save(&final_state);
+        final_state
     } else {
-        None
+        ServerState::Stopped
     };
+    let tracked_pid = initial_server_state.pid();
 
     // Kill orphan llama-server processes hogging VRAM
     if let Some(ref monitor) = gpu_monitor {
@@ -288,6 +287,9 @@ async fn main() {
             agents = ?watchdog_configs.keys().collect::<Vec<_>>(),
             "starting agent watchdog"
         );
+        if initial_server_state.is_sleeping() {
+            agent_manager.set_dependency_bounce_suppressed(true);
+        }
         agent_manager.spawn_watchdog(config.agents.clone());
     }
 
@@ -306,7 +308,13 @@ async fn main() {
         gpu_monitor,
         log_buffer,
         state_persistence,
+        server_state: RwLock::new(initial_server_state.clone()),
         state_tx,
+        last_inference_at: AtomicI64::new(if initial_server_state.is_running() {
+            chrono::Utc::now().timestamp()
+        } else {
+            0
+        }),
         op_lock: Mutex::new(()),
         hf_client,
         hardware_profile,
@@ -342,15 +350,66 @@ async fn main() {
                 return;
             }
 
-            canary::run_canary_check(
-                &canary_state.backend,
-                &canary_state.config,
-                &canary_state.state_persistence,
-                &canary_state.op_lock,
-                Some(canary_agent_mgr.shutdown_flag()),
-                Some(canary_state.metrics.as_ref()),
-            )
-            .await;
+            canary::run_canary_check(&canary_state, Some(canary_agent_mgr.shutdown_flag())).await;
+        }
+    });
+
+    // Spawn idle auto-sleep watcher.
+    let idle_state = state.clone();
+    tokio::spawn(async move {
+        const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(IDLE_POLL_INTERVAL) => {}
+                _ = idle_state.agent_manager.shutdown_notified() => {
+                    tracing::info!("idle sleep watcher: shutdown, exiting");
+                    return;
+                }
+            }
+
+            if idle_state.agent_manager.is_shutting_down() {
+                return;
+            }
+
+            let idle_timeout = idle_state.config.read().await.idle_timeout.unwrap_or(0);
+            if idle_timeout == 0 {
+                continue;
+            }
+
+            if !idle_state.current_state().await.is_running() {
+                continue;
+            }
+
+            let idle_for_secs = chrono::Utc::now().timestamp() - idle_state.last_inference_at();
+            if idle_for_secs < idle_timeout as i64 {
+                continue;
+            }
+
+            let _op_guard = idle_state.op_lock.lock().await;
+            if idle_state.agent_manager.is_shutting_down() {
+                return;
+            }
+            if !idle_state.current_state().await.is_running() {
+                continue;
+            }
+            let idle_for_secs = chrono::Utc::now().timestamp() - idle_state.last_inference_at();
+            if idle_for_secs < idle_timeout as i64 {
+                continue;
+            }
+
+            if let Some(profile) = idle_state.current_state().await.profile_name() {
+                tracing::info!(
+                    profile,
+                    idle_timeout_secs = idle_timeout,
+                    idle_for_secs,
+                    "idle timeout reached, putting server to sleep"
+                );
+            }
+
+            if let Err(e) = idle_state.sleep_server().await {
+                tracing::warn!(error = %e, "failed to put server to sleep");
+            }
         }
     });
 
@@ -362,6 +421,8 @@ async fn main() {
         .route("/api/events", get(sse::get_events))
         .route("/api/start", post(routes::post_start))
         .route("/api/stop", post(routes::post_stop))
+        .route("/api/sleep", post(routes::post_sleep))
+        .route("/api/wake", post(routes::post_wake))
         .route("/api/swap", post(routes::post_swap))
         .route("/api/profiles", get(routes::get_profiles))
         .route("/api/bench", get(routes::get_bench))
@@ -409,9 +470,11 @@ async fn main() {
     // Clean up child processes
     tracing::info!("shutting down — stopping agents and server");
     shutdown_state.agent_manager.stop_all().await;
+    shutdown_state
+        .agent_manager
+        .set_dependency_bounce_suppressed(false);
     let _ = shutdown_state.backend.lock().await.stop().await;
-    let stopped = rookery_core::state::ServerState::Stopped;
-    let _ = shutdown_state.state_persistence.save(&stopped);
+    shutdown_state.set_server_state(ServerState::Stopped).await;
     tracing::info!("rookeryd shut down");
 }
 

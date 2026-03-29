@@ -155,6 +155,9 @@ pub struct Config {
     pub listen: SocketAddr,
 
     #[serde(default)]
+    pub idle_timeout: Option<u32>,
+
+    #[serde(default)]
     pub models: HashMap<String, Model>,
 
     #[serde(default)]
@@ -993,6 +996,7 @@ gpu_memory_utilization = 0.9
                 llama_server: PathBuf::new(),
                 default_profile: "v".into(),
                 listen: default_listen(),
+                idle_timeout: None,
                 models: HashMap::from([(
                     "m".into(),
                     Model {
@@ -1488,6 +1492,7 @@ ctx_size = 262144
             llama_server: PathBuf::from("/usr/bin/llama-server"),
             default_profile: "fast".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "qwen".into(),
                 Model {
@@ -1551,6 +1556,7 @@ ctx_size = 262144
             llama_server: PathBuf::new(),
             default_profile: "nonexistent_profile".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "m".into(),
                 Model {

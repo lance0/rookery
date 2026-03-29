@@ -263,7 +263,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 
 ## Quality of Life (Inspired by Competitive Research)
 - [x] Model aliasing: `aliases` field on profiles, resolved in CLI and API (e.g., "fast" → qwen_fast)
-- [ ] Auto-sleep: unload model after idle timeout, reload on first request
+- [x] Auto-sleep: `idle_timeout` config, `Sleeping` state, wake-on-request, manual `sleep`/`wake` CLI + API
 - [ ] API key auth: optional bearer token for dashboard and API access
 - [ ] Swagger/OpenAPI spec generation for the REST API
 

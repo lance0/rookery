@@ -31,6 +31,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Put the running server to sleep without forgetting its profile
+    Sleep {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wake the sleeping server using its last active profile
+    Wake {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show server status
     Status {
         /// Output as JSON
@@ -243,6 +255,8 @@ async fn main() {
     let result = match cli.command {
         Commands::Start { profile, json } => cmd_start(&client, profile, json).await,
         Commands::Stop { json } => cmd_stop(&client, json).await,
+        Commands::Sleep { json } => cmd_sleep(&client, json).await,
+        Commands::Wake { json } => cmd_wake(&client, json).await,
         Commands::Status { json } => cmd_status(&client, json).await,
         Commands::Gpu { json } => cmd_gpu(&client, json).await,
         Commands::Swap { profile, json } => cmd_swap(&client, &profile, json).await,
@@ -339,6 +353,40 @@ async fn cmd_stop(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+async fn cmd_sleep(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    if !json {
+        println!("sleeping server...");
+    }
+    let resp: serde_json::Value = client.post("/api/sleep", &EmptyBody {}).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("{}", resp["message"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
+async fn cmd_wake(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    if !json {
+        println!("waking server...");
+    }
+    let resp: serde_json::Value = client.post("/api/wake", &EmptyBody {}).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+    } else {
+        println!("{}", resp["message"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
 async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         if json {
@@ -364,29 +412,37 @@ async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std
             }))?
         );
     } else {
-        println!("state:   {}", resp.state);
-        if let Some(profile) = &resp.profile {
-            println!("profile: {profile}");
-        }
-        if let Some(backend) = &resp.backend {
-            println!("backend: {backend}");
-        }
-        if let Some(pid) = resp.pid {
-            println!("pid:     {pid}");
-        }
-        if let Some(port) = resp.port {
-            println!("port:    {port}");
-            println!("api:     http://localhost:{port}/v1");
-        }
-        if let Some(uptime) = resp.uptime_secs {
-            let hours = uptime / 3600;
-            let mins = (uptime % 3600) / 60;
-            let secs = uptime % 60;
-            println!("uptime:  {hours}h {mins}m {secs}s");
+        for line in format_status_lines(&resp) {
+            println!("{line}");
         }
     }
 
     Ok(())
+}
+
+fn format_status_lines(resp: &StatusResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("state:   {}", resp.state));
+    if let Some(profile) = &resp.profile {
+        lines.push(format!("profile: {profile}"));
+    }
+    if let Some(backend) = &resp.backend {
+        lines.push(format!("backend: {backend}"));
+    }
+    if let Some(pid) = resp.pid {
+        lines.push(format!("pid:     {pid}"));
+    }
+    if let Some(port) = resp.port {
+        lines.push(format!("port:    {port}"));
+        lines.push(format!("api:     http://localhost:{port}/v1"));
+    }
+    if let Some(uptime) = resp.uptime_secs {
+        let hours = uptime / 3600;
+        let mins = (uptime % 3600) / 60;
+        let secs = uptime % 60;
+        lines.push(format!("uptime:  {hours}h {mins}m {secs}s"));
+    }
+    lines
 }
 
 async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -1194,20 +1250,7 @@ mod tests {
             backend: Some("llama-server".into()),
         };
 
-        // Simulate the non-JSON display logic
-        let mut lines = Vec::new();
-        lines.push(format!("state:   {}", resp.state));
-        if let Some(profile) = &resp.profile {
-            lines.push(format!("profile: {profile}"));
-        }
-        if let Some(backend) = &resp.backend {
-            lines.push(format!("backend: {backend}"));
-        }
-        if let Some(pid) = resp.pid {
-            lines.push(format!("pid:     {pid}"));
-        }
-
-        let output = lines.join("\n");
+        let output = format_status_lines(&resp).join("\n");
         assert!(
             output.contains("backend: llama-server"),
             "running status should show backend line, got:\n{output}"
@@ -1225,16 +1268,7 @@ mod tests {
             backend: Some("vllm".into()),
         };
 
-        let mut lines = Vec::new();
-        lines.push(format!("state:   {}", resp.state));
-        if let Some(profile) = &resp.profile {
-            lines.push(format!("profile: {profile}"));
-        }
-        if let Some(backend) = &resp.backend {
-            lines.push(format!("backend: {backend}"));
-        }
-
-        let output = lines.join("\n");
+        let output = format_status_lines(&resp).join("\n");
         assert!(
             output.contains("backend: vllm"),
             "running vLLM status should show backend line, got:\n{output}"
@@ -1252,16 +1286,7 @@ mod tests {
             backend: None,
         };
 
-        let mut lines = Vec::new();
-        lines.push(format!("state:   {}", resp.state));
-        if let Some(profile) = &resp.profile {
-            lines.push(format!("profile: {profile}"));
-        }
-        if let Some(backend) = &resp.backend {
-            lines.push(format!("backend: {backend}"));
-        }
-
-        let output = lines.join("\n");
+        let output = format_status_lines(&resp).join("\n");
         assert!(
             !output.contains("backend:"),
             "stopped status should omit backend line, got:\n{output}"
@@ -1323,6 +1348,26 @@ mod tests {
             json["backend"].is_null(),
             "backend should be null when stopped"
         );
+    }
+
+    #[test]
+    fn test_status_display_sleeping_omits_runtime_fields() {
+        let resp = StatusResponse {
+            state: "sleeping".into(),
+            profile: Some("qwen_dense".into()),
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        };
+
+        let output = format_status_lines(&resp).join("\n");
+        assert!(output.contains("state:   sleeping"));
+        assert!(output.contains("profile: qwen_dense"));
+        assert!(!output.contains("backend:"));
+        assert!(!output.contains("pid:"));
+        assert!(!output.contains("port:"));
+        assert!(!output.contains("uptime:"));
     }
 
     // Profiles command shows backend type per profile
@@ -1533,6 +1578,8 @@ mod tests {
             vec!["rookery", "start"],
             vec!["rookery", "start", "fast"],
             vec!["rookery", "stop"],
+            vec!["rookery", "sleep"],
+            vec!["rookery", "wake"],
             vec!["rookery", "swap", "fast"],
             vec!["rookery", "gpu"],
             vec!["rookery", "profiles"],
@@ -1572,6 +1619,8 @@ mod tests {
             vec!["rookery", "bench", "--json"],
             vec!["rookery", "start", "--json"],
             vec!["rookery", "stop", "--json"],
+            vec!["rookery", "sleep", "--json"],
+            vec!["rookery", "wake", "--json"],
             vec!["rookery", "config", "--json"],
         ];
 
@@ -1659,30 +1708,7 @@ mod tests {
             backend: Some("llama-server".into()),
         };
 
-        // Replicate the exact formatting logic from cmd_status
-        let mut lines = Vec::new();
-        lines.push(format!("state:   {}", resp.state));
-        if let Some(profile) = &resp.profile {
-            lines.push(format!("profile: {profile}"));
-        }
-        if let Some(backend) = &resp.backend {
-            lines.push(format!("backend: {backend}"));
-        }
-        if let Some(pid) = resp.pid {
-            lines.push(format!("pid:     {pid}"));
-        }
-        if let Some(port) = resp.port {
-            lines.push(format!("port:    {port}"));
-            lines.push(format!("api:     http://localhost:{port}/v1"));
-        }
-        if let Some(uptime) = resp.uptime_secs {
-            let hours = uptime / 3600;
-            let mins = (uptime % 3600) / 60;
-            let secs = uptime % 60;
-            lines.push(format!("uptime:  {hours}h {mins}m {secs}s"));
-        }
-
-        let output = lines.join("\n");
+        let output = format_status_lines(&resp).join("\n");
         assert!(output.contains("state:   running"));
         assert!(output.contains("profile: fast"));
         assert!(output.contains("backend: llama-server"));
@@ -1704,28 +1730,7 @@ mod tests {
             backend: None,
         };
 
-        let mut lines = Vec::new();
-        lines.push(format!("state:   {}", resp.state));
-        if let Some(profile) = &resp.profile {
-            lines.push(format!("profile: {profile}"));
-        }
-        if let Some(backend) = &resp.backend {
-            lines.push(format!("backend: {backend}"));
-        }
-        if let Some(pid) = resp.pid {
-            lines.push(format!("pid:     {pid}"));
-        }
-        if let Some(port) = resp.port {
-            lines.push(format!("port:    {port}"));
-            lines.push(format!("api:     http://localhost:{port}/v1"));
-        }
-        if let Some(uptime) = resp.uptime_secs {
-            let hours = uptime / 3600;
-            let mins = (uptime % 3600) / 60;
-            let secs = uptime % 60;
-            lines.push(format!("uptime:  {hours}h {mins}m {secs}s"));
-        }
-
+        let lines = format_status_lines(&resp);
         let output = lines.join("\n");
         assert_eq!(lines.len(), 1, "stopped state should only have 1 line");
         assert!(output.contains("state:   stopped"));

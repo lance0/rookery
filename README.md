@@ -23,6 +23,8 @@ rookery gpu                 # GPU stats (VRAM, temp, power, processes)
 rookery start               # start default profile
 rookery start qwen_dense    # start specific profile
 rookery stop                # stop server
+rookery sleep               # unload the model but keep last profile for fast wake
+rookery wake                # wake the sleeping profile
 rookery swap qwen_thinking  # hot-swap to another profile
 rookery profiles            # list available profiles
 rookery bench               # quick PP + gen speed benchmark
@@ -65,6 +67,7 @@ The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures l
 ```toml
 llama_server = "/path/to/llama-server"
 default_profile = "qwen_fast"
+idle_timeout = 1800
 
 [models.qwen35]
 source = "hf"
@@ -74,6 +77,7 @@ estimated_vram_mb = 25800
 
 [profiles.qwen_fast]
 model = "qwen35"
+aliases = ["qwen", "fast"]
 port = 8081
 ctx_size = 262144
 reasoning_budget = 0
@@ -99,6 +103,8 @@ The daemon exposes a REST API:
 | `/api/gpu` | GET | GPU stats (VRAM, temp, utilization, power, processes) |
 | `/api/start` | POST | Start server `{ "profile": "name" }` (idempotent, capacity-gated) |
 | `/api/stop` | POST | Stop server |
+| `/api/sleep` | POST | Put the running server into `sleeping` state |
+| `/api/wake` | POST | Wake the sleeping profile |
 | `/api/swap` | POST | Hot-swap profile `{ "profile": "name" }` |
 | `/api/profiles` | GET | List available profiles |
 | `/api/bench` | GET | Run benchmark (PP + gen tok/s) |
@@ -112,7 +118,7 @@ The daemon exposes a REST API:
 | `/api/config/profile/{name}` | PUT | Update profile sampling params |
 | `/api/model-info` | GET | Model ID, context window from llama-server |
 | `/api/server-stats` | GET | Slot status, request count from llama-server |
-| `/api/chat` | POST | Streaming chat proxy to llama-server |
+| `/api/chat` | POST | Streaming chat proxy to llama-server (auto-wakes sleeping backends) |
 | `/api/agents/{name}/health` | GET | Detailed agent health (uptime, restarts, errors) |
 | `/api/hardware` | GET | Hardware profile (GPU, CPU, RAM) |
 | `/api/models/search` | GET | Search HuggingFace for GGUF repos |
@@ -121,7 +127,7 @@ The daemon exposes a REST API:
 | `/api/models/cached` | GET | List locally cached models |
 | `/api/models/pull` | POST | Download a model |
 
-`/metrics` exposes Prometheus-compatible text for GPU, server, canary, agent, chat, and SSE telemetry. GPU and health-style gauges are computed on scrape from current daemon state; restart and request counters are daemon-runtime counters and reset when `rookeryd` restarts.
+`/metrics` exposes Prometheus-compatible text for GPU, server, canary, agent, chat, and SSE telemetry. GPU and health-style gauges are computed on scrape from current daemon state; restart and request counters are daemon-runtime counters and reset when `rookeryd` restarts. `idle_timeout` enables daemon-side auto-sleep: after inference inactivity, the backend unloads into `sleeping` state and the next `/api/chat` request wakes it transparently.
 
 ## systemd
 

@@ -8,7 +8,10 @@ Config file: `~/.config/rookery/config.toml`
 llama_server = "/path/to/llama-server"    # path to llama-server binary
 default_profile = "qwen_fast"              # profile used when no name specified
 listen = "0.0.0.0:3131"                   # daemon listen address
+idle_timeout = 1800                        # seconds before auto-sleep; 0/omitted disables
 ```
+
+`idle_timeout` is daemon-wide. When the active backend has been idle for that many seconds with no inference traffic, Rookery unloads it and transitions to `sleeping`. The next `/api/chat` request wakes the last active profile automatically before proxying.
 
 ## Models
 

@@ -18,7 +18,7 @@ pub struct StatusResponse {
 }
 
 pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
-    let server_state = state.backend.lock().await.to_server_state().await;
+    let server_state = state.current_state().await;
     Json(status_from_state(&server_state))
 }
 
@@ -88,7 +88,7 @@ pub async fn post_start(
     }
 
     // Idempotent: if already running with same profile, no-op
-    let current = state.backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     if let rookery_core::state::ServerState::Running { ref profile, .. } = current {
         if profile == &profile_name {
             return Ok(Json(ActionResponse {
@@ -147,75 +147,30 @@ pub async fn post_start(
 
     tracing::info!(profile = %profile_name, "starting server");
 
-    // Persist starting state
-    let starting_state = rookery_core::state::ServerState::Starting {
-        profile: profile_name.clone(),
-        since: chrono::Utc::now(),
-    };
-    let _ = state.state_persistence.save(&starting_state);
-    broadcast_state(&state, &starting_state);
-
-    // Start via backend trait + health check
-    let config = state.config.read().await;
-    let backend = state.backend.lock().await;
-    match backend.start(&config, &profile_name).await {
-        Ok(_info) => {
-            // Wait for health with 120s timeout
-            let port = config
-                .profiles
-                .get(&profile_name)
-                .map(|p| p.port)
-                .unwrap_or(8081);
-            drop(backend); // Release backend lock during health check
-            drop(config);
-            match rookery_engine::health::wait_for_health(port, std::time::Duration::from_secs(120))
-                .await
-            {
-                Ok(()) => {
-                    let server_state = state.backend.lock().await.to_server_state().await;
-                    let _ = state.state_persistence.save(&server_state);
-                    broadcast_state(&state, &server_state);
-                    let is_running = server_state.is_running();
-                    if is_running {
-                        state.metrics.inc_server_restart();
-                    }
-                    let status = status_from_state(&server_state);
-                    Ok(Json(ActionResponse {
-                        success: is_running,
-                        message: if is_running {
-                            format!("server started with profile '{profile_name}'")
-                        } else {
-                            "server failed to start".into()
-                        },
-                        status,
-                    }))
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "health check failed, stopping server");
-                    let _ = state.backend.lock().await.stop().await;
-                    let failed = rookery_core::state::ServerState::Failed {
-                        last_error: e.to_string(),
-                        profile: profile_name,
-                        since: chrono::Utc::now(),
-                    };
-                    let _ = state.state_persistence.save(&failed);
-                    broadcast_state(&state, &failed);
-                    Ok(Json(ActionResponse {
-                        success: false,
-                        message: "server failed to start".into(),
-                        status: status_from_state(&failed),
-                    }))
-                }
-            }
+    match state.start_profile(&profile_name, true).await {
+        Ok(server_state) => {
+            let is_running = server_state.is_running();
+            let status = status_from_state(&server_state);
+            Ok(Json(ActionResponse {
+                success: is_running,
+                message: if is_running {
+                    format!("server started with profile '{profile_name}'")
+                } else {
+                    "server failed to start".into()
+                },
+                status,
+            }))
         }
-        Err(e) => {
-            let failed = rookery_core::state::ServerState::Failed {
-                last_error: e.to_string(),
-                profile: profile_name,
-                since: chrono::Utc::now(),
-            };
-            let _ = state.state_persistence.save(&failed);
-            broadcast_state(&state, &failed);
+        Err(crate::app_state::StartServerError::Health(e)) => {
+            tracing::error!(error = %e, "health check failed, stopping server");
+            let failed = state.current_state().await;
+            Ok(Json(ActionResponse {
+                success: false,
+                message: "server failed to start".into(),
+                status: status_from_state(&failed),
+            }))
+        }
+        Err(crate::app_state::StartServerError::Start(e)) => {
             tracing::error!(error = %e, "failed to start server");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
@@ -229,17 +184,30 @@ pub async fn post_stop(
 
     tracing::info!("stopping server");
 
+    let current = state.current_state().await;
+    if matches!(current, rookery_core::state::ServerState::Stopped) {
+        return Ok(Json(ActionResponse {
+            success: true,
+            message: "server already stopped".into(),
+            status: status_from_state(&current),
+        }));
+    }
+
     let stopping = rookery_core::state::ServerState::Stopping {
         since: chrono::Utc::now(),
     };
-    let _ = state.state_persistence.save(&stopping);
-    broadcast_state(&state, &stopping);
+    state.set_server_state(stopping).await;
+    state.agent_manager.set_dependency_bounce_suppressed(false);
 
-    match state.backend.lock().await.stop().await {
+    let stop_result = match current {
+        rookery_core::state::ServerState::Running { .. } => state.backend.lock().await.stop().await,
+        _ => Ok(()),
+    };
+
+    match stop_result {
         Ok(()) => {
             let stopped = rookery_core::state::ServerState::Stopped;
-            let _ = state.state_persistence.save(&stopped);
-            broadcast_state(&state, &stopped);
+            state.set_server_state(stopped.clone()).await;
             let status = status_from_state(&stopped);
             Ok(Json(ActionResponse {
                 success: true,
@@ -249,6 +217,89 @@ pub async fn post_stop(
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to stop server");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+pub async fn post_sleep(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let _op_guard = state.op_lock.lock().await;
+
+    let current = state.current_state().await;
+    match &current {
+        rookery_core::state::ServerState::Sleeping { .. } => {
+            return Ok(Json(ActionResponse {
+                success: true,
+                message: "server already sleeping".into(),
+                status: status_from_state(&current),
+            }));
+        }
+        rookery_core::state::ServerState::Running { .. } => {}
+        _ => {
+            return Ok(Json(ActionResponse {
+                success: false,
+                message: "server is not running".into(),
+                status: status_from_state(&current),
+            }));
+        }
+    }
+
+    match state.sleep_server().await {
+        Ok(server_state) => Ok(Json(ActionResponse {
+            success: true,
+            message: "server sleeping".into(),
+            status: status_from_state(&server_state),
+        })),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to put server to sleep");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+pub async fn post_wake(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let _op_guard = state.op_lock.lock().await;
+
+    let current = state.current_state().await;
+    let profile = match current {
+        rookery_core::state::ServerState::Running { ref profile, .. } => {
+            return Ok(Json(ActionResponse {
+                success: true,
+                message: format!("already running with profile '{profile}'"),
+                status: status_from_state(&state.current_state().await),
+            }));
+        }
+        rookery_core::state::ServerState::Sleeping { ref profile, .. } => profile.clone(),
+        _ => {
+            return Ok(Json(ActionResponse {
+                success: false,
+                message: "server is not sleeping".into(),
+                status: status_from_state(&current),
+            }));
+        }
+    };
+
+    match state.start_profile(&profile, true).await {
+        Ok(server_state) => Ok(Json(ActionResponse {
+            success: server_state.is_running(),
+            message: format!("server woke with profile '{profile}'"),
+            status: status_from_state(&server_state),
+        })),
+        Err(crate::app_state::StartServerError::Health(e)) => {
+            tracing::error!(error = %e, profile = %profile, "wake health check failed");
+            let failed = state.current_state().await;
+            Ok(Json(ActionResponse {
+                success: false,
+                message: "server failed to wake".into(),
+                status: status_from_state(&failed),
+            }))
+        }
+        Err(crate::app_state::StartServerError::Start(e)) => {
+            tracing::error!(error = %e, profile = %profile, "wake start failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -266,12 +317,10 @@ pub async fn post_swap(
     let _op_guard = state.op_lock.lock().await;
 
     let old_profile = state
-        .backend
-        .lock()
+        .current_state()
         .await
-        .process_info()
-        .await
-        .map(|i| i.profile);
+        .profile_name()
+        .map(ToString::to_string);
 
     tracing::info!(
         from = ?old_profile,
@@ -339,6 +388,7 @@ pub async fn post_swap(
 
         // Replace the backend in AppState
         *state.backend.lock().await = new_backend;
+        state.agent_manager.set_dependency_bounce_suppressed(false);
 
         // Wait for health with 120s timeout
         match rookery_engine::health::wait_for_health(port, std::time::Duration::from_secs(120))
@@ -360,11 +410,11 @@ pub async fn post_swap(
 
     match swap_result {
         Ok(server_state) => {
-            let _ = state.state_persistence.save(&server_state);
-            broadcast_state(&state, &server_state);
+            state.set_server_state(server_state.clone()).await;
             let is_running = server_state.is_running();
             if is_running {
                 state.metrics.inc_server_restart();
+                state.record_inference_activity();
             }
             let status = status_from_state(&server_state);
 
@@ -580,7 +630,7 @@ pub struct ModelInfoResponse {
 pub async fn get_model_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ModelInfoResponse>, StatusCode> {
-    let current = state.backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => {
@@ -656,13 +706,35 @@ pub async fn post_chat(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let current = state.backend.lock().await.to_server_state().await;
-    let port = match current {
+    state.metrics.inc_chat_request();
+    state.record_inference_activity();
+
+    let port = match state.current_state().await {
         rookery_core::state::ServerState::Running { port, .. } => port,
+        rookery_core::state::ServerState::Sleeping { .. } => {
+            let _op_guard = state.op_lock.lock().await;
+            match state.current_state().await {
+                rookery_core::state::ServerState::Running { port, .. } => port,
+                rookery_core::state::ServerState::Sleeping { profile, .. } => {
+                    tracing::info!(profile = %profile, "waking sleeping server for inference request");
+                    match state.start_profile(&profile, true).await {
+                        Ok(rookery_core::state::ServerState::Running { port, .. }) => port,
+                        Ok(_) => {
+                            state.metrics.inc_chat_error();
+                            return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                        Err(e) => {
+                            state.metrics.inc_chat_error();
+                            tracing::error!(error = %e, profile = %profile, "failed to wake sleeping server");
+                            return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                    }
+                }
+                _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+            }
+        }
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
-
-    state.metrics.inc_chat_request();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -720,7 +792,7 @@ pub async fn post_chat(
 pub async fn get_server_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let current = state.backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => {
@@ -830,7 +902,7 @@ pub struct BenchTest {
 pub async fn get_bench(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BenchResult>, StatusCode> {
-    let current = state.backend.lock().await.to_server_state().await;
+    let current = state.current_state().await;
     let port = match current {
         rookery_core::state::ServerState::Running { port, .. } => port,
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
@@ -900,11 +972,6 @@ pub fn status_json_from_state(state: &rookery_core::state::ServerState) -> serde
         "uptime_secs": s.uptime_secs,
         "backend": s.backend,
     })
-}
-
-fn broadcast_state(app: &AppState, server_state: &rookery_core::state::ServerState) {
-    let json = status_json_from_state(server_state);
-    let _ = app.state_tx.send(json);
 }
 
 // --- Agent routes ---
@@ -1250,6 +1317,14 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             ),
             backend: Some(backend_type.to_string()),
         },
+        rookery_core::state::ServerState::Sleeping { profile, .. } => StatusResponse {
+            state: "sleeping".into(),
+            profile: Some(profile.clone()),
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        },
         rookery_core::state::ServerState::Failed {
             last_error,
             profile,
@@ -1366,6 +1441,20 @@ mod tests {
         let resp = status_from_state(&state);
         assert_eq!(resp.state, "stopped");
         assert_eq!(resp.profile, None);
+    }
+
+    #[test]
+    fn test_status_from_state_sleeping() {
+        let state = rookery_core::state::ServerState::Sleeping {
+            profile: "fast".into(),
+            since: chrono::Utc::now(),
+        };
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "sleeping");
+        assert_eq!(resp.profile, Some("fast".into()));
+        assert_eq!(resp.pid, None);
+        assert_eq!(resp.port, None);
+        assert!(resp.backend.is_none());
     }
 
     #[test]
@@ -1560,6 +1649,7 @@ mod tests {
             llama_server: PathBuf::from("/usr/bin/llama-server"),
             default_profile: "llama_fast".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([
                 (
                     "model_a".into(),
@@ -1852,6 +1942,7 @@ mod tests {
             llama_server: std::path::PathBuf::new(),
             default_profile: "bad_vllm".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "existing_model".into(),
                 Model {
@@ -1925,6 +2016,7 @@ mod tests {
             llama_server: std::path::PathBuf::new(),
             default_profile: "llama_profile".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            idle_timeout: None,
             models: HashMap::from([(
                 "m".into(),
                 Model {
@@ -2154,7 +2246,7 @@ mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        use crate::test_utils::{MockBackend, build_test_app_state};
+        use crate::test_utils::{MockBackend, build_test_app_state, sync_state_from_backend};
         use rookery_core::config::BackendType;
         use rookery_engine::backend::{BackendInfo, InferenceBackend};
 
@@ -2172,6 +2264,8 @@ mod tests {
                 .route("/metrics", get(super::get_metrics))
                 .route("/api/start", post(super::post_start))
                 .route("/api/stop", post(super::post_stop))
+                .route("/api/sleep", post(super::post_sleep))
+                .route("/api/wake", post(super::post_wake))
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
                 .with_state(state)
         }
@@ -2236,6 +2330,7 @@ mod tests {
             };
             let backend = MockBackend::running_with(running_info);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
             let app = test_router(state);
 
             let req = Request::builder()
@@ -2294,6 +2389,7 @@ mod tests {
             };
             let backend = MockBackend::running_with(running_info);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
             let app = test_router(state);
 
             let req = Request::builder()
@@ -2529,6 +2625,7 @@ mod tests {
             };
             let backend = MockBackend::running_with(running_info);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
             let app = test_router(state);
 
             let req = Request::builder()
@@ -2567,6 +2664,7 @@ mod tests {
             };
             let backend = MockBackend::running_with(running_info);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
             let app = test_router(state.clone());
 
             let req = Request::builder()
@@ -2617,6 +2715,101 @@ mod tests {
             assert_eq!(json["status"]["state"], "stopped");
         }
 
+        #[tokio::test]
+        async fn test_route_sleep_when_running() {
+            let running_info = BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 8081,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            };
+            let backend = MockBackend::running_with(running_info);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
+            let app = test_router(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/sleep")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            assert_eq!(json["status"]["state"], "sleeping");
+            assert!(matches!(
+                state.current_state().await,
+                rookery_core::state::ServerState::Sleeping { .. }
+            ));
+            assert!(matches!(
+                state.backend.lock().await.to_server_state().await,
+                rookery_core::state::ServerState::Stopped
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_route_wake_when_sleeping() {
+            let health_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mock_port = health_listener.local_addr().unwrap().port();
+
+            let health_app = axum::Router::new().route("/health", get(|| async { StatusCode::OK }));
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                axum::serve(health_listener, health_app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            let (_dir, state) = build_test_app_state(None);
+            {
+                let mut config = state.config.write().await;
+                if let Some(profile) = config.profiles.get_mut("test") {
+                    profile.port = mock_port;
+                }
+            }
+            state
+                .set_server_state(rookery_core::state::ServerState::Sleeping {
+                    profile: "test".into(),
+                    since: chrono::Utc::now(),
+                })
+                .await;
+            state.agent_manager.set_dependency_bounce_suppressed(true);
+
+            let app = test_router(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/wake")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            assert_eq!(json["status"]["state"], "running");
+            assert!(state.current_state().await.is_running());
+
+            let _ = shutdown_tx.send(());
+        }
+
         // --- 11. Request body size limit → 413 on oversized payload ---
         #[tokio::test]
         async fn test_route_body_size_limit_returns_413() {
@@ -2663,6 +2856,8 @@ mod tests {
                 .route("/metrics", get(super::get_metrics))
                 .route("/api/start", post(super::post_start))
                 .route("/api/stop", post(super::post_stop))
+                .route("/api/sleep", post(super::post_sleep))
+                .route("/api/wake", post(super::post_wake))
                 .route("/api/swap", post(super::post_swap))
                 .route("/api/chat", post(super::post_chat))
                 .route("/api/bench", get(super::get_bench))
@@ -2788,6 +2983,7 @@ mod tests {
 
             let backend = mock_backend_on_port(mock_port);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             // Add a second profile to swap to
             {
@@ -2880,6 +3076,7 @@ mod tests {
             let backend = mock_backend_on_port(mock_port);
             backend.set_draining(true);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             let app = test_router_full(state);
 
@@ -2909,6 +3106,7 @@ mod tests {
 
             let backend = mock_backend_on_port(mock_port);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             let app = test_router_full(state);
 
@@ -2944,6 +3142,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_route_chat_when_sleeping_wakes_and_proxies() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let (_dir, state) = build_test_app_state(None);
+            {
+                let mut config = state.config.write().await;
+                if let Some(profile) = config.profiles.get_mut("test") {
+                    profile.port = mock_port;
+                }
+            }
+            state
+                .set_server_state(rookery_core::state::ServerState::Sleeping {
+                    profile: "test".into(),
+                    since: chrono::Utc::now(),
+                })
+                .await;
+            state.agent_manager.set_dependency_bounce_suppressed(true);
+
+            let app = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"wake up"}]}"#,
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(state.current_state().await.is_running());
+
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap_or(""))
+                .unwrap_or("");
+            assert!(content_type.contains("text/event-stream"));
+
+            let _ = shutdown_tx.send(());
+        }
+
+        #[tokio::test]
         async fn test_route_metrics_chat_error_counter_increments() {
             let backend = MockBackend::running_with(BackendInfo {
                 pid: Some(12345),
@@ -2956,6 +3198,7 @@ mod tests {
                 exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
             });
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
             let app = test_router_full(state);
 
             let chat_req = Request::builder()
@@ -2989,6 +3232,7 @@ mod tests {
 
             let backend = mock_backend_on_port(mock_port);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             let app = test_router_full(state);
 
@@ -3035,6 +3279,7 @@ mod tests {
 
             let backend = mock_backend_on_port(mock_port);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             let app = test_router_full(state);
 
@@ -3091,6 +3336,7 @@ mod tests {
 
             let backend = mock_backend_on_port(mock_port);
             let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
 
             let app = test_router_full(state);
 
@@ -3388,9 +3634,19 @@ mod tests {
             let (_dir, state) = build_test_app_state(None);
             let app = test_router_full(state);
 
-            // The actual CSS file in the dist directory
+            let css_path = crate::routes::DASHBOARD_DIR
+                .files()
+                .find_map(|file| {
+                    file.path()
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| name.ends_with(".css"))
+                        .map(ToString::to_string)
+                })
+                .expect("dashboard dist should contain a CSS asset");
+
             let req = Request::builder()
-                .uri("/style-2f9a714a3215660a.css")
+                .uri(format!("/{css_path}"))
                 .body(Body::empty())
                 .unwrap();
 

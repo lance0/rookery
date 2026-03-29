@@ -16,11 +16,15 @@ The `rookery` CLI communicates with the `rookeryd` daemon over HTTP.
 ```bash
 rookery start [profile]       # start server (default profile if omitted)
 rookery stop                  # stop server
+rookery sleep                 # unload the model but remember the active profile
+rookery wake                  # wake the sleeping profile
 rookery swap <profile>        # hot-swap to a different profile
 rookery status                # show server state, PID, uptime
 rookery bench                 # run PP + gen speed benchmark
 rookery profiles              # list available profiles
 ```
+
+`rookery status` reports `sleeping` when auto-sleep or manual sleep has unloaded the backend. The next chat request also wakes the server automatically.
 
 ### GPU
 
