@@ -8,7 +8,7 @@ When `api_key` is set in `~/.config/rookery/config.toml`, the CLI automatically 
 
 ```
 --daemon <url>    Daemon address (default: http://127.0.0.1:3000)
---json            Output as JSON (supported on all commands)
+--json            Output as JSON (supported on most commands)
 ```
 
 ## Commands
@@ -78,7 +78,7 @@ rookery completions <shell>   # generate shell completions (bash, zsh, fish)
 
 ## JSON Output
 
-All commands support `--json` for machine-readable output:
+Most commands support `--json` for machine-readable output:
 
 ```bash
 rookery status --json | jq '.state'

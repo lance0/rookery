@@ -66,7 +66,7 @@ rookery models pull Qwen3.5-27B --quant Q6_K  # download specific quant
 rookery models hardware                 # show GPU/CPU/RAM profile
 ```
 
-All commands support `--json` for scripting.
+Most commands support `--json` for scripting.
 
 ## Features
 
