@@ -501,6 +501,10 @@ impl AgentManager {
                 tokio::select! {
                     _ = tokio::time::sleep(POLL_INTERVAL) => {}
                     _ = fatal_rx.changed() => {
+                        if manager.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                            tracing::info!("watchdog: shutdown flag set, exiting");
+                            return;
+                        }
                         // Fatal error pattern detected — restart the agent immediately
                         let triggered = fatal_rx.borrow_and_update().clone();
                         if let Some(agent_name) = triggered {
@@ -630,7 +634,12 @@ impl AgentManager {
                             None => is_pid_alive(agent.info.pid),
                         };
 
-                        if !alive && !agent.intentional_stop {
+                        if !alive
+                            && !agent.intentional_stop
+                            && !manager
+                                .shutting_down
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                        {
                             // Check if this agent has restart_on_crash
                             if let Some(cfg) = configs.get(name)
                                 && cfg.restart_on_crash
@@ -689,6 +698,13 @@ impl AgentManager {
 
                 // Restart each dead agent with backoff
                 for (name, prev_restarts, prev_errors) in to_restart {
+                    if manager
+                        .shutting_down
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        tracing::info!("watchdog: shutdown flag set, skipping restarts");
+                        return;
+                    }
                     let crash_count = {
                         let mut counts = manager.crash_counts.lock().await;
                         let count = counts.entry(name.clone()).or_insert(0);
