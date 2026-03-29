@@ -353,6 +353,11 @@ impl AgentManager {
         self.persist_state(&agents);
     }
 
+    /// Returns a reference to the shutdown flag for passing to canary/other tasks.
+    pub fn shutdown_flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.shutting_down
+    }
+
     /// Wait for shutdown notification. Returns immediately if already shutting down.
     pub async fn shutdown_notified(&self) {
         if self.is_shutting_down() {
@@ -625,6 +630,9 @@ impl AgentManager {
                                 );
                                 let _ = manager.stop(&name).await;
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                if manager.is_shutting_down() {
+                                    return;
+                                }
                                 match manager.start(&name, cfg).await {
                                     Ok(info) => {
                                         manager

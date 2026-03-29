@@ -344,6 +344,7 @@ async fn main() {
                 &canary_state.config,
                 &canary_state.state_persistence,
                 &canary_state.op_lock,
+                Some(canary_agent_mgr.shutdown_flag()),
             )
             .await;
         }
