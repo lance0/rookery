@@ -386,6 +386,7 @@ async fn main() {
 
     // Clean up child processes on shutdown
     tracing::info!("shutting down — stopping agents and server");
+    shutdown_state.agent_manager.begin_shutdown();
     shutdown_state.agent_manager.stop_all().await;
     let _ = shutdown_state.backend.lock().await.stop().await;
     let stopped = rookery_core::state::ServerState::Stopped;

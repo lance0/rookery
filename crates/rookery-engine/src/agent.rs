@@ -66,6 +66,8 @@ pub struct AgentManager {
     /// Value is the agent name.
     fatal_error_tx: tokio::sync::watch::Sender<Option<String>>,
     fatal_error_rx: tokio::sync::watch::Receiver<Option<String>>,
+    /// Set to true during graceful shutdown — watchdog stops restarting agents.
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl AgentManager {
@@ -77,6 +79,7 @@ impl AgentManager {
             persistence: AgentPersistence::new(),
             fatal_error_tx,
             fatal_error_rx,
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             crash_counts: Mutex::new(HashMap::new()),
         }
     }
@@ -343,7 +346,14 @@ impl AgentManager {
         self.persist_state(&agents);
     }
 
+    /// Signal that the daemon is shutting down — watchdog will stop restarting agents.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub async fn stop_all(&self) {
+        self.begin_shutdown();
         let names: Vec<String> = {
             let agents = self.agents.lock().await;
             agents.keys().cloned().collect()
@@ -478,6 +488,15 @@ impl AgentManager {
                 tracked_ports.iter().map(|&p| (p, true)).collect();
 
             loop {
+                // Check shutdown flag before doing anything
+                if manager
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    tracing::info!("watchdog: shutdown flag set, exiting");
+                    return;
+                }
+
                 // Wait for either the regular poll interval or a fatal error trigger
                 tokio::select! {
                     _ = tokio::time::sleep(POLL_INTERVAL) => {}
