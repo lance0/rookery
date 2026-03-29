@@ -8,6 +8,7 @@ Config file: `~/.config/rookery/config.toml`
 llama_server = "/path/to/llama-server"    # path to llama-server binary
 default_profile = "qwen_fast"              # profile used when no name specified
 listen = "0.0.0.0:3131"                   # daemon listen address
+auto_start = true                          # start default profile on daemon boot
 idle_timeout = 1800                        # seconds before auto-sleep; 0/omitted disables
 model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (optional)
 ```

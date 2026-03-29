@@ -1490,6 +1490,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -1601,6 +1602,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -2036,6 +2038,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -2219,6 +2222,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -2352,6 +2356,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -2535,6 +2540,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         }
@@ -3082,6 +3088,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };

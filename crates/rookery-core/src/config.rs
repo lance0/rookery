@@ -157,6 +157,10 @@ pub struct Config {
     #[serde(default)]
     pub idle_timeout: Option<u32>,
 
+    /// Automatically start the default profile when the daemon boots.
+    #[serde(default)]
+    pub auto_start: bool,
+
     /// Extra directories to scan for downloaded GGUF model files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_dirs: Vec<PathBuf>,
@@ -1057,6 +1061,7 @@ gpu_memory_utilization = 0.9
                         extra_args: Vec::new(),
                     },
                 )]),
+                auto_start: false,
                 model_dirs: vec![],
                 agents: HashMap::new(),
             }
@@ -1546,6 +1551,7 @@ ctx_size = 262144
                     extra_args: Vec::new(),
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };
@@ -1618,6 +1624,7 @@ ctx_size = 262144
                     extra_args: Vec::new(),
                 },
             )]),
+            auto_start: false,
             model_dirs: vec![],
             agents: HashMap::new(),
         };

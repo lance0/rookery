@@ -298,6 +298,8 @@ async fn main() {
     tracing::info!(gpu = ?hardware_profile.gpu.as_ref().map(|g| &g.name), cpu = %hardware_profile.cpu.name, "hardware profile built");
     let hf_client = rookery_engine::models::HfClient::new();
     let metrics = Arc::new(metrics::RuntimeMetrics::new());
+    let should_auto_start = config.auto_start;
+    let auto_start_profile = config.resolve_profile_name(None).to_string();
 
     let state = Arc::new(AppState {
         config_path: rookery_core::config::Config::config_path(),
@@ -319,6 +321,20 @@ async fn main() {
         hf_client,
         hardware_profile,
     });
+
+    // Auto-start default profile if configured and no server is running
+    if should_auto_start
+        && !initial_server_state.is_running()
+        && !initial_server_state.is_sleeping()
+    {
+        tracing::info!(profile = %auto_start_profile, "auto-starting default profile");
+        match state.start_profile(&auto_start_profile, true).await {
+            Ok(_) => tracing::info!(profile = %auto_start_profile, "default profile auto-started"),
+            Err(e) => {
+                tracing::warn!(profile = %auto_start_profile, error = %e, "failed to auto-start default profile")
+            }
+        }
+    }
 
     let shutdown_state = state.clone();
 

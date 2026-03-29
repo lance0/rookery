@@ -1,6 +1,7 @@
 llama_server = "/path/to/llama.cpp/build/bin/llama-server"
 default_profile = "qwen_fast"
 listen = "127.0.0.1:3000"
+auto_start = true    # start default profile on daemon boot
 idle_timeout = 1800  # seconds; 0 disables auto-sleep
 
 # Extra directories to scan for GGUF models (in addition to HF cache)
