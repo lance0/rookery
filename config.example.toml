@@ -3,8 +3,12 @@ default_profile = "qwen_fast"
 listen = "127.0.0.1:3000"
 idle_timeout = 1800  # seconds; 0 disables auto-sleep
 
+# Extra directories to scan for GGUF models (in addition to HF cache)
+# model_dirs = ["/mnt/models", "/home/user/gguf-collection"]
+
 # ── Models ────────────────────────────────────────────────────────────
 
+# HuggingFace model — downloaded automatically via llama-server -hf
 [models.qwen35]
 source = "hf"
 repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
@@ -17,11 +21,17 @@ repo = "unsloth/Qwen3.5-27B-GGUF"
 file = "UD-Q4_K_XL"
 estimated_vram_mb = 24000
 
-# vLLM model — repo only, no GGUF file needed
+# vLLM model — repo only, no GGUF file needed (managed by Docker)
 [models.qwen35_27b_nvfp4]
 source = "hf"
 repo = "kaitchup/Qwen3.5-27B-NVFP4"
 estimated_vram_mb = 20000
+
+# Local model — point directly at a GGUF file on disk
+# [models.my_local_model]
+# source = "local"
+# path = "/home/user/models/my-model-Q4_K_M.gguf"
+# estimated_vram_mb = 8000
 
 # ── Profiles (llama-server backend) ──────────────────────────────────
 

@@ -406,8 +406,8 @@ fn quant_preference_index(label: &str) -> usize {
         .unwrap_or(QUANT_PREFERENCE.len())
 }
 
-/// Scan both llama.cpp and HF hub caches for downloaded GGUF files.
-pub fn scan_cache() -> Vec<CachedModel> {
+/// Scan llama.cpp cache, HF hub cache, and optional extra directories for GGUF files.
+pub fn scan_cache(extra_dirs: &[PathBuf]) -> Vec<CachedModel> {
     let mut models = Vec::new();
 
     // 1. Scan llama.cpp cache (~/.cache/llama.cpp/)
@@ -442,8 +442,60 @@ pub fn scan_cache() -> Vec<CachedModel> {
     // 2. Scan HF hub cache ($HF_HOME/hub/ or ~/.cache/huggingface/hub/)
     scan_hf_hub_cache(&mut models);
 
+    // 3. Scan extra user-configured directories
+    for dir in extra_dirs {
+        scan_gguf_dir(dir, &mut models);
+    }
+
     models.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.quant_label.cmp(&b.quant_label)));
     models
+}
+
+/// Scan a directory (recursively one level) for GGUF files.
+fn scan_gguf_dir(dir: &Path, models: &mut Vec<CachedModel>) {
+    if !dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // One level of recursion for organized subdirs
+            if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                for sub in sub_entries.flatten() {
+                    maybe_add_gguf(&sub.path(), models);
+                }
+            }
+        } else {
+            maybe_add_gguf(&path, models);
+        }
+    }
+}
+
+fn maybe_add_gguf(path: &Path, models: &mut Vec<CachedModel>) {
+    let name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n.to_string(),
+        None => return,
+    };
+    if !name.ends_with(".gguf") || name.ends_with(".gguf.part") || name.starts_with("mmproj") {
+        return;
+    }
+    let quant_label = extract_quant_label(name.strip_suffix(".gguf").unwrap_or(&name));
+    if !models
+        .iter()
+        .any(|m| m.quant_label == quant_label && m.path == *path)
+    {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        models.push(CachedModel {
+            repo: "local".to_string(),
+            quant_label,
+            path: path.to_path_buf(),
+            size_bytes: size,
+        });
+    }
 }
 
 /// Scan the HuggingFace hub cache for GGUF files.
@@ -587,8 +639,8 @@ fn llama_cache_dir() -> PathBuf {
 }
 
 /// Mark quants as downloaded by cross-referencing with the local cache.
-pub fn mark_downloaded(quants: &mut [QuantInfo]) {
-    let cached = scan_cache();
+pub fn mark_downloaded(quants: &mut [QuantInfo], extra_dirs: &[PathBuf]) {
+    let cached = scan_cache(extra_dirs);
     for quant in quants.iter_mut() {
         quant.is_downloaded = cached.iter().any(|c| c.quant_label == quant.label);
     }
@@ -851,7 +903,7 @@ mod tests {
     fn test_scan_cache_with_empty_directory() {
         // scan_cache() reads from ~/.cache/llama.cpp which may or may not exist
         // This test verifies it doesn't panic and returns a Vec
-        let models = scan_cache();
+        let models = scan_cache(&[]);
         // Just verify it returns without panic — content depends on local cache
         let _ = models.len();
     }

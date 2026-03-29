@@ -9,21 +9,43 @@ llama_server = "/path/to/llama-server"    # path to llama-server binary
 default_profile = "qwen_fast"              # profile used when no name specified
 listen = "0.0.0.0:3131"                   # daemon listen address
 idle_timeout = 1800                        # seconds before auto-sleep; 0/omitted disables
+model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (optional)
 ```
 
 `idle_timeout` is daemon-wide. When the active backend has been idle for that many seconds with no inference traffic, Rookery unloads it and transitions to `sleeping`. The next `/api/chat` request wakes the last active profile automatically before proxying.
+
+`model_dirs` adds custom directories to the model scanner. Rookery always scans the HuggingFace hub cache and llama.cpp cache automatically — use `model_dirs` for models stored outside those standard locations.
 
 ## Models
 
 Define what models are available. Referenced by profiles.
 
+### HuggingFace models (GGUF — for llama-server)
+
 ```toml
 [models.qwen35]
 source = "hf"                              # "hf" (HuggingFace) or "local"
 repo = "unsloth/Qwen3.5-35B-A3B-GGUF"    # HF repo
-file = "UD-Q5_K_XL"                       # quant filename (without .gguf)
+file = "UD-Q5_K_XL"                       # quant label (without .gguf)
 estimated_vram_mb = 29200                  # for capacity gate (optional)
+```
 
+### HuggingFace models (any format — for vLLM)
+
+vLLM supports safetensors, AWQ, GPTQ, NVFP4, and other formats. No `file` field needed — vLLM manages the model inside Docker.
+
+```toml
+[models.qwen35_27b_nvfp4]
+source = "hf"
+repo = "kaitchup/Qwen3.5-27B-NVFP4"
+estimated_vram_mb = 20000
+```
+
+### Local models
+
+Point directly at a model file on disk (GGUF for llama-server, or any format for vLLM).
+
+```toml
 [models.local_model]
 source = "local"
 path = "/path/to/model.gguf"              # local file path

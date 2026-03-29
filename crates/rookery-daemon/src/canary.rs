@@ -395,6 +395,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         }
     }

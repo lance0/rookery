@@ -34,7 +34,34 @@ cp config.example.toml ~/.config/rookery/config.toml
 Edit `config.toml`:
 - Set `llama_server` to your llama-server binary path
 - Set `listen` to your preferred address (default: `127.0.0.1:3000`, use `0.0.0.0:3131` for LAN access)
-- Configure models and profiles (see [Configuration](configuration.md))
+- Configure at least one model and profile
+
+The simplest model config points at a HuggingFace GGUF repo — Rookery handles the download:
+
+```toml
+[models.qwen35]
+source = "hf"
+repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
+file = "UD-Q4_K_XL"
+
+[profiles.default]
+model = "qwen35"
+port = 8081
+```
+
+If you already have GGUF files on disk, use a local model:
+
+```toml
+[models.my_model]
+source = "local"
+path = "/path/to/my-model.gguf"
+
+[profiles.default]
+model = "my_model"
+port = 8081
+```
+
+See [Configuration](configuration.md) for all options including vLLM backend, sampling parameters, and KV cache tuning.
 
 ## Building llama.cpp
 

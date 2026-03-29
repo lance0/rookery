@@ -157,6 +157,10 @@ pub struct Config {
     #[serde(default)]
     pub idle_timeout: Option<u32>,
 
+    /// Extra directories to scan for downloaded GGUF model files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_dirs: Vec<PathBuf>,
+
     #[serde(default)]
     pub models: HashMap<String, Model>,
 
@@ -1053,6 +1057,7 @@ gpu_memory_utilization = 0.9
                         extra_args: Vec::new(),
                     },
                 )]),
+                model_dirs: vec![],
                 agents: HashMap::new(),
             }
         };
@@ -1541,6 +1546,7 @@ ctx_size = 262144
                     extra_args: Vec::new(),
                 },
             )]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         };
 
@@ -1612,6 +1618,7 @@ ctx_size = 262144
                     extra_args: Vec::new(),
                 },
             )]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         };
 

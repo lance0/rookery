@@ -1313,7 +1313,8 @@ pub async fn get_models_quants(
     })?;
 
     let mut quants = rookery_engine::models::extract_quants(&files);
-    rookery_engine::models::mark_downloaded(&mut quants);
+    let model_dirs = state.config.read().await.model_dirs.clone();
+    rookery_engine::models::mark_downloaded(&mut quants, &model_dirs);
 
     // Attach performance estimates
     let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
@@ -1358,8 +1359,31 @@ pub async fn get_models_recommend(
     }
 }
 
-pub async fn get_models_cached(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let cached = rookery_engine::models::scan_cache();
+pub async fn get_models_cached(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let config = state.config.read().await;
+    let mut cached = rookery_engine::models::scan_cache(&config.model_dirs);
+
+    // Merge config-defined local models
+    for (name, model) in &config.models {
+        if model.source == "local"
+            && let Some(ref path) = model.path
+            && path.exists()
+            && !cached.iter().any(|c| c.path == *path)
+        {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            cached.push(rookery_engine::models::CachedModel {
+                repo: format!("local:{name}"),
+                quant_label: path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                path: path.clone(),
+                size_bytes: size,
+            });
+        }
+    }
+
     Json(serde_json::json!({ "models": cached }))
 }
 
@@ -1931,6 +1955,7 @@ mod tests {
                     },
                 ),
             ]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         };
 
@@ -2183,6 +2208,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         };
 
@@ -2247,6 +2273,7 @@ mod tests {
                     extra_args: vec![],
                 },
             )]),
+            model_dirs: vec![],
             agents: HashMap::new(),
         };
 
