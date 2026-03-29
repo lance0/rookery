@@ -224,70 +224,49 @@ pub struct Profile {
     )]
     pub ctx_size: u32,
 
-    #[serde(
-        default = "default_threads",
-        skip_serializing_if = "is_default_threads"
-    )]
+    #[serde(default = "default_threads")]
     pub threads: u8,
 
-    #[serde(
-        default = "default_threads_batch",
-        skip_serializing_if = "is_default_threads_batch"
-    )]
+    #[serde(default = "default_threads_batch")]
     pub threads_batch: u8,
 
-    #[serde(
-        default = "default_batch_size",
-        skip_serializing_if = "is_default_batch_size"
-    )]
+    #[serde(default = "default_batch_size")]
     pub batch_size: u32,
 
-    #[serde(
-        default = "default_ubatch_size",
-        skip_serializing_if = "is_default_ubatch_size"
-    )]
+    #[serde(default = "default_ubatch_size")]
     pub ubatch_size: u32,
 
-    #[serde(
-        default = "default_gpu_layers",
-        skip_serializing_if = "is_default_gpu_layers"
-    )]
+    #[serde(default = "default_gpu_layers")]
     pub gpu_layers: i32,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_index: Option<u32>,
 
-    #[serde(
-        default = "default_cache_type",
-        skip_serializing_if = "is_default_cache_type"
-    )]
+    #[serde(default = "default_cache_type")]
     pub cache_type_k: String,
 
-    #[serde(
-        default = "default_cache_type",
-        skip_serializing_if = "is_default_cache_type"
-    )]
+    #[serde(default = "default_cache_type")]
     pub cache_type_v: String,
 
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(default = "default_true")]
     pub flash_attention: bool,
 
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    #[serde(default)]
     pub reasoning_budget: i32,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<PathBuf>,
 
-    #[serde(default = "default_temp", skip_serializing_if = "is_default_temp")]
+    #[serde(default = "default_temp")]
     pub temp: f32,
 
-    #[serde(default = "default_top_p", skip_serializing_if = "is_default_top_p")]
+    #[serde(default = "default_top_p")]
     pub top_p: f32,
 
-    #[serde(default = "default_top_k", skip_serializing_if = "is_default_top_k")]
+    #[serde(default = "default_top_k")]
     pub top_k: u32,
 
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    #[serde(default)]
     pub min_p: f32,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -352,42 +331,6 @@ impl Profile {
 
 fn is_default_ctx_size(v: &u32) -> bool {
     *v == default_ctx_size()
-}
-fn is_default_threads(v: &u8) -> bool {
-    *v == default_threads()
-}
-fn is_default_threads_batch(v: &u8) -> bool {
-    *v == default_threads_batch()
-}
-fn is_default_batch_size(v: &u32) -> bool {
-    *v == default_batch_size()
-}
-fn is_default_ubatch_size(v: &u32) -> bool {
-    *v == default_ubatch_size()
-}
-fn is_default_gpu_layers(v: &i32) -> bool {
-    *v == default_gpu_layers()
-}
-fn is_default_cache_type(v: &str) -> bool {
-    v == default_cache_type()
-}
-fn is_true(v: &bool) -> bool {
-    *v
-}
-fn is_zero_i32(v: &i32) -> bool {
-    *v == 0
-}
-fn is_zero_f32(v: &f32) -> bool {
-    *v == 0.0
-}
-fn is_default_temp(v: &f32) -> bool {
-    *v == default_temp()
-}
-fn is_default_top_p(v: &f32) -> bool {
-    *v == default_top_p()
-}
-fn is_default_top_k(v: &u32) -> bool {
-    *v == default_top_k()
 }
 
 // ── Agent config ─────────────────────────────────────────────────────
