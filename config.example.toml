@@ -96,7 +96,7 @@ port = 8081
 
 [profiles.qwen_nvfp4.vllm]
 docker_image = "vllm/vllm-openai:cu130-nightly"
-gpu_memory_utilization = 0.89
+gpu_memory_utilization = 0.9
 max_num_seqs = 4
 max_num_batched_tokens = 4096
 max_model_len = 234567

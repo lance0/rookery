@@ -10,9 +10,9 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Daemon address
-    #[arg(long, default_value = "http://127.0.0.1:3000", global = true)]
-    daemon: String,
+    /// Daemon address (auto-detected from config if omitted)
+    #[arg(long, global = true)]
+    daemon: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -258,7 +258,18 @@ struct AgentActionResponse {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let client = DaemonClient::new(&cli.daemon);
+    let daemon_url = cli.daemon.unwrap_or_else(|| {
+        let addr = rookery_core::config::Config::load()
+            .map(|c| c.listen)
+            .unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap());
+        let ip = if addr.ip().is_unspecified() {
+            std::net::IpAddr::from([127, 0, 0, 1])
+        } else {
+            addr.ip()
+        };
+        format!("http://{}:{}", ip, addr.port())
+    });
+    let client = DaemonClient::new(&daemon_url);
 
     let result = match cli.command {
         Commands::Start { profile, json } => cmd_start(&client, profile, json).await,
@@ -1736,7 +1747,7 @@ mod tests {
     fn test_parse_global_daemon_flag() {
         let cli = Cli::try_parse_from(["rookery", "--daemon", "http://localhost:5000", "status"])
             .unwrap();
-        assert_eq!(cli.daemon, "http://localhost:5000");
+        assert_eq!(cli.daemon, Some("http://localhost:5000".to_string()));
     }
 
     // =========================================================================

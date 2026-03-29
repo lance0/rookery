@@ -382,6 +382,7 @@ fn App() -> impl IntoView {
                 <h1>"rookery"</h1>
                 <span class="subtitle">"local inference command center"</span>
                 <span style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                    <a class="theme-toggle" href="/metrics" target="_blank" style="text-decoration:none">"metrics"</a>
                     <button class="theme-toggle" on:click=on_theme_toggle>
                         {move || if is_light.get() { "dark" } else { "light" }}
                     </button>

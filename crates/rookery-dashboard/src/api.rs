@@ -174,14 +174,6 @@ pub async fn fetch_quants(repo: &str) -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
-pub async fn fetch_recommend(repo: &str) -> Result<serde_json::Value, String> {
-    let resp = Request::get(&format!("/api/models/recommend?repo={repo}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    resp.json().await.map_err(|e| e.to_string())
-}
-
 pub async fn fetch_cached_models() -> Result<serde_json::Value, String> {
     let resp = Request::get("/api/models/cached")
         .send()

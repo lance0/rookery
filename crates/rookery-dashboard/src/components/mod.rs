@@ -8,7 +8,7 @@ mod bench_panel;
 mod model_info;
 mod settings_panel;
 pub mod toast;
-mod gpu_viz;
+mod server_stats;
 mod chat_panel;
 mod models_panel;
 
@@ -22,6 +22,6 @@ pub use bench_panel::*;
 pub use model_info::*;
 pub use settings_panel::*;
 pub use toast::*;
-pub use gpu_viz::*;
+pub use server_stats::*;
 pub use chat_panel::*;
 pub use models_panel::*;

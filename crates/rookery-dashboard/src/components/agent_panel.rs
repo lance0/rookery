@@ -45,6 +45,7 @@ pub fn AgentPanel(
                             let uptime = agent.and_then(|a| a.uptime_secs);
                             let restarts = agent.and_then(|a| a.total_restarts).unwrap_or(0);
                             let errors = agent.and_then(|a| a.error_count).unwrap_or(0);
+                            let lifetime = agent.and_then(|a| a.lifetime_errors).unwrap_or(0);
                             let dot_class = if is_running { "agent-dot running" } else { "agent-dot stopped" };
                             let btn_text = if is_running { "Stop" } else { "Start" };
                             let display_name = name.clone();
@@ -110,8 +111,13 @@ pub fn AgentPanel(
                                     {(restarts > 0).then(|| view! {
                                         <span class="agent-restarts">{format!("{restarts} restart{}", if restarts == 1 { "" } else { "s" })}</span>
                                     })}
-                                    {(errors > 0).then(|| view! {
-                                        <span class="agent-errors">{format!("{errors} err{}", if errors == 1 { "" } else { "s" })}</span>
+                                    {(errors > 0 || lifetime > 0).then(|| {
+                                        let text = if lifetime > errors {
+                                            format!("{errors} err ({lifetime} lifetime)")
+                                        } else {
+                                            format!("{errors} err{}", if errors == 1 { "" } else { "s" })
+                                        };
+                                        view! { <span class="agent-errors">{text}</span> }
                                     })}
                                     <button
                                         class="btn"
