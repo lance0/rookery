@@ -12,6 +12,7 @@ KillSignal=SIGTERM
 TimeoutStopSec=45
 OOMScoreAdjust=-900
 Environment=RUST_LOG=rookery=info
+Environment=HF_HOME=/home/lance/models/cache
 WorkingDirectory=/home/lance/projects/rookery
 StandardOutput=journal
 StandardError=journal
