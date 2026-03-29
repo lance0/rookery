@@ -2,6 +2,14 @@
 
 All endpoints are served by the rookeryd daemon.
 
+## Authentication
+
+When `api_key` is configured in `config.toml`, all API endpoints require `Authorization: Bearer <key>` except `/api/health` and `/metrics`.
+
+- Dashboard fetches use the bearer header automatically after the user enters the key.
+- `GET /api/events` accepts `?token=<key>` for browser `EventSource` connections.
+- Dashboard HTML/assets remain publicly servable so the SPA can show the auth prompt.
+
 ## Server Management
 
 | Endpoint | Method | Description |
@@ -56,7 +64,7 @@ All endpoints are served by the rookeryd daemon.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/events` | GET | SSE stream (gpu stats, state changes, log lines) |
+| `/api/events` | GET | SSE stream (gpu stats, state changes, log lines; use `?token=` when auth is enabled) |
 | `/api/chat` | POST | Streaming chat proxy to llama-server (auto-wakes sleeping backends, 60s per-chunk timeout) |
 | `/api/logs?n=50` | GET | Fetch last N log lines |
 | `/metrics` | GET | Prometheus/OpenMetrics text exposition |
@@ -104,4 +112,4 @@ Notes:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Embedded Leptos WASM dashboard |
+| `/` | GET | Embedded Leptos WASM dashboard shell |

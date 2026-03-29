@@ -507,6 +507,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::
     let config = state.config.read().await;
     let mut val = serde_json::to_value(&*config).unwrap_or_default();
 
+    if let Some(api_key) = val.get_mut("api_key") {
+        *api_key = serde_json::json!("[redacted]");
+    }
+
     // Redact sensitive fields from agent configs
     if let Some(agents) = val.get_mut("agents").and_then(|a| a.as_object_mut()) {
         for (_name, agent) in agents.iter_mut() {
@@ -1866,6 +1870,7 @@ mod tests {
             llama_server: PathBuf::from("/usr/bin/llama-server"),
             default_profile: "llama_fast".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            api_key: None,
             idle_timeout: None,
             models: HashMap::from([
                 (
@@ -2161,6 +2166,7 @@ mod tests {
             llama_server: std::path::PathBuf::new(),
             default_profile: "bad_vllm".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            api_key: None,
             idle_timeout: None,
             models: HashMap::from([(
                 "existing_model".into(),
@@ -2237,6 +2243,7 @@ mod tests {
             llama_server: std::path::PathBuf::new(),
             default_profile: "llama_profile".into(),
             listen: "127.0.0.1:19999".parse().unwrap(),
+            api_key: None,
             idle_timeout: None,
             models: HashMap::from([(
                 "m".into(),
@@ -2684,6 +2691,7 @@ mod tests {
             // Add an agent with env vars to the config
             {
                 let mut config = state.config.write().await;
+                config.api_key = Some("rky-secret".into());
                 config.agents.insert(
                     "test_agent".into(),
                     rookery_core::config::AgentConfig {
@@ -2718,6 +2726,8 @@ mod tests {
 
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["api_key"], "[redacted]");
 
             // Agent env vars should be redacted
             let agent_env = &json["agents"]["test_agent"]["env"];

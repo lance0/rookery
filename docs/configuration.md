@@ -8,10 +8,13 @@ Config file: `~/.config/rookery/config.toml`
 llama_server = "/path/to/llama-server"    # path to llama-server binary
 default_profile = "qwen_fast"              # profile used when no name specified
 listen = "0.0.0.0:3131"                   # daemon listen address
+api_key = "rky-..."                        # optional shared bearer token, unset/empty disables auth
 auto_start = true                          # start default profile on daemon boot
 idle_timeout = 1800                        # seconds before auto-sleep; 0/omitted disables
 model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (optional)
 ```
+
+`api_key` is optional. When set, all API routes and the live SSE stream require authentication except `/api/health` and `/metrics`. The dashboard stores the key in browser `localStorage`, and the CLI automatically reads the same key from `~/.config/rookery/config.toml`.
 
 `idle_timeout` is daemon-wide. When the active backend has been idle for that many seconds with no inference traffic, Rookery unloads it and transitions to `sleeping`. The next `/api/chat` request wakes the last active profile automatically before proxying.
 

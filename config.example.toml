@@ -1,6 +1,9 @@
 llama_server = "/path/to/llama.cpp/build/bin/llama-server"
 default_profile = "qwen_fast"
 listen = "127.0.0.1:3000"
+# Optional shared admin key for the API and dashboard.
+# Leave unset or empty to disable auth.
+# api_key = "rky-0123456789abcdef0123456789abcdef"
 auto_start = true    # start default profile on daemon boot
 idle_timeout = 1800  # seconds; 0 disables auto-sleep
 

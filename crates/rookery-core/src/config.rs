@@ -155,6 +155,9 @@ pub struct Config {
     pub listen: SocketAddr,
 
     #[serde(default)]
+    pub api_key: Option<String>,
+
+    #[serde(default)]
     pub idle_timeout: Option<u32>,
 
     /// Automatically start the default profile when the daemon boots.
@@ -1012,6 +1015,7 @@ gpu_memory_utilization = 0.9
                 llama_server: PathBuf::new(),
                 default_profile: "v".into(),
                 listen: default_listen(),
+                api_key: None,
                 idle_timeout: None,
                 models: HashMap::from([(
                     "m".into(),
@@ -1510,6 +1514,7 @@ ctx_size = 262144
             llama_server: PathBuf::from("/usr/bin/llama-server"),
             default_profile: "fast".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            api_key: Some("rky-test-secret".into()),
             idle_timeout: None,
             models: HashMap::from([(
                 "qwen".into(),
@@ -1565,6 +1570,7 @@ ctx_size = 262144
         let loaded: Config = toml::from_str(&loaded_str).unwrap();
 
         assert_eq!(loaded.default_profile, "fast");
+        assert_eq!(loaded.api_key.as_deref(), Some("rky-test-secret"));
         assert_eq!(loaded.models["qwen"].estimated_vram_mb, Some(5000));
         let ls = loaded.profiles["fast"].llama_server_config().unwrap();
         assert_eq!(ls.ctx_size, 131072);
@@ -1576,6 +1582,7 @@ ctx_size = 262144
             llama_server: PathBuf::new(),
             default_profile: "nonexistent_profile".into(),
             listen: "127.0.0.1:3000".parse().unwrap(),
+            api_key: None,
             idle_timeout: None,
             models: HashMap::from([(
                 "m".into(),

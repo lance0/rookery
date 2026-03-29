@@ -2,6 +2,8 @@
 
 The `rookery` CLI communicates with the `rookeryd` daemon over HTTP.
 
+When `api_key` is set in `~/.config/rookery/config.toml`, the CLI automatically attaches it to daemon requests. `rookery auth generate` prints a strong suggested key for the config file.
+
 ## Global Options
 
 ```
@@ -70,6 +72,7 @@ rookery config                # validate config, show resolved commands
 ### Other
 
 ```bash
+rookery auth generate        # print a strong rky-... API key
 rookery completions <shell>   # generate shell completions (bash, zsh, fish)
 ```
 

@@ -3,21 +3,24 @@ use serde::de::DeserializeOwned;
 pub struct DaemonClient {
     base_url: String,
     client: reqwest::Client,
+    api_key: Option<String>,
 }
 
 impl DaemonClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str, api_key: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
+            api_key: api_key
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty()),
         }
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
-            .client
-            .get(&url)
+            .with_auth(self.client.get(&url))
             .send()
             .await
             .map_err(|e| ClientError::Connection(e.to_string()))?;
@@ -38,8 +41,7 @@ impl DaemonClient {
     ) -> Result<T, ClientError> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
-            .client
-            .post(&url)
+            .with_auth(self.client.post(&url))
             .json(body)
             .send()
             .await
@@ -56,6 +58,18 @@ impl DaemonClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
+    fn with_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(api_key) = &self.api_key {
+            request.bearer_auth(api_key)
+        } else {
+            request
+        }
     }
 
     pub async fn health(&self) -> bool {

@@ -149,6 +149,171 @@ fn toggle_theme(is_light: bool) -> bool {
     new_light
 }
 
+fn load_dashboard_data(
+    set_profiles: WriteSignal<Vec<ProfileInfo>>,
+    set_agents: WriteSignal<AgentsData>,
+    set_logs: WriteSignal<Vec<String>>,
+    set_model_info: WriteSignal<ModelInfoData>,
+    set_loading: WriteSignal<bool>,
+    set_load_error: WriteSignal<Option<String>>,
+    set_auth_required: WriteSignal<bool>,
+) {
+    set_loading.set(true);
+    set_load_error.set(None);
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut any_ok = false;
+        let mut unauthorized = false;
+        let mut first_error = None::<String>;
+
+        match api::fetch_profiles().await {
+            Ok(profiles) => {
+                set_profiles.set(profiles);
+                any_ok = true;
+            }
+            Err(error) => {
+                unauthorized |= api::is_unauthorized(&error);
+                first_error.get_or_insert(error);
+            }
+        }
+
+        match api::fetch_agents().await {
+            Ok(agents) => {
+                set_agents.set(agents);
+                any_ok = true;
+            }
+            Err(error) => {
+                unauthorized |= api::is_unauthorized(&error);
+                first_error.get_or_insert(error);
+            }
+        }
+
+        match api::fetch_logs(100).await {
+            Ok(logs) => {
+                set_logs.set(logs);
+                any_ok = true;
+            }
+            Err(error) => {
+                unauthorized |= api::is_unauthorized(&error);
+                first_error.get_or_insert(error);
+            }
+        }
+
+        match api::fetch_model_info().await {
+            Ok(model_info) => {
+                set_model_info.set(model_info);
+                any_ok = true;
+            }
+            Err(error) => {
+                unauthorized |= api::is_unauthorized(&error);
+                first_error.get_or_insert(error);
+            }
+        }
+
+        if unauthorized {
+            set_auth_required.set(true);
+            set_load_error.set(None);
+            set_loading.set(false);
+            return;
+        }
+
+        if !any_ok {
+            set_load_error.set(Some(
+                first_error.unwrap_or_else(|| "failed to connect to rookeryd".into()),
+            ));
+        }
+
+        set_loading.set(false);
+    });
+}
+
+fn connect_sse(
+    event_source: ReadSignal<Option<web_sys::EventSource>>,
+    set_event_source: WriteSignal<Option<web_sys::EventSource>>,
+    set_connected: WriteSignal<bool>,
+    set_gpu: WriteSignal<GpuData>,
+    set_status: WriteSignal<ServerStatus>,
+    set_model_info: WriteSignal<ModelInfoData>,
+    set_logs: WriteSignal<Vec<String>>,
+) {
+    if let Some(existing) = event_source.get_untracked() {
+        existing.close();
+    }
+    set_event_source.set(None);
+
+    let Ok(es) = web_sys::EventSource::new(&api::events_url()) else {
+        set_connected.set(false);
+        return;
+    };
+
+    set_connected.set(true);
+
+    let set_gpu_sse = set_gpu;
+    let on_gpu = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
+        if let Some(data) = e.data().as_string()
+            && let Ok(stats) = serde_json::from_str::<GpuData>(&data)
+        {
+            set_gpu_sse.set(stats);
+        }
+    });
+    let _ = es.add_event_listener_with_callback("gpu", on_gpu.as_ref().unchecked_ref());
+    on_gpu.forget();
+
+    let set_status_sse = set_status;
+    let set_model_info_sse = set_model_info;
+    let on_state = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
+        if let Some(data) = e.data().as_string()
+            && let Ok(status) = serde_json::from_str::<ServerStatus>(&data)
+        {
+            let is_running = status.state == "running";
+            set_status_sse.set(status);
+            if is_running {
+                let set_model_info_retry = set_model_info_sse;
+                wasm_bindgen_futures::spawn_local(async move {
+                    gloo_timers::future::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Ok(model_info) = api::fetch_model_info().await {
+                        set_model_info_retry.set(model_info);
+                    }
+                });
+            } else {
+                set_model_info_sse.set(ModelInfoData::default());
+            }
+        }
+    });
+    let _ = es.add_event_listener_with_callback("state", on_state.as_ref().unchecked_ref());
+    on_state.forget();
+
+    let set_logs_sse = set_logs;
+    let on_log = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
+        if let Some(data) = e.data().as_string() {
+            set_logs_sse.update(|lines| {
+                lines.push(data);
+                if lines.len() > 500 {
+                    lines.drain(..lines.len() - 500);
+                }
+            });
+        }
+    });
+    let _ = es.add_event_listener_with_callback("log", on_log.as_ref().unchecked_ref());
+    on_log.forget();
+
+    let set_conn_err = set_connected;
+    let on_error = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
+        set_conn_err.set(false);
+    });
+    es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    on_error.forget();
+
+    let set_conn_open = set_connected;
+    let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
+        set_conn_open.set(true);
+    });
+    es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
+
+    set_event_source.set(Some(es));
+}
+
 fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
@@ -169,120 +334,69 @@ fn App() -> impl IntoView {
 
     let (loading, set_loading) = signal(true);
     let (load_error, set_load_error) = signal(Option::<String>::None);
+    let (auth_required, set_auth_required) = signal(false);
+    let (auth_input, set_auth_input) = signal(api::get_api_key().unwrap_or_default());
+    let (auth_error, set_auth_error) = signal(Option::<String>::None);
+    let (has_api_key, set_has_api_key) = signal(api::get_api_key().is_some());
+    let (event_source, set_event_source) = signal(Option::<web_sys::EventSource>::None);
+    let (server_stats, set_server_stats) = signal(Option::<serde_json::Value>::None);
 
-    // Load initial data
-    let set_profiles_init = set_profiles.clone();
-    let set_agents_init = set_agents.clone();
-    let set_logs_init = set_logs.clone();
-    let set_model_info_init = set_model_info.clone();
+    load_dashboard_data(
+        set_profiles,
+        set_agents,
+        set_logs,
+        set_model_info,
+        set_loading,
+        set_load_error,
+        set_auth_required,
+    );
+    connect_sse(
+        event_source,
+        set_event_source,
+        set_connected,
+        set_gpu,
+        set_status,
+        set_model_info,
+        set_logs,
+    );
 
-    wasm_bindgen_futures::spawn_local(async move {
-        let mut any_ok = false;
-        if let Ok(p) = api::fetch_profiles().await {
-            set_profiles_init.set(p);
-            any_ok = true;
-        }
-        if let Ok(a) = api::fetch_agents().await {
-            set_agents_init.set(a);
-            any_ok = true;
-        }
-        if let Ok(l) = api::fetch_logs(100).await {
-            set_logs_init.set(l);
-            any_ok = true;
-        }
-        if let Ok(m) = api::fetch_model_info().await {
-            set_model_info_init.set(m);
-            any_ok = true;
-        }
-        if !any_ok {
-            set_load_error.set(Some("failed to connect to rookeryd".into()));
-        }
-        set_loading.set(false);
-    });
+    {
+        let set_auth_required_evt = set_auth_required;
+        let set_connected_evt = set_connected;
+        let event_source_evt = event_source;
+        let set_event_source_evt = set_event_source;
+        let set_auth_error_evt = set_auth_error;
+        let set_loading_evt = set_loading;
 
-    // SSE connection
-    let es = web_sys::EventSource::new("/api/events").ok();
-
-    if let Some(ref es) = es {
-        set_connected.set(true);
-
-        // GPU events
-        let set_gpu_sse = set_gpu.clone();
-        let on_gpu = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-            if let Some(data) = e.data().as_string() {
-                if let Ok(stats) = serde_json::from_str::<GpuData>(&data) {
-                    set_gpu_sse.set(stats);
-                }
+        let on_auth_required = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
+            if let Some(existing) = event_source_evt.get_untracked() {
+                existing.close();
             }
+            set_event_source_evt.set(None);
+            set_connected_evt.set(false);
+            set_auth_error_evt.set(Some("Enter the API key to continue.".into()));
+            set_loading_evt.set(false);
+            set_auth_required_evt.set(true);
         });
-        es.add_event_listener_with_callback("gpu", on_gpu.as_ref().unchecked_ref())
-            .unwrap();
-        on_gpu.forget();
 
-        // State events — also refresh model info on state change
-        let set_status_sse = set_status.clone();
-        let set_model_info_sse = set_model_info.clone();
-        let on_state = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-            if let Some(data) = e.data().as_string() {
-                if let Ok(s) = serde_json::from_str::<ServerStatus>(&data) {
-                    let is_running = s.state == "running";
-                    set_status_sse.set(s);
-                    if is_running {
-                        let set_mi = set_model_info_sse.clone();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            gloo_timers::future::sleep(std::time::Duration::from_millis(500)).await;
-                            if let Ok(m) = api::fetch_model_info().await {
-                                set_mi.set(m);
-                            }
-                        });
-                    } else {
-                        set_model_info_sse.set(ModelInfoData::default());
-                    }
-                }
-            }
-        });
-        es.add_event_listener_with_callback("state", on_state.as_ref().unchecked_ref())
-            .unwrap();
-        on_state.forget();
-
-        // Log events
-        let set_logs_sse = set_logs.clone();
-        let on_log = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-            if let Some(data) = e.data().as_string() {
-                set_logs_sse.update(|lines| {
-                    lines.push(data);
-                    if lines.len() > 500 {
-                        lines.drain(..lines.len() - 500);
-                    }
-                });
-            }
-        });
-        es.add_event_listener_with_callback("log", on_log.as_ref().unchecked_ref())
-            .unwrap();
-        on_log.forget();
-
-        // Connection error
-        let set_conn_err = set_connected.clone();
-        let on_error = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
-            set_conn_err.set(false);
-        });
-        es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-        on_error.forget();
-
-        // Connection open (handles reconnection after error)
-        let set_conn_open = set_connected.clone();
-        let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
-            set_conn_open.set(true);
-        });
-        es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
-        on_open.forget();
+        if let Some(window) = get_window() {
+            let _ = window.add_event_listener_with_callback(
+                "rookery-auth-required",
+                on_auth_required.as_ref().unchecked_ref(),
+            );
+            on_auth_required.forget();
+        }
     }
 
     // Periodic agent refresh
     let set_agents_interval = set_agents.clone();
+    let auth_required_agents = auth_required;
     wasm_bindgen_futures::spawn_local(async move {
         loop {
             gloo_timers::future::sleep(std::time::Duration::from_secs(10)).await;
+            if auth_required_agents.get() {
+                continue;
+            }
             if let Ok(a) = api::fetch_agents().await {
                 set_agents_interval.set(a);
             }
@@ -290,12 +404,14 @@ fn App() -> impl IntoView {
     });
 
     // Periodic server stats polling (single loop at App level to avoid accumulation)
-    let (server_stats, set_server_stats) = signal(Option::<serde_json::Value>::None);
     {
         let status_for_stats = status.clone();
+        let auth_required_stats = auth_required;
         wasm_bindgen_futures::spawn_local(async move {
             loop {
-                if status_for_stats.get().state == "running" {
+                if auth_required_stats.get() {
+                    set_server_stats.set(None);
+                } else if status_for_stats.get().state == "running" {
                     if let Ok(data) = api::fetch_server_stats().await {
                         if data["available"].as_bool().unwrap_or(false) {
                             set_server_stats.set(Some(data));
@@ -394,6 +510,78 @@ fn App() -> impl IntoView {
         set_is_light.update(|light| *light = toggle_theme(*light));
     };
 
+    let on_logout = move |_| {
+        let _ = api::clear_api_key();
+        if let Some(existing) = event_source.get_untracked() {
+            existing.close();
+        }
+        set_event_source.set(None);
+        set_connected.set(false);
+        set_has_api_key.set(false);
+        set_auth_input.set(String::new());
+        set_auth_error.set(Some("API key cleared.".into()));
+        set_auth_required.set(true);
+    };
+
+    let on_auth_submit = move |_| {
+        let key = auth_input.get_untracked();
+        let set_auth_error_submit = set_auth_error;
+        let set_auth_required_submit = set_auth_required;
+        let set_has_api_key_submit = set_has_api_key;
+        let set_profiles_submit = set_profiles;
+        let set_agents_submit = set_agents;
+        let set_logs_submit = set_logs;
+        let set_model_info_submit = set_model_info;
+        let set_loading_submit = set_loading;
+        let set_load_error_submit = set_load_error;
+        let event_source_submit = event_source;
+        let set_event_source_submit = set_event_source;
+        let set_connected_submit = set_connected;
+        let set_gpu_submit = set_gpu;
+        let set_status_submit = set_status;
+
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(error) = api::set_api_key(&key) {
+                set_auth_error_submit.set(Some(error));
+                return;
+            }
+
+            match api::fetch_profiles().await {
+                Ok(profiles) => {
+                    set_profiles_submit.set(profiles);
+                    set_has_api_key_submit.set(true);
+                    set_auth_required_submit.set(false);
+                    set_auth_error_submit.set(None);
+                    load_dashboard_data(
+                        set_profiles_submit,
+                        set_agents_submit,
+                        set_logs_submit,
+                        set_model_info_submit,
+                        set_loading_submit,
+                        set_load_error_submit,
+                        set_auth_required_submit,
+                    );
+                    connect_sse(
+                        event_source_submit,
+                        set_event_source_submit,
+                        set_connected_submit,
+                        set_gpu_submit,
+                        set_status_submit,
+                        set_model_info_submit,
+                        set_logs_submit,
+                    );
+                }
+                Err(error) if api::is_unauthorized(&error) => {
+                    set_auth_error_submit.set(Some("Invalid API key.".into()));
+                    set_auth_required_submit.set(true);
+                }
+                Err(error) => {
+                    set_auth_error_submit.set(Some(format!("failed to connect: {error}")));
+                }
+            }
+        });
+    };
+
     view! {
         <div class="app">
             <div class="header">
@@ -401,6 +589,17 @@ fn App() -> impl IntoView {
                 <span class="subtitle">"local inference command center"</span>
                 <span style="margin-left:auto;display:flex;align-items:center;gap:8px">
                     <a class="theme-toggle" href="/metrics" target="_blank" style="text-decoration:none">"metrics"</a>
+                    {move || {
+                        if has_api_key.get() {
+                            view! {
+                                <button class="theme-toggle" on:click=on_logout>
+                                    "logout"
+                                </button>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    }}
                     <button class="theme-toggle" on:click=on_theme_toggle>
                         {move || if is_light.get() { "dark" } else { "light" }}
                     </button>
@@ -411,17 +610,36 @@ fn App() -> impl IntoView {
                 </span>
             </div>
 
-            <div class="tab-bar">
-                {tab_btn(Tab::Overview, "Overview", "1")}
-                {tab_btn(Tab::Settings, "Settings", "2")}
-                {tab_btn(Tab::Agents, "Agents", "3")}
-                {tab_btn(Tab::Chat, "Chat", "4")}
-                {tab_btn(Tab::Bench, "Bench", "5")}
-                {tab_btn(Tab::Logs, "Logs", "6")}
-                {tab_btn(Tab::Models, "Models", "7")}
-            </div>
-
             {move || {
+                if auth_required.get() {
+                    return view! {
+                        <div class="section">
+                            <div class="card" style="max-width:520px;margin:40px auto">
+                                <h2>"API Key Required"</h2>
+                                <p style="color:var(--muted);margin-bottom:16px">
+                                    "This rookery daemon is protected. Enter the configured API key to load the dashboard."
+                                </p>
+                                <input
+                                    class="input"
+                                    type="password"
+                                    placeholder="rky-..."
+                                    prop:value=move || auth_input.get()
+                                    on:input=move |ev| set_auth_input.set(event_target_value(&ev))
+                                />
+                                <div style="display:flex;gap:12px;align-items:center;margin-top:16px">
+                                    <button class="btn" on:click=on_auth_submit>"Unlock"</button>
+                                    {move || {
+                                        auth_error
+                                            .get()
+                                            .map(|error| view! { <span class="agent-errors">{error}</span> })
+                                    }}
+                                </div>
+                            </div>
+                        </div>
+                    }
+                    .into_any();
+                }
+
                 if let Some(err) = load_error.get() {
                     return view! {
                         <div class="load-error">
@@ -435,65 +653,85 @@ fn App() -> impl IntoView {
                 view! { <span></span> }.into_any()
             }}
 
-            <div class="tab-content">
-                {move || {
-                if loading.get() {
-                    return view! { <div class="loading">"loading..."</div> }.into_any();
+            {move || {
+                if auth_required.get() {
+                    return view! { <span></span> }.into_any();
                 }
-                match tab.get() {
-                    Tab::Overview => view! {
-                        <div>
-                            <div class="grid">
-                                <StatusCard status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
-                                <GpuPanel gpu=gpu />
-                            </div>
-                            <div class="grid">
-                                <ModelInfo model_info=model_info />
-                                <ServerStats stats=server_stats status=status />
-                            </div>
-                            <div class="grid">
-                                <AgentSummary agents=agents set_tab=set_tab />
-                            </div>
+
+                view! {
+                    <>
+                        <div class="tab-bar">
+                            {tab_btn(Tab::Overview, "Overview", "1")}
+                            {tab_btn(Tab::Settings, "Settings", "2")}
+                            {tab_btn(Tab::Agents, "Agents", "3")}
+                            {tab_btn(Tab::Chat, "Chat", "4")}
+                            {tab_btn(Tab::Bench, "Bench", "5")}
+                            {tab_btn(Tab::Logs, "Logs", "6")}
+                            {tab_btn(Tab::Models, "Models", "7")}
                         </div>
-                    }.into_any(),
-                    Tab::Settings => view! {
-                        <div>
-                            <div class="section">
-                                <ProfileSwitcher profiles=profiles status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
-                            </div>
-                            <div class="section">
-                                <SettingsPanel status=status set_toasts=set_toasts />
-                            </div>
+
+                        <div class="tab-content">
+                            {move || {
+                                if loading.get() {
+                                    return view! { <div class="loading">"loading..."</div> }.into_any();
+                                }
+                                match tab.get() {
+                                    Tab::Overview => view! {
+                                        <div>
+                                            <div class="grid">
+                                                <StatusCard status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
+                                                <GpuPanel gpu=gpu />
+                                            </div>
+                                            <div class="grid">
+                                                <ModelInfo model_info=model_info />
+                                                <ServerStats stats=server_stats status=status />
+                                            </div>
+                                            <div class="grid">
+                                                <AgentSummary agents=agents set_tab=set_tab />
+                                            </div>
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Settings => view! {
+                                        <div>
+                                            <div class="section">
+                                                <ProfileSwitcher profiles=profiles status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
+                                            </div>
+                                            <div class="section">
+                                                <SettingsPanel status=status set_toasts=set_toasts />
+                                            </div>
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Agents => view! {
+                                        <div class="section">
+                                            <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Chat => view! {
+                                        <div class="section">
+                                            <ChatPanel set_toasts=set_toasts />
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Bench => view! {
+                                        <div class="section">
+                                            <BenchPanel status=status set_toasts=set_toasts />
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Logs => view! {
+                                        <div class="section">
+                                            <LogViewer logs=logs />
+                                        </div>
+                                    }.into_any(),
+                                    Tab::Models => view! {
+                                        <div class="section">
+                                            <ModelsPanel set_toasts=set_toasts />
+                                        </div>
+                                    }.into_any(),
+                                }.into_any()
+                            }}
                         </div>
-                    }.into_any(),
-                    Tab::Agents => view! {
-                        <div class="section">
-                            <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
-                        </div>
-                    }.into_any(),
-                    Tab::Chat => view! {
-                        <div class="section">
-                            <ChatPanel set_toasts=set_toasts />
-                        </div>
-                    }.into_any(),
-                    Tab::Bench => view! {
-                        <div class="section">
-                            <BenchPanel status=status set_toasts=set_toasts />
-                        </div>
-                    }.into_any(),
-                    Tab::Logs => view! {
-                        <div class="section">
-                            <LogViewer logs=logs />
-                        </div>
-                    }.into_any(),
-                    Tab::Models => view! {
-                        <div class="section">
-                            <ModelsPanel set_toasts=set_toasts />
-                        </div>
-                    }.into_any(),
+                    </>
                 }.into_any()
-                }}
-            </div>
+            }}
 
             <ToastContainer toasts=toasts />
         </div>

@@ -185,6 +185,11 @@ async fn stream_chat(
     headers
         .set("Content-Type", "application/json")
         .map_err(|e| format!("{e:?}"))?;
+    if let Some(api_key) = crate::api::get_api_key() {
+        headers
+            .set("Authorization", &format!("Bearer {api_key}"))
+            .map_err(|e| format!("{e:?}"))?;
+    }
     opts.set_headers(&headers);
 
     opts.set_body(&JsValue::from_str(&body.to_string()));
@@ -203,6 +208,9 @@ async fn stream_chat(
     let resp: web_sys::Response = resp_value.dyn_into().map_err(|_| "not a Response")?;
 
     if !resp.ok() {
+        if resp.status() == 401 {
+            crate::api::notify_auth_required();
+        }
         return Err(format!("HTTP {}", resp.status()));
     }
 

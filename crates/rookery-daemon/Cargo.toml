@@ -25,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 include_dir = "0.7"
 mime_guess = "2"
 prometheus-client = "0.24"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

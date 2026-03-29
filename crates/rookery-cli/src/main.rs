@@ -2,6 +2,7 @@ mod client;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use client::DaemonClient;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -101,6 +102,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: ModelCommands,
     },
+    /// Authentication helpers
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCommands,
+    },
     /// Generate shell completions
     Completions {
         /// Shell type
@@ -192,6 +198,12 @@ enum AgentCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Generate a strong API key for config.toml
+    Generate,
+}
+
 // Response types matching daemon API
 #[derive(Deserialize)]
 struct StatusResponse {
@@ -258,10 +270,12 @@ struct AgentActionResponse {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let loaded_config = rookery_core::config::Config::load().ok();
     let daemon_url = cli.daemon.unwrap_or_else(|| {
-        let addr = rookery_core::config::Config::load()
+        let addr = loaded_config
+            .as_ref()
             .map(|c| c.listen)
-            .unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap());
+            .unwrap_or_else(|| "127.0.0.1:3000".parse().unwrap());
         let ip = if addr.ip().is_unspecified() {
             std::net::IpAddr::from([127, 0, 0, 1])
         } else {
@@ -269,7 +283,12 @@ async fn main() {
         };
         format!("http://{}:{}", ip, addr.port())
     });
-    let client = DaemonClient::new(&daemon_url);
+    let api_key = loaded_config
+        .as_ref()
+        .and_then(|config| config.api_key.clone())
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+    let client = DaemonClient::new(&daemon_url, api_key);
 
     let result = match cli.command {
         Commands::Start { profile, json } => cmd_start(&client, profile, json).await,
@@ -301,6 +320,9 @@ async fn main() {
             ModelCommands::List { json } => cmd_models_list(&client, json).await,
             ModelCommands::Pull { repo, quant } => cmd_models_pull(&client, &repo, quant).await,
             ModelCommands::Hardware { json } => cmd_hardware(&client, json).await,
+        },
+        Commands::Auth { cmd } => match cmd {
+            AuthCommands::Generate => cmd_auth_generate().await,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(
@@ -891,8 +913,12 @@ async fn cmd_logs(
     println!("following logs (Ctrl+C to stop)...\n");
 
     let url = format!("{}/api/events", client.base_url());
-    let response = reqwest::Client::new()
-        .get(&url)
+    let request = if let Some(api_key) = client.api_key() {
+        reqwest::Client::new().get(&url).bearer_auth(api_key)
+    } else {
+        reqwest::Client::new().get(&url)
+    };
+    let response = request
         .send()
         .await
         .map_err(|e| format!("failed to connect to SSE: {e}"))?;
@@ -924,6 +950,21 @@ async fn cmd_logs(
         }
     }
 
+    Ok(())
+}
+
+fn generate_api_key() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let suffix = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("rky-{suffix}")
+}
+
+async fn cmd_auth_generate() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", generate_api_key());
     Ok(())
 }
 
@@ -1675,6 +1716,7 @@ mod tests {
             vec!["rookery", "agent", "stop", "myagent"],
             vec!["rookery", "agent", "status"],
             vec!["rookery", "agent", "update", "myagent"],
+            vec!["rookery", "auth", "generate"],
         ];
 
         for args in &subcommands {
@@ -1770,6 +1812,14 @@ mod tests {
         let cli = Cli::try_parse_from(["rookery", "--daemon", "http://localhost:5000", "status"])
             .unwrap();
         assert_eq!(cli.daemon, Some("http://localhost:5000".to_string()));
+    }
+
+    #[test]
+    fn test_generate_api_key_format() {
+        let key = generate_api_key();
+        assert!(key.starts_with("rky-"));
+        assert_eq!(key.len(), 36);
+        assert!(key[4..].chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
     // =========================================================================

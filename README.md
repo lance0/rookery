@@ -43,14 +43,15 @@ rookery completions bash    # generate shell completions
 
 Open the dashboard at your configured `listen` address (default: `http://127.0.0.1:3000/`):
 
-- **Overview** — GPU gauges, server status, model info, server stats, agent panel with health metrics
-- **Settings** — profile switcher, sampling param editor (saves to config.toml), agent controls
+- **Overview** — GPU gauges, server status, model info, server stats, compact agent summary
+- **Settings** — profile switcher and sampling param editor (saves to config.toml)
+- **Agents** — expanded agent cards, controls, health detail, filtered logs
 - **Chat** — streaming chat playground (SSE proxy to llama-server)
 - **Bench** — PP + gen speed benchmark with error toasts
 - **Logs** — live log viewer
 - **Models** — search HuggingFace, browse quants, VRAM-aware recommendations, download
 
-Keyboard shortcuts: `1`-`6` switch tabs, `s` start, `x` stop, `t` toggle theme. Mobile responsive. All data streams via SSE with automatic reconnection.
+Keyboard shortcuts: `1`-`7` switch tabs, `s` start, `x` stop, `t` toggle theme. Mobile responsive. All data streams via SSE with automatic reconnection.
 
 ## Architecture
 
@@ -68,6 +69,7 @@ The daemon manages the llama-server lifecycle, monitors GPU via NVML, captures l
 ```toml
 llama_server = "/path/to/llama-server"
 default_profile = "qwen_fast"
+api_key = "rky-..." # optional shared admin key
 idle_timeout = 1800
 
 [models.qwen35]
@@ -128,6 +130,8 @@ The daemon exposes a REST API:
 | `/api/models/recommend` | GET | VRAM-aware quant recommendation |
 | `/api/models/cached` | GET | List locally cached models |
 | `/api/models/pull` | POST | Download a model |
+
+When `api_key` is configured, all API routes require `Authorization: Bearer <key>` except `/api/health` and `/metrics`. Browser SSE uses `/api/events?token=<key>`, and the dashboard stores the key in localStorage after the user unlocks it once.
 
 `/metrics` exposes Prometheus-compatible text for GPU, server, canary, agent, chat, and SSE telemetry. GPU and health-style gauges are computed on scrape from current daemon state; restart and request counters are daemon-runtime counters and reset when `rookeryd` restarts. `idle_timeout` enables daemon-side auto-sleep: after inference inactivity, the backend unloads into `sleeping` state and the next `/api/chat` request wakes it transparently.
 

@@ -357,6 +357,7 @@ mod tests {
             llama_server: PathBuf::from("/mock/llama-server"),
             default_profile: "test".into(),
             listen: "127.0.0.1:19876".parse().unwrap(),
+            api_key: None,
             idle_timeout: None,
             models: HashMap::from([(
                 "test_model".into(),

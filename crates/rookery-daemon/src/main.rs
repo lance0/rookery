@@ -1,4 +1,5 @@
 mod app_state;
+mod auth;
 pub mod canary;
 mod metrics;
 mod routes;
@@ -8,6 +9,7 @@ pub mod test_utils;
 
 use app_state::AppState;
 use axum::Router;
+use axum::middleware;
 use axum::routing::{get, post, put};
 use rookery_core::config::Config;
 use rookery_core::state::{AgentPersistence, ServerState, StatePersistence};
@@ -429,36 +431,42 @@ async fn main() {
         }
     });
 
+    let auth_layer = middleware::from_fn_with_state(state.clone(), auth::require_api_key);
+
+    let protected_api = Router::new()
+        .route("/status", get(routes::get_status))
+        .route("/gpu", get(routes::get_gpu))
+        .route("/logs", get(routes::get_logs))
+        .route("/events", get(sse::get_events))
+        .route("/start", post(routes::post_start))
+        .route("/stop", post(routes::post_stop))
+        .route("/sleep", post(routes::post_sleep))
+        .route("/wake", post(routes::post_wake))
+        .route("/swap", post(routes::post_swap))
+        .route("/profiles", get(routes::get_profiles))
+        .route("/bench", get(routes::get_bench))
+        .route("/agents", get(routes::get_agents))
+        .route("/agents/start", post(routes::post_agent_start))
+        .route("/agents/stop", post(routes::post_agent_stop))
+        .route("/agents/{name}/update", post(routes::post_agent_update))
+        .route("/agents/{name}/health", get(routes::get_agent_health))
+        .route("/config", get(routes::get_config))
+        .route("/config/profile/{name}", put(routes::put_profile))
+        .route("/model-info", get(routes::get_model_info))
+        .route("/server-stats", get(routes::get_server_stats))
+        .route("/chat", post(routes::post_chat))
+        .route("/hardware", get(routes::get_hardware))
+        .route("/models/search", get(routes::get_models_search))
+        .route("/models/quants", get(routes::get_models_quants))
+        .route("/models/recommend", get(routes::get_models_recommend))
+        .route("/models/cached", get(routes::get_models_cached))
+        .route("/models/pull", post(routes::post_models_pull))
+        .route_layer(auth_layer);
+
     let app = Router::new()
         .route("/api/health", get(routes::get_health))
-        .route("/api/status", get(routes::get_status))
-        .route("/api/gpu", get(routes::get_gpu))
-        .route("/api/logs", get(routes::get_logs))
-        .route("/api/events", get(sse::get_events))
-        .route("/api/start", post(routes::post_start))
-        .route("/api/stop", post(routes::post_stop))
-        .route("/api/sleep", post(routes::post_sleep))
-        .route("/api/wake", post(routes::post_wake))
-        .route("/api/swap", post(routes::post_swap))
-        .route("/api/profiles", get(routes::get_profiles))
-        .route("/api/bench", get(routes::get_bench))
-        .route("/api/agents", get(routes::get_agents))
-        .route("/api/agents/start", post(routes::post_agent_start))
-        .route("/api/agents/stop", post(routes::post_agent_stop))
-        .route("/api/agents/{name}/update", post(routes::post_agent_update))
-        .route("/api/agents/{name}/health", get(routes::get_agent_health))
-        .route("/api/config", get(routes::get_config))
-        .route("/api/config/profile/{name}", put(routes::put_profile))
-        .route("/api/model-info", get(routes::get_model_info))
-        .route("/api/server-stats", get(routes::get_server_stats))
-        .route("/api/chat", post(routes::post_chat))
+        .nest("/api", protected_api)
         .route("/metrics", get(routes::get_metrics))
-        .route("/api/hardware", get(routes::get_hardware))
-        .route("/api/models/search", get(routes::get_models_search))
-        .route("/api/models/quants", get(routes::get_models_quants))
-        .route("/api/models/recommend", get(routes::get_models_recommend))
-        .route("/api/models/cached", get(routes::get_models_cached))
-        .route("/api/models/pull", post(routes::post_models_pull))
         .fallback(routes::get_dashboard)
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)) // 1MB request body limit
         .with_state(state);
