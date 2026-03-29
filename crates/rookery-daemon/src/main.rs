@@ -379,17 +379,20 @@ async fn main() {
         .expect("failed to bind");
 
     tracing::info!(%listen, "rookeryd listening");
-    let shutdown_agent_mgr = shutdown_state.agent_manager.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            // Set shutdown flag IMMEDIATELY so watchdog stops restarting agents
-            shutdown_agent_mgr.begin_shutdown();
-        })
-        .await
-        .expect("server error");
 
-    // Clean up child processes on shutdown
+    // Run axum in a spawned task so we can abort it on shutdown
+    let server_handle = tokio::spawn(axum::serve(listener, app).into_future());
+
+    // Wait for shutdown signal
+    shutdown_signal().await;
+
+    // Set shutdown flag so watchdog stops restarting agents
+    shutdown_state.agent_manager.begin_shutdown();
+
+    // Abort the axum server (don't wait for SSE streams to drain)
+    server_handle.abort();
+
+    // Clean up child processes
     tracing::info!("shutting down — stopping agents and server");
     shutdown_state.agent_manager.stop_all().await;
     let _ = shutdown_state.backend.lock().await.stop().await;

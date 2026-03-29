@@ -1259,6 +1259,24 @@ name = "test-agent"
         assert!(all_dead, "all processes should be dead after stop_all");
     }
 
+    #[tokio::test]
+    async fn test_watchdog_shutdown_notify_wakes_immediately() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let manager = Arc::new(AgentManager::new(log_buffer));
+
+        let handle = manager.spawn_watchdog(HashMap::new());
+
+        // Give the task a moment to enter the select! wait. Without
+        // shutdown_notify this would sleep for the full 30s poll interval.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        manager.begin_shutdown();
+
+        let join = tokio::time::timeout(std::time::Duration::from_millis(250), handle)
+            .await
+            .expect("watchdog should wake immediately on shutdown");
+        join.expect("watchdog task should exit cleanly");
+    }
+
     // === VAL-AGENT-001: list() returns correct status and cleans up dead agents ===
     #[tokio::test]
     async fn test_agent_list_returns_status_and_cleans_dead() {
