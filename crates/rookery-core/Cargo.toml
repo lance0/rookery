@@ -2,6 +2,9 @@
 name = "rookery-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "Config, state machine, and shared types for Rookery"
+repository = "https://github.com/lance0/rookery"
 
 [dependencies]
 serde = { workspace = true }

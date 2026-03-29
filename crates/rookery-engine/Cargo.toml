@@ -2,6 +2,9 @@
 name = "rookery-engine"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "Process manager, GPU monitor, health checker, and agent manager for Rookery"
+repository = "https://github.com/lance0/rookery"
 
 [dependencies]
 rookery-core = { path = "../rookery-core" }

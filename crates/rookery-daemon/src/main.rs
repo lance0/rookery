@@ -23,6 +23,13 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 
 #[tokio::main]
 async fn main() {
+    // Handle --version / -V before initializing anything
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("rookeryd {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

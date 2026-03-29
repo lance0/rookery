@@ -2,6 +2,9 @@
 name = "rookery-daemon"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "REST API daemon for Rookery with embedded dashboard"
+repository = "https://github.com/lance0/rookery"
 
 [[bin]]
 name = "rookeryd"

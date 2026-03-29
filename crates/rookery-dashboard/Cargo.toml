@@ -2,6 +2,9 @@
 name = "rookery-dashboard"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Leptos WASM dashboard for Rookery"
+repository = "https://github.com/lance0/rookery"
 
 [dependencies]
 leptos = { version = "0.7", features = ["csr"] }

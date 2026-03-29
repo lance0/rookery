@@ -7,3 +7,5 @@ crates/rookery-dashboard/target/
 crates/rookery-dashboard/Cargo.lock
 # Factory mission infrastructure
 .factory/
+# Makefile generated
+rookery.service.generated
