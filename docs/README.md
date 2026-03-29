@@ -14,6 +14,7 @@
 ## Reference
 - [API Reference](api.md) — REST API endpoints
 - [CLI Reference](cli.md) — command-line interface
+- [Testing](testing.md) — unit tests, chaos tests, failure mode coverage
 - [Architecture](architecture.md) — codebase structure, backend trait, design decisions
 - [Competitive Landscape](competitive-landscape.md) — how Rookery compares to alternatives
 - [vLLM Integration Summary](vllm-integration-summary.md) — what was built, how to test

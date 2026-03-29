@@ -4,7 +4,7 @@ SYSTEMD_DIR = /etc/systemd/system
 SERVICE_USER ?= $(shell whoami)
 HF_HOME ?= $(HOME)/.cache/huggingface
 
-.PHONY: build install uninstall enable disable restart dashboard clean
+.PHONY: build install uninstall enable disable restart dashboard clean test chaos-test
 
 build:
 	cargo build --release
@@ -50,6 +50,12 @@ disable:
 
 restart:
 	systemctl restart rookery
+
+test:
+	cargo test --workspace
+
+chaos-test:
+	./tests/chaos/run-all.sh
 
 clean:
 	cargo clean
