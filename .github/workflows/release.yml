@@ -45,8 +45,13 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../rookery-${{ matrix.target }}.tar.gz rookeryd rookery
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/rookeryd staging/
+          cp target/${{ matrix.target }}/release/rookery staging/
+          cp config.example.toml staging/
+          cp rookery.service.in staging/
+          cd staging
+          tar czvf ../rookery-${{ matrix.target }}.tar.gz *
           cd -
 
       - name: Upload artifact

@@ -70,6 +70,8 @@ Returns:
 
 If the update command exits non-zero, rookery attempts to restart the previous agent code and returns a failure response instead of leaving the agent down.
 
+> **Note**: The update command is executed via `sh -c` and its full text is logged to journald. Avoid embedding secrets or tokens directly in `update_command` — use environment variables or credential files instead.
+
 ## Reliability Features
 
 ### Watchdog (restart_on_crash)

@@ -35,7 +35,7 @@ See [Installation](#installation) below for all methods.
 - **Auto-sleep** — unloads the model after idle timeout, wakes transparently on next request
 - **Inference canary** — periodic health checks detect CUDA zombies and auto-restart
 - **Prometheus metrics** — `/metrics` endpoint for GPU, server, agent, and canary telemetry
-- **Optional API key auth** — single bearer token gates all API and dashboard access
+- **Optional API key auth** — single bearer token protects API and SSE data routes (dashboard shell is public, data requires auth)
 - **systemd integration** — OOM protection, journal logging, graceful shutdown
 
 ### vs Alternatives
@@ -207,11 +207,11 @@ rookery auth generate       # generate a random API key
 rookery completions <shell> # generate shell completions
 ```
 
-All commands support `--json` for scripting.
+Most commands support `--json` for scripting.
 
 ## API
 
-The daemon exposes a REST API. When `api_key` is configured, all routes require `Authorization: Bearer <key>` except `/api/health` and `/metrics`.
+The daemon exposes a REST API. When `api_key` is configured, all `/api/*` data routes and SSE require `Authorization: Bearer <key>`. Exempt: `/api/health`, `/metrics`, and the dashboard HTML shell (which loads but shows an auth prompt before fetching data).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

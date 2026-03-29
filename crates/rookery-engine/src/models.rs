@@ -169,10 +169,10 @@ impl Default for HfClient {
 impl HfClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("rookery/0.4.0")
+            .user_agent(format!("rookery/{}", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("failed to create HTTP client");
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
     }
 

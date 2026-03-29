@@ -31,7 +31,7 @@ pub async fn get_events(
                 Ok(Event::default()
                     .event("gpu")
                     .json_data(serde_json::json!({ "gpus": stats }))
-                    .unwrap())
+                    .unwrap_or_else(|_| Event::default().event("gpu").data("{}")))
             });
 
     // State change stream — fires on start/stop/swap
@@ -41,7 +41,7 @@ pub async fn get_events(
             Ok(value) => Some(Ok(Event::default()
                 .event("state")
                 .json_data(&value)
-                .unwrap())),
+                .unwrap_or_else(|_| Event::default().event("state").data("{}")))),
             Err(_) => None, // lagged, skip
         })
     });
@@ -61,7 +61,7 @@ pub async fn get_events(
     let initial_event = stream::once(futures_util::future::ready(Ok(Event::default()
         .event("state")
         .json_data(&initial_status)
-        .unwrap())));
+        .unwrap_or_else(|_| Event::default().event("state").data("{}")))));
 
     // Keep a guard captured by the stream so the current-connection gauge
     // is decremented when the stream is dropped or completes.

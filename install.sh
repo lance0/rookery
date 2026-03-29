@@ -6,6 +6,7 @@ set -e
 
 REPO="lance0/rookery"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rookery"
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -60,13 +61,28 @@ else
   sudo mv "$TMPDIR/rookery" "$INSTALL_DIR/rookery"
 fi
 
+# Create config directory and seed example config if no config exists
+mkdir -p "$CONFIG_DIR"
+if [ ! -f "$CONFIG_DIR/config.toml" ]; then
+  if [ -f "$TMPDIR/config.example.toml" ]; then
+    cp "$TMPDIR/config.example.toml" "$CONFIG_DIR/config.toml"
+    echo "Created default config at $CONFIG_DIR/config.toml"
+  fi
+else
+  echo "Config already exists at $CONFIG_DIR/config.toml (not overwritten)"
+fi
+
 echo ""
 echo "Installed rookeryd and rookery to $INSTALL_DIR"
 echo ""
 echo "Next steps:"
-echo "  1. Create config:  mkdir -p ~/.config/rookery && cp config.example.toml ~/.config/rookery/config.toml"
-echo "  2. Edit config:    \$EDITOR ~/.config/rookery/config.toml"
+echo "  1. Edit config:    \$EDITOR $CONFIG_DIR/config.toml"
+echo "  2. Set llama_server path to your llama-server binary"
 echo "  3. Start daemon:   rookeryd &"
-echo "  4. Or with systemd: sudo make install  (from source checkout for systemd unit)"
+echo ""
+echo "For systemd setup, copy the service template:"
+echo "  sudo cp $TMPDIR/rookery.service.in /etc/systemd/system/rookery.service"
+echo "  # Edit the file to set User, ExecStart path, and HF_HOME"
+echo "  sudo systemctl daemon-reload && sudo systemctl enable --now rookery"
 echo ""
 echo "Run 'rookery --help' to get started"
