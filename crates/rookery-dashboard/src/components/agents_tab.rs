@@ -22,6 +22,26 @@ pub fn AgentsTab(
     set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     let (updating_agent, set_updating_agent) = signal(Option::<String>::None);
+    let (health_details, set_health_details) = signal(std::collections::HashMap::<String, serde_json::Value>::new());
+
+    // Fetch health details for all running agents whenever agents signal changes
+    Effect::new(move |_| {
+        let data = agents.get();
+        let running_names: Vec<String> = data.agents.iter()
+            .filter(|a| a.status == serde_json::json!("running"))
+            .map(|a| a.name.clone())
+            .collect();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut details = std::collections::HashMap::new();
+            for name in running_names {
+                if let Ok(health) = api::fetch_agent_health(&name).await {
+                    details.insert(name, health);
+                }
+            }
+            set_health_details.set(details);
+        });
+    });
 
     let agent_log_ref = NodeRef::<leptos::html::Div>::new();
 
@@ -41,6 +61,8 @@ pub fn AgentsTab(
         <div>
             {move || {
                 let data = agents.get();
+                let details = health_details.get();
+
                 if data.configured.is_empty() {
                     return view! { <div class="card"><div class="empty">"no agents configured"</div></div> }.into_any();
                 }
@@ -54,6 +76,7 @@ pub fn AgentsTab(
                     <div class="agent-cards">
                         {data.configured.into_iter().map(|name| {
                             let agent = running_map.get(&name);
+                            let detail = details.get(&name);
                             let is_running = agent.is_some();
                             let version = agent.and_then(|a| a.version.clone());
                             let pid = agent.map(|a| a.pid);
@@ -63,6 +86,27 @@ pub fn AgentsTab(
                             let lifetime = agent.and_then(|a| a.lifetime_errors).unwrap_or(0);
                             let last_reason = agent.and_then(|a| a.last_restart_reason.clone());
                             let started_at = agent.and_then(|a| a.started_at.clone());
+
+                            // Watchdog detail from health API
+                            let watchdog_state = detail
+                                .and_then(|d| d["watchdog"]["state"].as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let consecutive_crashes = detail
+                                .and_then(|d| d["watchdog"]["consecutive_crashes"].as_u64())
+                                .unwrap_or(0);
+                            let backoff_secs = detail
+                                .and_then(|d| d["watchdog"]["backoff_secs"].as_u64())
+                                .unwrap_or(0);
+                            let dep_ports: Vec<(u16, bool)> = detail
+                                .and_then(|d| d["dependency_ports"].as_array())
+                                .map(|arr| arr.iter().filter_map(|p| {
+                                    Some((p["port"].as_u64()? as u16, p["up"].as_bool()?))
+                                }).collect())
+                                .unwrap_or_default();
+                            let last_restart_at = detail
+                                .and_then(|d| d["last_restart_at"].as_str())
+                                .map(|s| s.to_string());
 
                             let dot_class = if is_running { "agent-dot running" } else { "agent-dot stopped" };
                             let status_text = if is_running { "running" } else { "stopped" };
@@ -120,6 +164,12 @@ pub fn AgentsTab(
                                 });
                             };
 
+                            let watchdog_class = match watchdog_state.as_str() {
+                                "healthy" => "watchdog-badge healthy",
+                                "backing_off" => "watchdog-badge backing-off",
+                                _ => "watchdog-badge idle",
+                            };
+
                             view! {
                                 <div class="agent-card card">
                                     <div class="agent-card-header">
@@ -154,6 +204,12 @@ pub fn AgentsTab(
                                                 {last_reason.map(|r| format!(" (last: {r})"))}
                                             </span>
                                         </div>
+                                        {last_restart_at.map(|t| view! {
+                                            <div class="agent-detail">
+                                                <span class="agent-detail-label">"Last restart"</span>
+                                                <span class="agent-detail-value">{t}</span>
+                                            </div>
+                                        })}
                                         <div class="agent-detail">
                                             <span class="agent-detail-label">"Errors"</span>
                                             <span class={if errors > 0 { "agent-detail-value agent-errors" } else { "agent-detail-value" }}>
@@ -165,6 +221,36 @@ pub fn AgentsTab(
                                             </span>
                                         </div>
                                     </div>
+                                    // Watchdog section
+                                    {is_running.then(|| view! {
+                                        <div class="agent-card-watchdog">
+                                            <div class="agent-detail">
+                                                <span class="agent-detail-label">"Watchdog"</span>
+                                                <span class=watchdog_class>{watchdog_state.clone()}</span>
+                                            </div>
+                                            {(consecutive_crashes > 0).then(|| view! {
+                                                <div class="agent-detail">
+                                                    <span class="agent-detail-label">"Crashes"</span>
+                                                    <span class="agent-detail-value agent-errors">
+                                                        {format!("{consecutive_crashes} (backoff: {backoff_secs}s)")}
+                                                    </span>
+                                                </div>
+                                            })}
+                                            {(!dep_ports.is_empty()).then(|| {
+                                                let ports_view: Vec<_> = dep_ports.iter().map(|(port, up)| {
+                                                    let class = if *up { "dep-port up" } else { "dep-port down" };
+                                                    let label = if *up { "up" } else { "down" };
+                                                    view! { <span class=class>{format!(":{port} {label}")}</span> }
+                                                }).collect();
+                                                view! {
+                                                    <div class="agent-detail">
+                                                        <span class="agent-detail-label">"Deps"</span>
+                                                        <span class="agent-detail-value">{ports_view}</span>
+                                                    </div>
+                                                }
+                                            })}
+                                        </div>
+                                    })}
                                     <div class="agent-card-actions">
                                         <button
                                             class="btn"

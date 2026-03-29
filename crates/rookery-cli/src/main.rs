@@ -723,6 +723,28 @@ async fn cmd_agent_describe(
     if let Some(started) = resp["started_at"].as_str() {
         println!("Started:  {started}");
     }
+    if let Some(at) = resp["last_restart_at"].as_str() {
+        println!("Last restart: {at}");
+    }
+
+    // Watchdog detail
+    if let Some(wd) = resp.get("watchdog") {
+        let state = wd["state"].as_str().unwrap_or("unknown");
+        let crashes = wd["consecutive_crashes"].as_u64().unwrap_or(0);
+        if crashes > 0 {
+            let backoff = wd["backoff_secs"].as_u64().unwrap_or(0);
+            println!("Watchdog: {state} ({crashes} crashes, {backoff}s backoff)");
+        } else {
+            println!("Watchdog: {state}");
+        }
+    }
+    if let Some(deps) = resp["dependency_ports"].as_array() {
+        for dep in deps {
+            let port = dep["port"].as_u64().unwrap_or(0);
+            let up = dep["up"].as_bool().unwrap_or(false);
+            println!("Dep port: :{port} {}", if up { "up" } else { "DOWN" });
+        }
+    }
 
     Ok(())
 }

@@ -84,6 +84,14 @@ pub async fn swap_profile(profile: &str) -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+pub async fn fetch_agent_health(name: &str) -> Result<serde_json::Value, String> {
+    let resp = Request::get(&format!("/api/agents/{name}/health"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 pub async fn start_agent(name: &str) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "name": name });
     let resp = Request::post("/api/agents/start")

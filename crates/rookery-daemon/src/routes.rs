@@ -1002,10 +1002,12 @@ pub async fn get_agents(State(state): State<Arc<AppState>>) -> Json<AgentsRespon
 pub async fn get_agent_health(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Result<Json<rookery_engine::agent::AgentInfo>, StatusCode> {
+) -> Result<Json<rookery_engine::agent::AgentHealthDetail>, StatusCode> {
+    let config = state.config.read().await;
+    let agent_config = config.agents.get(&name);
     state
         .agent_manager
-        .get_health(&name)
+        .get_health_detail(&name, agent_config)
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)

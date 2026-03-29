@@ -309,6 +309,31 @@ body {
 .agent-detail-label { color: var(--muted); }
 .agent-detail-value { color: var(--fg); font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
+.agent-card-watchdog {
+    margin-bottom: 8px;
+    padding: 6px 0;
+    border-top: 1px dashed var(--border);
+}
+
+.watchdog-badge {
+    font-size: 11px;
+    font-family: var(--mono);
+    font-weight: 600;
+}
+
+.watchdog-badge.healthy { color: var(--green); }
+.watchdog-badge.idle { color: var(--dim); }
+.watchdog-badge.backing-off { color: var(--amber); }
+
+.dep-port {
+    font-size: 11px;
+    font-family: var(--mono);
+    margin-right: 8px;
+}
+
+.dep-port.up { color: var(--green); }
+.dep-port.down { color: var(--red); }
+
 .agent-card-actions {
     display: flex;
     gap: 6px;

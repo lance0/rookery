@@ -33,6 +33,33 @@ pub struct AgentInfo {
     pub lifetime_errors: Option<u32>,
 }
 
+/// Extended health detail for an agent, including watchdog state.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentHealthDetail {
+    #[serde(flatten)]
+    pub info: AgentInfo,
+    pub watchdog: WatchdogState,
+    pub dependency_ports: Vec<DependencyPort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restart_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WatchdogState {
+    /// "idle", "backing_off", "healthy"
+    pub state: String,
+    /// Current consecutive crash count (0 = no recent crashes)
+    pub consecutive_crashes: u32,
+    /// Current backoff delay in seconds (0 if not backing off)
+    pub backoff_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyPort {
+    pub port: u16,
+    pub up: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
@@ -72,6 +99,8 @@ pub struct AgentManager {
     shutdown_notify: tokio::sync::Notify,
     /// Suppresses dependency port bounce logic while the backend is intentionally sleeping.
     dependency_bounce_suppressed: AtomicBool,
+    /// Dependency port liveness, shared between watchdog and health queries.
+    port_status: Mutex<HashMap<u16, bool>>,
 }
 
 impl AgentManager {
@@ -91,6 +120,7 @@ impl AgentManager {
             shutdown_notify: tokio::sync::Notify::new(),
             dependency_bounce_suppressed: AtomicBool::new(false),
             crash_counts: Mutex::new(HashMap::new()),
+            port_status: Mutex::new(HashMap::new()),
         }
     }
 
@@ -471,6 +501,64 @@ impl AgentManager {
         })
     }
 
+    /// Get extended health detail including watchdog state for a specific agent.
+    pub async fn get_health_detail(
+        &self,
+        name: &str,
+        config: Option<&AgentConfig>,
+    ) -> Option<AgentHealthDetail> {
+        let info = self.get_health(name).await?;
+
+        let crash_count = {
+            let counts = self.crash_counts.lock().await;
+            counts.get(name).copied().unwrap_or(0)
+        };
+
+        let backoff_secs = if crash_count > 0 {
+            (1u64 << (crash_count - 1).min(6)).min(60)
+        } else {
+            0
+        };
+
+        let watchdog_state = if crash_count > 0 {
+            "backing_off".to_string()
+        } else if info.uptime_secs.unwrap_or(0) > 300 {
+            "healthy".to_string()
+        } else {
+            "idle".to_string()
+        };
+
+        let dependency_ports = if let Some(cfg) = config {
+            if let Some(port) = cfg.depends_on_port {
+                let port_up = {
+                    let ports = self.port_status.lock().await;
+                    ports.get(&port).copied().unwrap_or(true)
+                };
+                vec![DependencyPort { port, up: port_up }]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        let last_restart_at = {
+            let agents = self.agents.lock().await;
+            agents.get(name).and_then(|a| a.last_restart_at)
+        };
+
+        Some(AgentHealthDetail {
+            info,
+            watchdog: WatchdogState {
+                state: watchdog_state,
+                consecutive_crashes: crash_count,
+                backoff_secs,
+            },
+            dependency_ports,
+            last_restart_at,
+        })
+    }
+
     /// Record restart metrics on a newly-started agent.
     pub async fn record_restart(
         &self,
@@ -525,8 +613,12 @@ impl AgentManager {
             // Initialized to true so a cold start doesn't trigger a false bounce.
             let tracked_ports: std::collections::HashSet<u16> =
                 configs.values().filter_map(|c| c.depends_on_port).collect();
-            let mut port_was_up: HashMap<u16, bool> =
-                tracked_ports.iter().map(|&p| (p, true)).collect();
+            {
+                let mut port_status = manager.port_status.lock().await;
+                for &p in &tracked_ports {
+                    port_status.entry(p).or_insert(true);
+                }
+            }
 
             loop {
                 // Check shutdown flag before doing anything
@@ -586,7 +678,10 @@ impl AgentManager {
                         let is_up =
                             crate::health::check_health(port, std::time::Duration::from_secs(3))
                                 .await;
-                        let was_up = port_was_up.get(&port).copied().unwrap_or(true);
+                        let was_up = {
+                            let ps = manager.port_status.lock().await;
+                            ps.get(&port).copied().unwrap_or(true)
+                        };
 
                         if is_up && !was_up {
                             tracing::info!(
@@ -600,7 +695,7 @@ impl AgentManager {
                             if !is_up {
                                 tracing::warn!(port, "dependency port is down");
                             }
-                            port_was_up.insert(port, is_up);
+                            manager.port_status.lock().await.insert(port, is_up);
                         }
                     }
 
