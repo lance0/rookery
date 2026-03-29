@@ -7,7 +7,8 @@ crates/
   rookery-core/       Config, state machine, shared types
   rookery-engine/     Process manager, GPU monitor, health checker,
                       log buffer, agent manager, model discovery
-  rookery-daemon/     Axum REST API, SSE, embedded dashboard
+  rookery-daemon/     Axum REST API, SSE, auth middleware,
+                      metrics, canary, embedded dashboard
   rookery-dashboard/  Leptos WASM frontend (built with trunk)
   rookery-cli/        Clap CLI client
 ```

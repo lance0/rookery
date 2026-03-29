@@ -286,8 +286,8 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] LICENSE file (dual MIT/Apache-2.0)
 - [x] CONTRIBUTING.md (dev setup, code style, project structure, PR guidelines)
 - [ ] CONTRIBUTING.md (build instructions, PR guidelines, code style)
-- [ ] Review all docs for accuracy and completeness
-- [ ] Remove any hardcoded paths or lancebox-specific references from code
+- [x] Review all docs for accuracy and completeness
+- [x] Remove any hardcoded paths or lancebox-specific references from code
 - [ ] Publish to crates.io (optional — evaluate if workspace structure allows it)
 
 ## Future

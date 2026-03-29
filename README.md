@@ -20,7 +20,7 @@ rookery swap qwen_thinking         # hot-swap to another model profile
 rookery bench                      # quick PP + gen speed benchmark
 ```
 
-Open the dashboard at `http://localhost:3131` — live GPU gauges, profile switcher, agent controls, chat playground, model browser.
+Open the dashboard at your configured address (default `http://localhost:3000`) — live GPU gauges, profile switcher, agent controls, chat playground, model browser.
 
 See [Installation](#installation) below for all methods.
 

@@ -71,6 +71,7 @@ threads_batch = 24              # CPU threads for batch processing
 batch_size = 4096               # batch size
 ubatch_size = 1024              # micro-batch size
 gpu_layers = -1                 # -1 = all layers on GPU
+gpu_index = 0                   # GPU device index (optional, for multi-GPU setups)
 cache_type_k = "q8_0"          # KV cache key quantization
 cache_type_v = "q8_0"          # KV cache value quantization
 flash_attention = true          # enable flash attention
@@ -156,15 +157,15 @@ rookery swap qwen_fast       # swaps between backends seamlessly
 See [Agent Management](agents.md) for full documentation.
 
 ```toml
-[agents.hermes]
-command = "/home/lance/.local/bin/hermes"
-args = ["gateway", "run", "--replace"]
+[agents.my_agent]
+command = "/path/to/agent"
+args = ["run"]
 auto_start = true
 restart_on_swap = true
 restart_on_crash = true
 depends_on_port = 8081
 version_file = "/path/to/pyproject.toml"
-update_command = "/home/lance/.local/bin/hermes update"
+update_command = "/path/to/agent update"
 update_workdir = "/path/to/agent/repo"
-restart_on_error_patterns = ["telegram.error.TimedOut"]
+restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 ```

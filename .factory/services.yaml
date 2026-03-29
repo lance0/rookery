@@ -1,9 +1,0 @@
-commands:
-  init: bash .factory/init.sh
-  install: echo "No install step needed — Rust uses cargo"
-  build: cargo build --release
-  test: cargo test --workspace
-  typecheck: cargo check --workspace
-  lint: cargo clippy --workspace
-
-services: {}

@@ -109,7 +109,7 @@ rookery status
 rookery gpu
 
 # Open dashboard
-open http://localhost:3131
+open http://localhost:3000
 
 # Manual start (if auto_start is not set)
 rookery start

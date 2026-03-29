@@ -5,20 +5,19 @@ Rookery manages external processes (agents) alongside the inference server. Agen
 ## Configuration
 
 ```toml
-[agents.hermes]
-command = "/home/lance/.local/bin/hermes"
-args = ["gateway", "run", "--replace"]
+[agents.my_agent]
+command = "/path/to/agent"
+args = ["run"]
 auto_start = true                    # start when daemon starts
 restart_on_swap = true               # restart when model is hot-swapped
 restart_on_crash = true              # watchdog auto-restarts on crash
 depends_on_port = 8081               # bounce when this port recovers (server restart)
 version_file = "/path/to/pyproject.toml"  # read version from project file
-update_command = "/home/lance/.local/bin/hermes update"  # run for updates
+update_command = "/path/to/agent update"  # run for updates
 update_workdir = "/path/to/agent/repo"    # optional working directory for updates
 restart_on_error_patterns = [        # immediate restart on these stderr patterns
-    "telegram.error.TimedOut",
-    "ReadTimeout",
-    "deleteWebhook"
+    "ConnectionError",
+    "ReadTimeout"
 ]
 ```
 
