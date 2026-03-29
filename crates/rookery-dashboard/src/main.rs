@@ -75,6 +75,10 @@ pub struct AgentInfo {
     pub error_count: Option<u32>,
     #[serde(default)]
     pub lifetime_errors: Option<u32>,
+    #[serde(default)]
+    pub last_restart_reason: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,6 +99,7 @@ pub struct ModelInfoData {
 pub enum Tab {
     Overview,
     Settings,
+    Agents,
     Chat,
     Bench,
     Logs,
@@ -316,10 +321,11 @@ fn App() -> impl IntoView {
             match key.as_str() {
                 "1" => set_tab.set(Tab::Overview),
                 "2" => set_tab.set(Tab::Settings),
-                "3" => set_tab.set(Tab::Chat),
-                "4" => set_tab.set(Tab::Bench),
-                "5" => set_tab.set(Tab::Logs),
-                "6" => set_tab.set(Tab::Models),
+                "3" => set_tab.set(Tab::Agents),
+                "4" => set_tab.set(Tab::Chat),
+                "5" => set_tab.set(Tab::Bench),
+                "6" => set_tab.set(Tab::Logs),
+                "7" => set_tab.set(Tab::Models),
                 "t" => {
                     set_is_light.update(|light| *light = toggle_theme(*light));
                 }
@@ -396,10 +402,11 @@ fn App() -> impl IntoView {
             <div class="tab-bar">
                 {tab_btn(Tab::Overview, "Overview", "1")}
                 {tab_btn(Tab::Settings, "Settings", "2")}
-                {tab_btn(Tab::Chat, "Chat", "3")}
-                {tab_btn(Tab::Bench, "Bench", "4")}
-                {tab_btn(Tab::Logs, "Logs", "5")}
-                {tab_btn(Tab::Models, "Models", "6")}
+                {tab_btn(Tab::Agents, "Agents", "3")}
+                {tab_btn(Tab::Chat, "Chat", "4")}
+                {tab_btn(Tab::Bench, "Bench", "5")}
+                {tab_btn(Tab::Logs, "Logs", "6")}
+                {tab_btn(Tab::Models, "Models", "7")}
             </div>
 
             <div class="tab-content">
@@ -415,19 +422,23 @@ fn App() -> impl IntoView {
                                 <ServerStats stats=server_stats status=status />
                             </div>
                             <div class="grid">
-                                <AgentPanel agents=agents set_agents=set_agents set_toasts=set_toasts />
+                                <AgentSummary agents=agents set_tab=set_tab />
                             </div>
                         </div>
                     }.into_any(),
                     Tab::Settings => view! {
                         <div>
-                            <div class="grid">
+                            <div class="section">
                                 <ProfileSwitcher profiles=profiles status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
-                                <AgentPanel agents=agents set_agents=set_agents set_toasts=set_toasts />
                             </div>
                             <div class="section">
                                 <SettingsPanel status=status set_toasts=set_toasts />
                             </div>
+                        </div>
+                    }.into_any(),
+                    Tab::Agents => view! {
+                        <div class="section">
+                            <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
                         </div>
                     }.into_any(),
                     Tab::Chat => view! {

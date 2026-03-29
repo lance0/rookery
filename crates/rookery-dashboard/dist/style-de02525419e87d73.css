@@ -255,7 +255,66 @@ body {
 .agent-version { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-right: 8px; }
 .agent-uptime { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-right: 8px; }
 .agent-restarts { font-size: 10px; color: var(--amber); font-family: var(--mono); margin-right: 8px; }
-.agent-errors { font-size: 10px; color: #f04040; font-weight: 600; font-family: var(--mono); margin-right: 8px; }
+.agent-errors { font-size: 10px; color: var(--red); font-weight: 600; font-family: var(--mono); margin-right: 8px; }
+
+/* Agent Summary (Overview pill view) */
+.agent-summary { transition: border-color 0.15s; }
+.agent-summary:hover { border-color: var(--accent); }
+.agent-summary-link { float: right; font-size: 10px; color: var(--muted); font-weight: 400; }
+
+.agent-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.agent-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--dim);
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+}
+
+.agent-pill .dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.agent-pill .dot.running { background: var(--green); }
+.agent-pill .dot.stopped { background: var(--muted); }
+.agent-pill-status { color: var(--muted); }
+.agent-pill.unhealthy { color: var(--red); border-color: var(--red); font-weight: 600; }
+
+/* Agent Cards (Agents tab) */
+.agent-cards { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 768px) { .agent-cards { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); } }
+
+.agent-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.agent-card-name { font-size: 13px; font-weight: 600; }
+.agent-card-status { font-size: 11px; color: var(--muted); margin-right: auto; }
+
+.agent-card-details { margin-bottom: 10px; }
+
+.agent-detail {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    font-size: 11px;
+}
+
+.agent-detail-label { color: var(--muted); }
+.agent-detail-value { color: var(--fg); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.agent-card-actions {
+    display: flex;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
 
 /* Logs */
 .log-viewer {

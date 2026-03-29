@@ -51,7 +51,7 @@
 - [x] Server stats panel — request count, processing status from /slots
 - [x] Chat playground — streaming chat tab with SSE proxy
 - [x] Dark/light theme toggle with localStorage persistence
-- [x] Keyboard shortcuts (1-5 tabs, s/x start/stop, t theme)
+- [x] Keyboard shortcuts (1-7 tabs, s/x start/stop, t theme)
 - [x] Toast notifications (success/error on all actions)
 - [x] Config API (GET /api/config, PUT /api/config/profile/:name)
 
@@ -184,7 +184,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 ### Linting
 - [x] `cargo fmt` — enforced across workspace
 - [x] `cargo clippy` — zero warnings (27 fixed)
-- [ ] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
+- [x] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
 - [x] Pre-commit hook: `.githooks/pre-commit` runs fmt + clippy (configured via `core.hooksPath`)
 
 ### Test Coverage (317 tests total)
@@ -266,6 +266,12 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] Auto-sleep: `idle_timeout` config, `Sleeping` state, wake-on-request, manual `sleep`/`wake` CLI + API
 - [ ] API key auth: optional bearer token for dashboard and API access
 - [ ] Swagger/OpenAPI spec generation for the REST API
+
+## Production Deployment
+- [ ] Production systemd setup: install binaries to `/usr/local/bin` (not `target/release/`), separate build and deploy steps
+- [ ] Version-tagged releases: `cargo build --release` → `cp` to `/usr/local/bin/` on explicit deploy, not on every build
+- [ ] Systemd unit points to `/usr/local/bin/rookeryd` (stable path, survives `cargo clean`)
+- [ ] Deploy script or `make install` target for clean build → install → restart cycle
 
 ## Future
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
