@@ -7,19 +7,17 @@ use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::app_state::AppState;
-
-/// Max concurrent SSE connections
-const MAX_SSE_CONNECTIONS: u32 = 16;
-static SSE_CONNECTION_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(test)]
+use crate::metrics::MAX_SSE_CONNECTIONS;
+use crate::metrics::sse_connection_guard;
 
 pub async fn get_events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, axum::http::StatusCode> {
-    let count = SSE_CONNECTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if count >= MAX_SSE_CONNECTIONS {
-        SSE_CONNECTION_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    if !state.metrics.try_acquire_sse_connection() {
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
+    let guard = Arc::new(sse_connection_guard(state.metrics.clone()));
     // GPU stats stream — poll every 2 seconds
     let gpu_state = state.clone();
     let gpu_stream =
@@ -65,18 +63,18 @@ pub async fn get_events(
         .json_data(&initial_status)
         .unwrap())));
 
-    // Merge all streams, decrement connection count when stream ends
+    // Keep a guard captured by the stream so the current-connection gauge
+    // is decremented when the stream is dropped or completes.
+    let stream_guard = guard.clone();
     let merged = initial_event
         .chain(futures_util::stream::select(
             gpu_stream,
             futures_util::stream::select(state_stream, log_stream),
         ))
-        .chain(stream::once(futures_util::future::lazy(|_| {
-            SSE_CONNECTION_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            // This item is never actually yielded because the stream ends when the client disconnects,
-            // triggering the drop. But we need a fallback decrement for clean shutdown.
-            Ok(Event::default().comment("close"))
-        })));
+        .map(move |event| {
+            let _guard = &stream_guard;
+            event
+        });
 
     Ok(Sse::new(merged).keep_alive(
         KeepAlive::new()
@@ -86,7 +84,6 @@ pub async fn get_events(
 }
 
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)] // Intentional: SSE_COUNTER_LOCK serializes tests
 mod tests {
     use super::*;
     use axum::Router;
@@ -94,7 +91,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use http_body_util::BodyExt;
-    use std::sync::atomic::Ordering;
     use tower::ServiceExt;
 
     use crate::test_utils::{MockBackend, build_test_app_state};
@@ -106,17 +102,6 @@ mod tests {
         Router::new()
             .route("/api/events", get(get_events))
             .with_state(state)
-    }
-
-    /// Mutex to serialize tests that depend on the global SSE_CONNECTION_COUNT.
-    /// Because the counter is a global static, tests that set/check specific counter
-    /// values must not run concurrently with other tests that also manipulate it.
-    static SSE_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Reset the global SSE connection counter to 0.
-    /// Must be called in tests that manipulate the counter.
-    fn reset_sse_counter() {
-        SSE_CONNECTION_COUNT.store(0, Ordering::SeqCst);
     }
 
     /// Read SSE text from a streaming response body.
@@ -171,9 +156,6 @@ mod tests {
     // --- 1. SSE connection sends initial state event on connect (stopped) ---
     #[tokio::test]
     async fn test_sse_initial_state_event_on_connect_stopped() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-        reset_sse_counter();
-
         let (_dir, state) = build_test_app_state(None);
         let app = sse_router(state);
 
@@ -204,16 +186,11 @@ mod tests {
             json["state"], "stopped",
             "initial state should be 'stopped'"
         );
-
-        reset_sse_counter();
     }
 
     // --- 2. SSE initial state event when backend is running ---
     #[tokio::test]
     async fn test_sse_initial_state_event_on_connect_running() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-        reset_sse_counter();
-
         let running_info = BackendInfo {
             pid: Some(12345),
             container_id: None,
@@ -249,16 +226,11 @@ mod tests {
         assert_eq!(json["pid"], 12345);
         assert_eq!(json["port"], 8081);
         assert_eq!(json["backend"], "llama-server");
-
-        reset_sse_counter();
     }
 
     // --- 3. SSE state event format includes all expected fields ---
     #[tokio::test]
     async fn test_sse_state_event_format_includes_all_fields() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-        reset_sse_counter();
-
         let (_dir, state) = build_test_app_state(None);
         let app = sse_router(state);
 
@@ -285,23 +257,15 @@ mod tests {
                 "state event JSON missing expected field '{field}', got: {json}"
             );
         }
-
-        reset_sse_counter();
     }
 
     // --- 4. SSE connection limit: connection beyond MAX gets 429 ---
-    //
-    // The SSE_CONNECTION_COUNT is a global static shared across all tests.
-    // The SSE_COUNTER_LOCK serializes all tests that depend on the counter
-    // to prevent races.
     #[tokio::test]
     async fn test_sse_connection_limit_rejects_when_at_max() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-
-        // Set counter to MAX to simulate 16 active connections
-        SSE_CONNECTION_COUNT.store(MAX_SSE_CONNECTIONS, Ordering::SeqCst);
-
         let (_dir, state) = build_test_app_state(None);
+        state
+            .metrics
+            .set_sse_connections_current_for_test(MAX_SSE_CONNECTIONS);
         let app = sse_router(state);
 
         let req = Request::builder()
@@ -316,16 +280,6 @@ mod tests {
             "SSE connection should be rejected with 429 when at MAX_SSE_CONNECTIONS ({})",
             MAX_SSE_CONNECTIONS
         );
-
-        // The handler does fetch_add(1) then fetch_sub(1) on rejection,
-        // so the counter should be back to MAX
-        let count = SSE_CONNECTION_COUNT.load(Ordering::SeqCst);
-        assert_eq!(
-            count, MAX_SSE_CONNECTIONS,
-            "counter should be restored after rejection, got: {count}"
-        );
-
-        reset_sse_counter();
     }
 
     // --- 4b. SSE connection under limit succeeds ---
@@ -333,9 +287,6 @@ mod tests {
     // Verify that when the counter is below MAX, the connection is accepted (200).
     #[tokio::test]
     async fn test_sse_connection_under_limit_succeeds() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-        reset_sse_counter();
-
         let (_dir, state) = build_test_app_state(None);
         let app = sse_router(state);
 
@@ -350,27 +301,15 @@ mod tests {
             StatusCode::OK,
             "SSE connection should succeed when under MAX_SSE_CONNECTIONS"
         );
-
-        reset_sse_counter();
     }
 
     // --- 5. SSE connection count increments on connect ---
     //
-    // Verifies that each successful SSE connection increments the global counter.
-    // The decrement happens when the stream is fully consumed or on daemon shutdown
-    // (via the chained fallback item), which cannot be reliably tested via oneshot.
+    // Verifies that a successful SSE connection increments the current count.
     #[tokio::test]
     async fn test_sse_connection_count_increments_on_connect() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-        reset_sse_counter();
-
-        assert_eq!(
-            SSE_CONNECTION_COUNT.load(Ordering::SeqCst),
-            0,
-            "counter should start at 0"
-        );
-
         let (_dir, state) = build_test_app_state(None);
+        assert_eq!(state.metrics.sse_connections_current_value(), 0);
         let app = sse_router(state);
 
         let req = Request::builder()
@@ -380,33 +319,19 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-
-        // Counter should have been incremented by the handler
-        let count = SSE_CONNECTION_COUNT.load(Ordering::SeqCst);
-        assert!(
-            count >= 1,
-            "counter should be incremented after SSE connect, got: {count}"
-        );
-
-        // Keep the response alive to prevent any cleanup
-        drop(resp);
-
-        reset_sse_counter();
+        let body = resp.into_body();
+        drop(body);
     }
 
-    // --- 5b. SSE rejected connection does not permanently increment counter ---
-    //
-    // When a connection is rejected (429), the handler increments then immediately
-    // decrements the counter, leaving it unchanged.
+    // --- 5b. SSE rejected connection does not increment total ---
     #[tokio::test]
     async fn test_sse_rejected_connection_does_not_leak_counter() {
-        let _lock = SSE_COUNTER_LOCK.lock().unwrap();
-
-        let baseline = MAX_SSE_CONNECTIONS;
-        SSE_CONNECTION_COUNT.store(baseline, Ordering::SeqCst);
-
         let (_dir, state) = build_test_app_state(None);
-        let app = sse_router(state);
+        state
+            .metrics
+            .set_sse_connections_current_for_test(MAX_SSE_CONNECTIONS);
+        let baseline = state.metrics.sse_connections_total_value();
+        let app = sse_router(state.clone());
 
         let req = Request::builder()
             .uri("/api/events")
@@ -415,14 +340,6 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        // Counter should be exactly back to baseline (fetch_add then fetch_sub)
-        let count = SSE_CONNECTION_COUNT.load(Ordering::SeqCst);
-        assert_eq!(
-            count, baseline,
-            "rejected connection should not permanently change the counter"
-        );
-
-        reset_sse_counter();
+        assert_eq!(state.metrics.sse_connections_total_value(), baseline);
     }
 }

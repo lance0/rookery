@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use crate::app_state::AppState;
+use crate::metrics::RuntimeMetrics;
 
 /// A mock implementation of `InferenceBackend` for testing daemon routes.
 ///
@@ -233,6 +234,7 @@ pub fn build_test_app_state(
         config: Arc::new(RwLock::new(config)),
         backend: Arc::new(tokio::sync::Mutex::new(backend)),
         agent_manager,
+        metrics: Arc::new(RuntimeMetrics::new()),
         gpu_monitor: None,
         log_buffer,
         state_persistence,

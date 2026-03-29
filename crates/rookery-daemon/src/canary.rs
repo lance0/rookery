@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::metrics::RuntimeMetrics;
+
 /// Timeout for inference canary requests.
 pub const CANARY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -35,12 +37,16 @@ pub async fn run_canary_check(
     state_persistence: &StatePersistence,
     op_lock: &Mutex<()>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
+    metrics: Option<&RuntimeMetrics>,
 ) -> bool {
     let is_shutdown = || {
         shutdown
             .map(|s| s.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or(false)
     };
+    if let Some(metrics) = metrics {
+        metrics.record_canary_check();
+    }
 
     // Only check when server is running and not mid-swap
     if backend.lock().await.is_draining() || is_shutdown() {
@@ -63,6 +69,9 @@ pub async fn run_canary_check(
     if is_shutdown() {
         return false;
     }
+    if let Some(metrics) = metrics {
+        metrics.inc_canary_failure();
+    }
     tracing::warn!(port, "inference canary failed, retrying in 5s");
     tokio::time::sleep(CANARY_RETRY_DELAY).await;
     if is_shutdown() {
@@ -77,6 +86,9 @@ pub async fn run_canary_check(
     // Two consecutive failures — server is broken, restart it
     if is_shutdown() {
         return false;
+    }
+    if let Some(metrics) = metrics {
+        metrics.inc_canary_restart();
     }
     tracing::error!(port, profile = %profile, "inference canary failed twice, restarting server");
 
@@ -120,6 +132,9 @@ pub async fn run_canary_check(
                     let server_state = backend.lock().await.to_server_state().await;
                     let _ = state_persistence.save(&server_state);
                     if server_state.is_running() {
+                        if let Some(metrics) = metrics {
+                            metrics.inc_server_restart();
+                        }
                         tracing::info!(profile = %profile, "server restarted by inference canary");
                     } else {
                         tracing::error!(profile = %profile, "server failed to restart after canary");
@@ -450,7 +465,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
 
         assert!(!restarted, "healthy backend should not trigger restart");
         assert!(backend.lock().await.is_running().await);
@@ -480,7 +495,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
 
         assert!(restarted, "should restart after two inference failures");
         assert!(
@@ -508,7 +523,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
 
         assert!(!restarted, "should skip check when draining");
     }
@@ -530,7 +545,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
 
         assert!(!restarted, "should skip check when not running");
     }
@@ -597,7 +612,15 @@ mod tests {
         // With paused time, the CANARY_RETRY_DELAY auto-advances instantly, so the
         // canary quickly reaches the lock acquisition point.
         let canary_handle = tokio::spawn(async move {
-            run_canary_check(&backend_clone, &config_clone, &sp, &op_lock_clone, None).await
+            run_canary_check(
+                &backend_clone,
+                &config_clone,
+                &sp,
+                &op_lock_clone,
+                None,
+                None,
+            )
+            .await
         });
 
         // Yield to let the canary task run through inference checks and reach the lock.
@@ -650,7 +673,7 @@ mod tests {
         assert!(backend.lock().await.to_server_state().await.is_running());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
         assert!(restarted, "should have restarted");
 
         // Final state: Running again
@@ -687,7 +710,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
         assert!(restarted, "should have attempted restart");
 
         let persisted = state_persistence.load().unwrap();
@@ -721,7 +744,15 @@ mod tests {
         let op_lock_clone = op_lock.clone();
 
         let canary_handle = tokio::spawn(async move {
-            run_canary_check(&backend_clone, &config_clone, &sp, &op_lock_clone, None).await
+            run_canary_check(
+                &backend_clone,
+                &config_clone,
+                &sp,
+                &op_lock_clone,
+                None,
+                None,
+            )
+            .await
         });
 
         // Wait for canary to reach the lock
@@ -759,7 +790,7 @@ mod tests {
         let op_lock = Mutex::new(());
 
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
         assert!(restarted, "should return true even when start() fails");
 
         // Backend should be stopped (stop was called before start attempt)
@@ -789,7 +820,7 @@ mod tests {
 
         // run_canary_check accepts &Arc<Mutex<Box<dyn InferenceBackend>>>
         let restarted =
-            run_canary_check(&backend, &config, &state_persistence, &op_lock, None).await;
+            run_canary_check(&backend, &config, &state_persistence, &op_lock, None, None).await;
         assert!(!restarted, "healthy backend via trait should not restart");
 
         server.shutdown().await;

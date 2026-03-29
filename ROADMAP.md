@@ -256,7 +256,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Hermes real-world comparison: same conversations on both backends, measure response quality
 
 ## Observability & Metrics (Inspired by llama-swap, GPUStack)
-- [ ] Prometheus metrics endpoint (`/metrics`) — GPU stats, request latency, agent health, model uptime
+- [x] Prometheus metrics endpoint (`/metrics`) — GPU, server, canary, agent, chat, SSE metrics
 - [ ] Grafana dashboard template (JSON import) — GPU gauges, request throughput, error rates
 - [ ] OpenTelemetry trace export for inference requests
 - [ ] KV cache usage gauge in dashboard (requires `--metrics` flag on llama-server)

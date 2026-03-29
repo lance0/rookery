@@ -11,7 +11,7 @@
 | GPU monitoring | None | NVML (VRAM, temp, power, processes) |
 | Agent management | None | Full lifecycle (watchdog, health, restart) |
 | Inference health | None | Canary + CUDA stderr detection |
-| Metrics export | Prometheus + Grafana | Dashboard only (no Prometheus yet) |
+| Metrics export | Prometheus + Grafana | Prometheus `/metrics` + Dashboard |
 | Backend support | llama.cpp, vLLM, tabbyAPI, SD | llama.cpp, vLLM (Docker Compose) |
 | Model aliasing | Yes | No (use profile names) |
 | Request rewriting | Yes | No |
@@ -62,7 +62,7 @@ No single competitor has this combination:
 
 | Feature | Source | Priority | Effort |
 |---------|--------|----------|--------|
-| Prometheus metrics export | llama-swap, GPUStack | High | Medium |
+| ~~Prometheus metrics export~~ | ~~llama-swap, GPUStack~~ | ~~High~~ | **Done** |
 | Multi-backend (vLLM, MLX) | llamactl | High | Already planned |
 | Model aliasing / friendly names | llama-swap | Medium | Low |
 | Request rewriting / filtering | llama-swap | Low | Medium |
@@ -106,7 +106,7 @@ They want **one tool that does all three**. Rookery is positioned to be that too
 | GPU dashboard (NVML) | Done |
 | systemd + OOM protection | Done |
 | Auto-sleep / idle timeout | Roadmap |
-| Prometheus metrics | Roadmap |
+| Prometheus metrics | **Done** |
 | vLLM backend | **Done** |
 | Model aliasing | Roadmap |
 | Multi-model concurrent | Roadmap |

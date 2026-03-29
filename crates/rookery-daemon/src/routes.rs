@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::metrics;
 
 #[derive(Serialize)]
 pub struct StatusResponse {
@@ -37,6 +38,16 @@ pub async fn get_gpu(State(state): State<Arc<AppState>>) -> Result<Json<GpuRespo
         },
         None => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+pub async fn get_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        metrics::encode_metrics(&state).await,
+    )
 }
 
 #[derive(Deserialize)]
@@ -165,6 +176,9 @@ pub async fn post_start(
                     let _ = state.state_persistence.save(&server_state);
                     broadcast_state(&state, &server_state);
                     let is_running = server_state.is_running();
+                    if is_running {
+                        state.metrics.inc_server_restart();
+                    }
                     let status = status_from_state(&server_state);
                     Ok(Json(ActionResponse {
                         success: is_running,
@@ -349,6 +363,9 @@ pub async fn post_swap(
             let _ = state.state_persistence.save(&server_state);
             broadcast_state(&state, &server_state);
             let is_running = server_state.is_running();
+            if is_running {
+                state.metrics.inc_server_restart();
+            }
             let status = status_from_state(&server_state);
 
             // Restart agents that have restart_on_swap = true.
@@ -645,10 +662,15 @@ pub async fn post_chat(
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
 
+    state.metrics.inc_chat_request();
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            state.metrics.inc_chat_error();
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let body = serde_json::json!({
         "model": "test",
@@ -663,6 +685,7 @@ pub async fn post_chat(
         .send()
         .await
         .map_err(|e| {
+            state.metrics.inc_chat_error();
             tracing::error!(error = %e, "chat proxy request failed");
             StatusCode::BAD_GATEWAY
         })?;
@@ -673,10 +696,11 @@ pub async fn post_chat(
     let stream = resp
         .bytes_stream()
         .timeout(std::time::Duration::from_secs(60))
-        .map(|item| match item {
+        .map(move |item| match item {
             Ok(Ok(bytes)) => Ok(bytes),
             Ok(Err(e)) => Err(std::io::Error::other(e)),
             Err(_elapsed) => {
+                state.metrics.inc_chat_stream_timeout();
                 tracing::warn!("chat stream timed out (no data for 60s)");
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -2139,6 +2163,7 @@ mod tests {
                 .route("/api/profiles", get(super::get_profiles))
                 .route("/api/config", get(super::get_config))
                 .route("/api/logs", get(super::get_logs))
+                .route("/metrics", get(super::get_metrics))
                 .route("/api/start", post(super::post_start))
                 .route("/api/stop", post(super::post_stop))
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
@@ -2227,6 +2252,58 @@ mod tests {
                 json["uptime_secs"].is_number(),
                 "uptime_secs should be a number"
             );
+        }
+
+        #[tokio::test]
+        async fn test_route_metrics_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+
+            assert!(text.contains("rookery_server_up{profile=\"\",backend=\"\"} 0"));
+            assert!(text.contains("rookery_sse_connections_current 0"));
+            assert!(text.contains("rookery_canary_last_check_timestamp 0"));
+        }
+
+        #[tokio::test]
+        async fn test_route_metrics_when_running() {
+            let running_info = BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 8081,
+                profile: "test".into(),
+                started_at: chrono::Utc::now() - chrono::TimeDelta::seconds(30),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            };
+            let backend = MockBackend::running_with(running_info);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            let app = test_router(state);
+
+            let req = Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+
+            assert!(
+                text.contains("rookery_server_up{profile=\"test\",backend=\"llama-server\"} 1")
+            );
+            assert!(text.contains("rookery_server_uptime_seconds{profile=\"test\"}"));
         }
 
         // --- 4. GET /api/profiles → 200 with profile list including backend field ---
@@ -2577,6 +2654,7 @@ mod tests {
                     axum::routing::put(super::put_profile),
                 )
                 .route("/api/logs", get(super::get_logs))
+                .route("/metrics", get(super::get_metrics))
                 .route("/api/start", post(super::post_start))
                 .route("/api/stop", post(super::post_stop))
                 .route("/api/swap", post(super::post_swap))
@@ -2856,6 +2934,45 @@ mod tests {
             );
 
             let _ = shutdown_tx.send(());
+        }
+
+        #[tokio::test]
+        async fn test_route_metrics_chat_error_counter_increments() {
+            let backend = MockBackend::running_with(BackendInfo {
+                pid: Some(12345),
+                container_id: None,
+                port: 9,
+                profile: "test".into(),
+                started_at: chrono::Utc::now(),
+                backend_type: BackendType::LlamaServer,
+                command_line: vec!["mock-server".into()],
+                exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+            });
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            let app = test_router_full(state);
+
+            let chat_req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let chat_resp = app.clone().oneshot(chat_req).await.unwrap();
+            assert_eq!(chat_resp.status(), StatusCode::BAD_GATEWAY);
+
+            let metrics_req = Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap();
+            let metrics_resp = app.oneshot(metrics_req).await.unwrap();
+            assert_eq!(metrics_resp.status(), StatusCode::OK);
+
+            let body = metrics_resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(text.contains("rookery_chat_requests_total 1"));
+            assert!(text.contains("rookery_chat_errors_total 1"));
         }
 
         // --- 16. GET /api/bench → returns timing data from mock server ---

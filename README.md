@@ -103,6 +103,7 @@ The daemon exposes a REST API:
 | `/api/bench` | GET | Run benchmark (PP + gen tok/s) |
 | `/api/logs` | GET | Fetch log lines `?n=50` |
 | `/api/events` | GET | SSE stream (gpu, state, log events) |
+| `/metrics` | GET | Prometheus/OpenMetrics scrape endpoint |
 | `/api/agents` | GET | List agents and their status |
 | `/api/agents/start` | POST | Start agent `{ "name": "hermes" }` |
 | `/api/agents/stop` | POST | Stop agent `{ "name": "hermes" }` |
@@ -118,6 +119,8 @@ The daemon exposes a REST API:
 | `/api/models/recommend` | GET | VRAM-aware quant recommendation |
 | `/api/models/cached` | GET | List locally cached models |
 | `/api/models/pull` | POST | Download a model |
+
+`/metrics` exposes Prometheus-compatible text for GPU, server, canary, agent, chat, and SSE telemetry. GPU and health-style gauges are computed on scrape from current daemon state; restart and request counters are daemon-runtime counters and reset when `rookeryd` restarts.
 
 ## systemd
 

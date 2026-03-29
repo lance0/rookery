@@ -10,11 +10,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
+use crate::metrics::RuntimeMetrics;
+
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub config_path: PathBuf,
     pub backend: Arc<tokio::sync::Mutex<Box<dyn InferenceBackend>>>,
     pub agent_manager: Arc<AgentManager>,
+    pub metrics: Arc<RuntimeMetrics>,
     pub gpu_monitor: Option<GpuMonitor>,
     pub log_buffer: Arc<LogBuffer>,
     pub state_persistence: StatePersistence,

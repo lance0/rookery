@@ -1,5 +1,6 @@
 mod app_state;
 pub mod canary;
+mod metrics;
 mod routes;
 mod sse;
 #[cfg(test)]
@@ -294,12 +295,14 @@ async fn main() {
     let hardware_profile = rookery_engine::hardware::build_hardware_profile(gpu_monitor.as_ref());
     tracing::info!(gpu = ?hardware_profile.gpu.as_ref().map(|g| &g.name), cpu = %hardware_profile.cpu.name, "hardware profile built");
     let hf_client = rookery_engine::models::HfClient::new();
+    let metrics = Arc::new(metrics::RuntimeMetrics::new());
 
     let state = Arc::new(AppState {
         config_path: rookery_core::config::Config::config_path(),
         config: Arc::new(RwLock::new(config)),
         backend,
         agent_manager,
+        metrics,
         gpu_monitor,
         log_buffer,
         state_persistence,
@@ -345,6 +348,7 @@ async fn main() {
                 &canary_state.state_persistence,
                 &canary_state.op_lock,
                 Some(canary_agent_mgr.shutdown_flag()),
+                Some(canary_state.metrics.as_ref()),
             )
             .await;
         }
@@ -370,6 +374,7 @@ async fn main() {
         .route("/api/model-info", get(routes::get_model_info))
         .route("/api/server-stats", get(routes::get_server_stats))
         .route("/api/chat", post(routes::post_chat))
+        .route("/metrics", get(routes::get_metrics))
         .route("/api/hardware", get(routes::get_hardware))
         .route("/api/models/search", get(routes::get_models_search))
         .route("/api/models/quants", get(routes::get_models_quants))
