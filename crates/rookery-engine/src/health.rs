@@ -129,32 +129,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_health_succeeds_after_initial_failures() {
-        // Server returns 500 for the first 3 health requests, then 200
+        // Server returns 500 for the first 3 health requests, then 200 on request 4+
         let server = MockLlamaServer::builder()
-            .health_fail_after(3)
+            .health_fail_first(3)
             .start()
             .await;
 
-        // wait_for_health will get 500 on requests 4+ (fail_after=3 means first 3 succeed)
-        // Actually, health_fail_after(3) means first 3 requests succeed and 4th fails.
-        // We need the inverse: first N fail, then succeed. Let's use a different approach.
-        //
-        // The MockLlamaServer's health_fail_after causes *success* for the first N requests
-        // and *failure* after that. For this test, we want initial failures then success.
-        // Instead, we'll start a server with a delay and use a generous timeout.
-        let server2 = MockLlamaServer::builder()
-            .health_delay(Duration::from_millis(100))
-            .start()
-            .await;
-
-        let result = wait_for_health(server2.port(), Duration::from_secs(5)).await;
+        let result = wait_for_health(server.port(), Duration::from_secs(10)).await;
         assert!(
             result.is_ok(),
-            "wait_for_health should succeed even with delayed health response"
+            "wait_for_health should succeed after initial 500 responses"
         );
 
         server.shutdown().await;
-        server2.shutdown().await;
     }
 
     #[tokio::test]
@@ -267,6 +254,20 @@ mod tests {
             result,
             "check_inference should return true when completions endpoint returns 200"
         );
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_inference_false_on_non_200() {
+        // Mock server returns 500 on /v1/chat/completions
+        let server = MockLlamaServer::builder().completions_fail().start().await;
+
+        let result = check_inference(server.port(), Duration::from_secs(5)).await;
+        assert!(
+            !result,
+            "check_inference should return false when completions endpoint returns 500"
+        );
+
         server.shutdown().await;
     }
 

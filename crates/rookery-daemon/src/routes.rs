@@ -2761,25 +2761,29 @@ mod tests {
             let _ = shutdown_tx.send(());
         }
 
-        // --- 13. POST /api/swap when stopped → error (profile not found in backend) ---
+        // --- 13. POST /api/swap when stopped → error (binary not found / start fails) ---
         #[tokio::test]
         async fn test_route_swap_when_stopped() {
             let (_dir, state) = build_test_app_state(None);
             let app = test_router_full(state);
 
+            // Use a valid profile name ("test") from the test config.
+            // When stopped, swap skips drain/stop and tries to start the new backend,
+            // which fails because /mock/llama-server doesn't exist.
             let req = Request::builder()
                 .method("POST")
                 .uri("/api/swap")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"profile":"nonexistent"}"#))
+                .body(Body::from(r#"{"profile":"test"}"#))
                 .unwrap();
 
             let resp = app.oneshot(req).await.unwrap();
-            // When stopped and profile doesn't exist, swap returns 500 (Err path)
+            // Swap when stopped with a valid profile fails because the backend
+            // can't actually start (no real binary). Returns 500.
             assert_eq!(
                 resp.status(),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "swap when stopped with nonexistent profile should error"
+                "swap when stopped should fail because backend can't start"
             );
         }
 

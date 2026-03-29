@@ -1054,6 +1054,46 @@ name = "test-agent"
         manager.stop("test").await.unwrap();
     }
 
+    /// Poll a condition with timeout, returning true if the condition was met.
+    async fn poll_until(
+        timeout: std::time::Duration,
+        interval: std::time::Duration,
+        mut f: impl FnMut() -> bool,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if f() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Async version of poll_until for async conditions.
+    async fn poll_until_async<F, Fut>(
+        timeout: std::time::Duration,
+        interval: std::time::Duration,
+        mut f: F,
+    ) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if f().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     /// Helper to build a default AgentConfig for tests.
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
@@ -1132,11 +1172,14 @@ name = "test-agent"
         // Stop the adopted agent (should use kill-by-PID since no child handle)
         manager.stop("adopted").await.unwrap();
 
-        // Give the process time to die
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Verify the process is dead
-        assert!(!is_pid_alive(pid));
+        // Poll until the process is dead
+        let died = poll_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || !is_pid_alive(pid),
+        )
+        .await;
+        assert!(died, "process should have died after stop");
         assert!(!manager.is_running("adopted").await);
 
         drop(child);
@@ -1163,11 +1206,14 @@ name = "test-agent"
         assert!(!manager.is_running("agent-2").await);
         assert!(!manager.is_running("agent-3").await);
 
-        // Verify processes are actually dead
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(!is_pid_alive(info1.pid));
-        assert!(!is_pid_alive(info2.pid));
-        assert!(!is_pid_alive(info3.pid));
+        // Poll until all processes are dead
+        let all_dead = poll_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || !is_pid_alive(info1.pid) && !is_pid_alive(info2.pid) && !is_pid_alive(info3.pid),
+        )
+        .await;
+        assert!(all_dead, "all processes should be dead after stop_all");
     }
 
     // === VAL-AGENT-001: list() returns correct status and cleans up dead agents ===
@@ -1188,8 +1234,14 @@ name = "test-agent"
         let config = test_agent_config();
         manager.start("long-lived", &config).await.unwrap();
 
-        // Wait for the short-lived agent to exit
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Poll until the short-lived agent has exited (detected via is_running)
+        let exited = poll_until_async(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || async { !manager.is_running("short-lived").await },
+        )
+        .await;
+        assert!(exited, "short-lived agent should have exited");
 
         // list() should detect dead agent and clean it up
         let agents = manager.list().await;
@@ -1317,8 +1369,14 @@ name = "test-agent"
 
         manager.start("env-test", &config).await.unwrap();
 
-        // Wait for the process to complete and write the file
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Poll until the output file is written
+        let file_written = poll_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || marker_path.exists(),
+        )
+        .await;
+        assert!(file_written, "env output file should have been written");
 
         let content = std::fs::read_to_string(&marker_path).unwrap();
         assert!(
@@ -1349,8 +1407,14 @@ name = "test-agent"
 
         manager.start("workdir-test", &config).await.unwrap();
 
-        // Wait for the process to complete
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Poll until the output file is written
+        let file_written = poll_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || output_path.exists(),
+        )
+        .await;
+        assert!(file_written, "workdir output file should have been written");
 
         let content = std::fs::read_to_string(&output_path).unwrap();
         let expected = workdir.path().to_str().unwrap();
@@ -1413,8 +1477,14 @@ name = "test-agent"
         // Initially running
         assert!(manager.is_running("crasher").await);
 
-        // Wait for the process to exit
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Poll until the process has exited
+        let exited = poll_until_async(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || async { !manager.is_running("crasher").await },
+        )
+        .await;
+        assert!(exited, "crasher agent should have exited");
 
         // list() should detect the crash and report Stopped
         let agents = manager.list().await;
@@ -1452,8 +1522,19 @@ name = "test-agent"
 
         manager.start("error-agent", &config).await.unwrap();
 
-        // Wait for stderr to be captured and counted
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Poll until at least 3 errors have been captured
+        let errors_captured = poll_until_async(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+            || async {
+                manager
+                    .get_health("error-agent")
+                    .await
+                    .is_some_and(|h| h.error_count.unwrap_or(0) >= 3)
+            },
+        )
+        .await;
+        assert!(errors_captured, "should have captured at least 3 errors");
 
         let health = manager.get_health("error-agent").await.unwrap();
         assert!(

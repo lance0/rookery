@@ -1524,7 +1524,13 @@ ctx_size = 262144
     #[test]
     fn test_config_save_load_roundtrip_via_filesystem() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+
+        // Override XDG_CONFIG_HOME so Config::config_path() resolves into our tempdir.
+        // Config::config_path() uses dirs::config_dir() which reads $XDG_CONFIG_HOME.
+        let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        // SAFETY: This test is not run in parallel with other tests that depend on
+        // XDG_CONFIG_HOME. We restore the original value at the end of the test.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
 
         let config = Config {
             llama_server: PathBuf::from("/usr/bin/llama-server"),
@@ -1572,18 +1578,32 @@ ctx_size = 262144
             agents: HashMap::new(),
         };
 
-        // Serialize to TOML and write
-        let content = toml::to_string_pretty(&config).unwrap();
-        std::fs::write(&config_path, &content).unwrap();
+        // Use Config::save() to write the config to the filesystem
+        config.save().unwrap();
 
-        // Read back and parse
-        let loaded_content = std::fs::read_to_string(&config_path).unwrap();
-        let loaded: Config = toml::from_str(&loaded_content).unwrap();
+        // Verify the file was written to the expected path
+        let expected_path = Config::config_path();
+        assert!(
+            expected_path.exists(),
+            "Config::save() should have written the file"
+        );
+
+        // Use Config::load() to read it back
+        let loaded = Config::load().unwrap();
 
         assert_eq!(loaded.default_profile, "fast");
         assert_eq!(loaded.models["qwen"].estimated_vram_mb, Some(5000));
         let ls = loaded.profiles["fast"].llama_server_config().unwrap();
         assert_eq!(ls.ctx_size, 131072);
+
+        // Restore XDG_CONFIG_HOME
+        // SAFETY: Restoring the environment variable to its original value.
+        unsafe {
+            match old_xdg {
+                Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
     }
 
     #[test]

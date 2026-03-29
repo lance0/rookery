@@ -531,12 +531,19 @@ mod tests {
 
     // === Test 6: Canary acquires op_lock during restart ===
     // Verifies the canary serializes restart with manual start/stop/swap.
-    #[tokio::test]
+    //
+    // The canary does two inference checks with a CANARY_RETRY_DELAY (5s) between
+    // them before acquiring the lock. We use `start_paused = true` so the retry
+    // delay auto-advances, but the lock is held throughout, proving the canary
+    // blocks on the lock (not on the retry delay).
+    #[tokio::test(start_paused = true)]
     async fn test_canary_acquires_op_lock_during_restart() {
+        // Resume time briefly to bind real ports, then pause again
+        tokio::time::resume();
         let dead = dead_port().await;
-
         let healthy_server = MockHttpServer::healthy().await;
         let healthy_port = healthy_server.port();
+        tokio::time::pause();
 
         let mock_backend = CanaryMockBackend::new(dead);
         mock_backend.set_start_port(healthy_port).await;
@@ -560,21 +567,31 @@ mod tests {
         };
         let op_lock_clone = op_lock.clone();
 
-        // Spawn canary — it will block on op_lock after two failed inference checks
+        // Spawn canary — it will block on op_lock after two failed inference checks.
+        // With paused time, the CANARY_RETRY_DELAY auto-advances instantly, so the
+        // canary quickly reaches the lock acquisition point.
         let canary_handle = tokio::spawn(async move {
             run_canary_check(&backend_clone, &config_clone, &sp, &op_lock_clone).await
         });
 
-        // Give canary time to fail inference checks and reach the lock
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Yield to let the canary task run through inference checks and reach the lock.
+        // With paused time, all sleeps complete instantly, but the canary will block
+        // on op_lock.lock().await since we hold the guard.
+        tokio::task::yield_now().await;
+        // Advance time to let any internal timeouts/sleeps resolve
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
 
         assert!(
             !canary_handle.is_finished(),
             "canary should be blocked waiting for op_lock"
         );
 
-        // Release the lock
+        // Release the lock — canary can now proceed with restart
         drop(guard);
+
+        // Resume real time for the health check HTTP request after restart
+        tokio::time::resume();
 
         let result = tokio::time::timeout(Duration::from_secs(30), canary_handle).await;
         assert!(result.is_ok(), "canary should complete after lock released");

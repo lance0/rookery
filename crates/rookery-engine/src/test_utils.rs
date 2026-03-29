@@ -23,6 +23,10 @@ struct MockConfig {
     health_delay: Option<Duration>,
     /// If set, /health returns 500 after this many successful requests.
     health_fail_after: Option<u64>,
+    /// If set, the first N /health requests return 500, then subsequent ones return 200.
+    health_fail_first: Option<u64>,
+    /// If true, POST /v1/chat/completions returns 500 instead of 200.
+    completions_fail: bool,
 }
 
 /// Shared state for the mock server.
@@ -55,6 +59,8 @@ pub struct MockLlamaServer {
 pub struct MockLlamaServerBuilder {
     health_delay: Option<Duration>,
     health_fail_after: Option<u64>,
+    health_fail_first: Option<u64>,
+    completions_fail: bool,
 }
 
 impl MockLlamaServerBuilder {
@@ -72,11 +78,27 @@ impl MockLlamaServerBuilder {
         self
     }
 
+    /// Make the first `n` /health requests return 500, then subsequent ones return 200.
+    /// Useful for testing retry-then-succeed patterns.
+    pub fn health_fail_first(mut self, n: u64) -> Self {
+        self.health_fail_first = Some(n);
+        self
+    }
+
+    /// Make POST /v1/chat/completions return 500 instead of 200.
+    /// Useful for testing check_inference failure paths.
+    pub fn completions_fail(mut self) -> Self {
+        self.completions_fail = true;
+        self
+    }
+
     /// Start the mock server with the configured behavior.
     pub async fn start(self) -> MockLlamaServer {
         let config = MockConfig {
             health_delay: self.health_delay,
             health_fail_after: self.health_fail_after,
+            health_fail_first: self.health_fail_first,
+            completions_fail: self.completions_fail,
         };
 
         let state = MockState {
@@ -127,6 +149,8 @@ impl MockLlamaServer {
         MockLlamaServerBuilder {
             health_delay: None,
             health_fail_after: None,
+            health_fail_first: None,
+            completions_fail: false,
         }
     }
 
@@ -172,6 +196,13 @@ async fn health_handler(
 
     let count = state.health_request_count.fetch_add(1, Ordering::SeqCst);
 
+    // Apply fail-first-N behavior: first N requests return 500, then 200
+    if let Some(fail_first) = state.config.health_fail_first
+        && count < fail_first
+    {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     // Apply failure-after-N behavior
     if let Some(fail_after) = state.config.health_fail_after
         && count >= fail_after
@@ -207,8 +238,13 @@ async fn slots_handler() -> Json<serde_json::Value> {
     }]))
 }
 
-async fn chat_completions_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+async fn chat_completions_handler(
+    State(state): State<MockState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.completions_fail {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok(Json(serde_json::json!({
         "id": "chatcmpl-mock",
         "object": "chat.completion",
         "created": 1700000000,
@@ -236,7 +272,7 @@ async fn chat_completions_handler() -> Json<serde_json::Value> {
             "predicted_per_token_ms": 5.0,
             "predicted_per_second": 200.0
         }
-    }))
+    })))
 }
 
 #[cfg(test)]
