@@ -441,9 +441,10 @@ impl AgentManager {
         let mut agents = self.agents.lock().await;
         let mut result = Vec::new();
 
-        // Check each agent's actual status
-        let mut dead = Vec::new();
-        for (name, agent) in agents.iter_mut() {
+        // Check each agent's actual status but do NOT remove dead agents —
+        // the watchdog is responsible for detecting dead agents and restarting them.
+        // Removing them here races with the watchdog and prevents crash recovery.
+        for (_name, agent) in agents.iter_mut() {
             let alive = match &mut agent.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
                 None => is_pid_alive(agent.info.pid),
@@ -455,16 +456,7 @@ impl AgentManager {
                 let mut info = agent.info.clone();
                 info.status = AgentStatus::Stopped;
                 result.push(info);
-                dead.push(name.clone());
             }
-        }
-
-        // Clean up dead agents
-        if !dead.is_empty() {
-            for name in dead {
-                agents.remove(&name);
-            }
-            self.persist_state(&agents);
         }
 
         result
@@ -1490,11 +1482,10 @@ name = "test-agent"
         let long = agents.iter().find(|a| a.name == "long-lived").unwrap();
         assert_eq!(long.status, AgentStatus::Running);
 
-        // After list(), the dead agent should be removed from tracking
-        // A second list() should only show the still-running agent
+        // After list(), dead agents stay in tracking (watchdog handles cleanup).
+        // A second list() should still show both agents.
         let agents2 = manager.list().await;
-        assert_eq!(agents2.len(), 1);
-        assert_eq!(agents2[0].name, "long-lived");
+        assert_eq!(agents2.len(), 2);
 
         manager.stop("long-lived").await.unwrap();
     }
@@ -1732,12 +1723,14 @@ name = "test-agent"
         );
         assert_eq!(crashed.unwrap().status, AgentStatus::Stopped);
 
-        // After list cleans up, it's no longer tracked
+        // Dead agents stay in tracking for the watchdog to handle.
         let agents2 = manager.list().await;
-        assert!(
-            agents2.is_empty(),
-            "dead agent should be cleaned up after list()"
+        assert_eq!(
+            agents2.len(),
+            1,
+            "dead agent stays in tracking for watchdog"
         );
+        assert_eq!(agents2[0].status, AgentStatus::Stopped);
     }
 
     // === Error count tracking — stderr error lines increment counter
