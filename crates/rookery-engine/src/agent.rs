@@ -74,11 +74,15 @@ pub struct AgentManager {
 
 impl AgentManager {
     pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        Self::with_persistence(log_buffer, AgentPersistence::new())
+    }
+
+    pub fn with_persistence(log_buffer: Arc<LogBuffer>, persistence: AgentPersistence) -> Self {
         let (fatal_error_tx, fatal_error_rx) = tokio::sync::watch::channel(None);
         Self {
             agents: Mutex::new(HashMap::new()),
             log_buffer,
-            persistence: AgentPersistence::new(),
+            persistence,
             fatal_error_tx,
             fatal_error_rx,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
@@ -349,6 +353,19 @@ impl AgentManager {
         self.persist_state(&agents);
     }
 
+    /// Wait for shutdown notification. Returns immediately if already shutting down.
+    pub async fn shutdown_notified(&self) {
+        if self.is_shutting_down() {
+            return;
+        }
+        self.shutdown_notify.notified().await;
+    }
+
+    /// Returns true if shutdown is in progress.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Signal that the daemon is shutting down — watchdog will stop restarting agents.
     pub fn begin_shutdown(&self) {
         self.shutting_down
@@ -516,6 +533,7 @@ impl AgentManager {
                         // Fatal error pattern detected — restart the agent immediately
                         let triggered = fatal_rx.borrow_and_update().clone();
                         if let Some(agent_name) = triggered {
+                            if manager.is_shutting_down() { return; }
                             tracing::warn!(agent = %agent_name, "fatal error pattern triggered immediate restart");
                             if let Some(cfg) = configs.get(&agent_name) {
                                 let prev = {
@@ -523,7 +541,9 @@ impl AgentManager {
                                     agents.get(&agent_name).map(|a| (a.total_restarts, a.lifetime_errors + a.error_count.load(Ordering::Relaxed))).unwrap_or((0, 0))
                                 };
                                 let _ = manager.stop(&agent_name).await;
+                                if manager.is_shutting_down() { return; }
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                if manager.is_shutting_down() { return; }
                                 match manager.start(&agent_name, cfg).await {
                                     Ok(info) => {
                                         manager.record_restart(&agent_name, "error_pattern", prev.0, prev.1).await;
@@ -595,6 +615,9 @@ impl AgentManager {
                         };
 
                         for (name, prev_restarts, prev_errors) in bounce_info {
+                            if manager.is_shutting_down() {
+                                return;
+                            }
                             if let Some(cfg) = configs.get(&name) {
                                 tracing::info!(
                                     agent = %name,
@@ -731,6 +754,9 @@ impl AgentManager {
                     );
 
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    if manager.is_shutting_down() {
+                        return;
+                    }
 
                     if let Some(cfg) = configs.get(&name) {
                         match manager.start(&name, cfg).await {

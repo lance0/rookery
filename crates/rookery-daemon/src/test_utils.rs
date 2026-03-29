@@ -158,7 +158,13 @@ pub fn build_test_app_state(
     let state_path = dir.path().join("state.json");
 
     let log_buffer = Arc::new(LogBuffer::new(100));
-    let agent_manager = Arc::new(AgentManager::new(log_buffer.clone()));
+    let agent_persistence = rookery_core::state::AgentPersistence {
+        path: dir.path().join("agents.json"),
+    };
+    let agent_manager = Arc::new(AgentManager::with_persistence(
+        log_buffer.clone(),
+        agent_persistence,
+    ));
 
     let backend: Box<dyn InferenceBackend> =
         backend.unwrap_or_else(|| Box::new(MockBackend::new()));
