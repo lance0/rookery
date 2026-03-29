@@ -5,6 +5,8 @@
 # Dashboard build artifacts
 crates/rookery-dashboard/target/
 crates/rookery-dashboard/Cargo.lock
+# AI assistant config
+CLAUDE.md
 # Factory mission infrastructure
 .factory/
 # Makefile generated
