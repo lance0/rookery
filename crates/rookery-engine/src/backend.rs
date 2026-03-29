@@ -402,7 +402,7 @@ fn is_cuda_error(line: &str) -> bool {
 impl InferenceBackend for VllmBackend {
     async fn start(&self, config: &Config, profile: &str) -> Result<BackendInfo> {
         // Generate the compose file FIRST — config-related failures should
-        // happen before any Docker commands are executed (VAL-CROSS-002).
+        // happen before any Docker commands are executed
         let yaml = compose::generate_compose(config, profile)?;
 
         // Now check Docker availability
@@ -635,7 +635,7 @@ pub fn create_backend(
 mod tests {
     use super::*;
 
-    // === VAL-TRAIT-001: InferenceBackend is object-safe, Send + Sync ===
+    // InferenceBackend is object-safe, Send + Sync
     #[test]
     fn test_trait_is_object_safe_send_sync() {
         // This test verifies at compile time that InferenceBackend can be used
@@ -646,7 +646,7 @@ mod tests {
         // Box<dyn InferenceBackend> is Send + Sync because the trait requires Send + Sync.
     }
 
-    // === BackendInfo serde roundtrip ===
+    // === BackendInfo serde roundtrip
     #[test]
     fn test_backend_info_serde_roundtrip() {
         let info = BackendInfo {
@@ -675,7 +675,7 @@ mod tests {
         );
     }
 
-    // === BackendInfo with vLLM fields ===
+    // === BackendInfo with vLLM fields
     #[test]
     fn test_backend_info_vllm_serde() {
         let info = BackendInfo {
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(restored.exe_path, None);
     }
 
-    // === BackendInfo backward compat: missing optional fields ===
+    // === BackendInfo backward compat: missing optional fields
     #[test]
     fn test_backend_info_deserialize_missing_optional_fields() {
         // Simulate a minimal JSON without optional fields
@@ -720,13 +720,13 @@ mod tests {
         assert_eq!(info.exe_path, None);
     }
 
-    // === VAL-TRAIT-006: BackendType default is LlamaServer ===
+    // BackendType default is LlamaServer
     #[test]
     fn test_backend_type_default_is_llama_server() {
         assert_eq!(BackendType::default(), BackendType::LlamaServer);
     }
 
-    // === VAL-TRAIT-002: LlamaServerBackend implements InferenceBackend ===
+    // LlamaServerBackend implements InferenceBackend
     #[test]
     fn test_llama_server_backend_implements_trait() {
         // Compile-time check: LlamaServerBackend can be used as Box<dyn InferenceBackend>
@@ -736,7 +736,7 @@ mod tests {
         // If this compiles, the trait is fully implemented.
     }
 
-    // === VAL-TRAIT-004: stop() is no-op when idle (no process running) ===
+    // stop() is no-op when idle (no process running)
     #[tokio::test]
     async fn test_llama_server_backend_stop_noop_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -747,7 +747,7 @@ mod tests {
         assert!(result.is_ok(), "stop() should be no-op when idle");
     }
 
-    // === VAL-TRAIT-004 (continued): is_running() is false when idle ===
+    // is_running() is false when idle
     #[tokio::test]
     async fn test_llama_server_backend_not_running_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -759,7 +759,7 @@ mod tests {
         );
     }
 
-    // === process_info is None when idle ===
+    // === process_info is None when idle
     #[tokio::test]
     async fn test_llama_server_backend_process_info_none_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -771,7 +771,7 @@ mod tests {
         );
     }
 
-    // === to_server_state returns Stopped when idle ===
+    // === to_server_state returns Stopped when idle
     #[tokio::test]
     async fn test_llama_server_backend_to_server_state_stopped_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -784,7 +784,7 @@ mod tests {
         );
     }
 
-    // === is_draining defaults to false ===
+    // === is_draining defaults to false
     #[test]
     fn test_llama_server_backend_not_draining_by_default() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -793,7 +793,7 @@ mod tests {
         assert!(!backend.is_draining(), "should not be draining by default");
     }
 
-    // === set_draining toggles drain flag ===
+    // === set_draining toggles drain flag
     #[test]
     fn test_llama_server_backend_set_draining() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -812,7 +812,7 @@ mod tests {
         );
     }
 
-    // === subscribe_errors returns a valid receiver ===
+    // === subscribe_errors returns a valid receiver
     #[test]
     fn test_llama_server_backend_subscribe_errors() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -823,7 +823,7 @@ mod tests {
         assert!(!*rx.borrow(), "initial error state should be false");
     }
 
-    // === VAL-TRAIT-005: adopt() registers PID for orphan recovery ===
+    // adopt() registers PID for orphan recovery
     #[tokio::test]
     async fn test_llama_server_backend_adopt() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(adopted.container_id, None);
     }
 
-    // === VAL-TRAIT-005 (continued): adopt makes is_running() true when PID alive ===
+    // adopt makes is_running() true when PID alive
     #[tokio::test]
     async fn test_llama_server_backend_adopt_makes_running() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -880,7 +880,7 @@ mod tests {
         );
     }
 
-    // === VAL-TRAIT-005 (continued): adopt with dead PID makes is_running() false ===
+    // adopt with dead PID makes is_running() false
     #[tokio::test]
     async fn test_llama_server_backend_adopt_dead_pid_not_running() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -905,7 +905,7 @@ mod tests {
         );
     }
 
-    // === VAL-TRAIT-003: start() returns BackendInfo with correct fields ===
+    // start() returns BackendInfo with correct fields
     // This test starts an actual process (using /bin/sleep as a stand-in for llama-server).
     // It verifies the BackendInfo fields are populated correctly.
     #[tokio::test]
@@ -950,7 +950,7 @@ mod tests {
         );
     }
 
-    // === VAL-TRAIT-010: create_backend() returns correct backend type based on profile ===
+    // create_backend() returns correct backend type based on profile
     #[test]
     fn test_create_backend_llama_server_profile() {
         use rookery_core::config::Profile;
@@ -989,7 +989,7 @@ mod tests {
         assert!(!backend.is_draining());
     }
 
-    // === VAL-TRAIT-010: create_backend() returns VllmBackend for Vllm profile ===
+    // create_backend() returns VllmBackend for Vllm profile
     #[test]
     fn test_create_backend_vllm_profile_returns_ok() {
         use rookery_core::config::{Profile, VllmConfig};
@@ -1037,7 +1037,7 @@ mod tests {
         assert!(!backend.is_draining());
     }
 
-    // === Conversion helpers: process_info <-> backend_info roundtrip ===
+    // === Conversion helpers: process_info <-> backend_info roundtrip
     #[test]
     fn test_process_info_to_backend_info_conversion() {
         let pinfo = ProcessInfo {
@@ -1102,7 +1102,7 @@ mod tests {
         );
     }
 
-    // === VAL-TRAIT-004: stop() after adopt() with valid PID completes without error ===
+    // stop() after adopt() with valid PID completes without error
     //
     // After adopting a process by PID (no child handle), stop() should complete
     // successfully using the kill-by-PID fallback path. This tests the orphan
@@ -1158,7 +1158,7 @@ mod tests {
         );
     }
 
-    // === VAL-TRAIT-005: adopt stores info, process_info returns it, stop uses kill-by-PID ===
+    // adopt stores info, process_info returns it, stop uses kill-by-PID
     //
     // Comprehensive test for the orphan recovery flow:
     // 1. adopt() stores the BackendInfo (no child handle)
@@ -1230,7 +1230,7 @@ mod tests {
         );
     }
 
-    // === VAL-CROSS-005: Canary-relevant trait methods work on LlamaServerBackend ===
+    // Canary-relevant trait methods work on LlamaServerBackend
     //
     // The inference canary uses three trait methods: to_server_state(), is_draining(),
     // and subscribe_errors(). This test verifies all three work correctly on
@@ -1283,7 +1283,7 @@ mod tests {
 
     // ── VllmBackend tests ─────────────────────────────────────────────
 
-    // === VAL-VLLM-012: VllmBackend implements InferenceBackend trait ===
+    // VllmBackend implements InferenceBackend trait
     #[test]
     fn test_vllm_backend_implements_trait() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1292,7 +1292,7 @@ mod tests {
         let _boxed: Box<dyn InferenceBackend> = Box::new(backend);
     }
 
-    // === VllmBackend initial state ===
+    // === VllmBackend initial state
     #[tokio::test]
     async fn test_vllm_backend_not_running_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1324,7 +1324,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-010: stop() is no-op when not running ===
+    // stop() is no-op when not running
     #[tokio::test]
     async fn test_vllm_backend_stop_noop_when_idle() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1333,7 +1333,7 @@ mod tests {
         assert!(result.is_ok(), "stop() should be no-op when idle");
     }
 
-    // === VllmBackend drain flag ===
+    // === VllmBackend drain flag
     #[test]
     fn test_vllm_backend_not_draining_by_default() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1352,7 +1352,7 @@ mod tests {
         assert!(!backend.is_draining());
     }
 
-    // === VllmBackend subscribe_errors ===
+    // === VllmBackend subscribe_errors
     #[test]
     fn test_vllm_backend_subscribe_errors() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1361,7 +1361,7 @@ mod tests {
         assert!(!*rx.borrow(), "initial error state should be false");
     }
 
-    // === VAL-VLLM-014: is_running() checks container state, NOT /proc PID ===
+    // is_running() checks container state, NOT /proc PID
     //
     // VllmBackend.is_running() checks Docker container status (via compose ps),
     // not /proc/{pid}. This test verifies the code path by checking is_running()
@@ -1388,7 +1388,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-015: Docker unavailable produces clear error ===
+    // Docker unavailable produces clear error
     //
     // When Docker is not available (simulated by a non-existent compose file
     // that can't reach Docker), VllmBackend methods should return user-friendly
@@ -1420,7 +1420,7 @@ mod tests {
         }
     }
 
-    // === VAL-VLLM-009: start() writes compose file and invokes docker compose up ===
+    // start() writes compose file and invokes docker compose up
     //
     // Verifies the compose file generation and write step of start().
     // Tests the compose file write, the docker compose -f {path} pattern,
@@ -1528,7 +1528,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-010: stop() invokes docker compose down and clears state ===
+    // stop() invokes docker compose down and clears state
     //
     // After setting internal state (simulating a running container), stop()
     // should clear container_id and info on successful docker compose down.
@@ -1639,7 +1639,7 @@ mod tests {
         );
     }
 
-    // === stop() propagates docker compose down errors and does NOT clear state ===
+    // === stop() propagates docker compose down errors and does NOT clear state
     #[tokio::test]
     async fn test_vllm_backend_stop_propagates_error_on_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
         );
     }
 
-    // === VllmBackend to_server_state produces Running with Vllm type ===
+    // === VllmBackend to_server_state produces Running with Vllm type
     #[tokio::test]
     async fn test_vllm_backend_to_server_state_running() {
         let dir = tempfile::tempdir().unwrap();
@@ -1708,7 +1708,7 @@ mod tests {
         assert!(matches!(state, ServerState::Stopped));
     }
 
-    // === VllmBackend adopt requires container_id ===
+    // === VllmBackend adopt requires container_id
     #[tokio::test]
     async fn test_vllm_backend_adopt_requires_container_id() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1736,7 +1736,7 @@ mod tests {
         );
     }
 
-    // === VllmBackend process_info returns BackendInfo with container_id, pid=None ===
+    // === VllmBackend process_info returns BackendInfo with container_id, pid=None
     #[tokio::test]
     async fn test_vllm_backend_process_info_has_container_id_no_pid() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1770,7 +1770,7 @@ mod tests {
         assert_eq!(retrieved.backend_type, BackendType::Vllm);
     }
 
-    // === sanitize_docker_error helper ===
+    // === sanitize_docker_error helper
     #[test]
     fn test_sanitize_docker_error_empty() {
         assert_eq!(sanitize_docker_error(""), "unknown error");
@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(msg, "Error response from daemon: conflict");
     }
 
-    // === user_friendly_io_error helper ===
+    // === user_friendly_io_error helper
     #[test]
     fn test_user_friendly_io_error_not_found() {
         let e = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
@@ -1797,9 +1797,9 @@ mod tests {
         assert_eq!(user_friendly_io_error(&e), "permission denied");
     }
 
-    // ── CUDA error detection tests (VAL-VLLM-011) ────────────────────
+    // ── CUDA error detection tests ────────────────────
 
-    // === VAL-VLLM-011: CUDA error lines trigger detection ===
+    // CUDA error lines trigger detection
     #[test]
     fn test_is_cuda_error_detects_cuda_error() {
         assert!(
@@ -1827,7 +1827,7 @@ mod tests {
         assert!(is_cuda_error("cuda out of memory"));
     }
 
-    // === VAL-VLLM-011: Normal CUDA lines do NOT trigger false positives ===
+    // Normal CUDA lines do NOT trigger false positives
     #[test]
     fn test_is_cuda_error_no_false_positive_device_info() {
         assert!(
@@ -1867,9 +1867,9 @@ mod tests {
         assert!(!is_cuda_error("Found 1 CUDA-capable device(s)"));
     }
 
-    // ── Log capture lifecycle tests (VAL-VLLM-013) ───────────────────
+    // ── Log capture lifecycle tests ───────────────────
 
-    // === VAL-VLLM-013: Log lines flow into LogBuffer with [vllm] prefix ===
+    // Log lines flow into LogBuffer with [vllm] prefix
     //
     // Spawns a real subprocess that outputs lines, verifies they arrive
     // in the LogBuffer with the [vllm] prefix.
@@ -1910,7 +1910,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-011: CUDA errors in log stream trigger watch channel ===
+    // CUDA errors in log stream trigger watch channel
     //
     // Verifies that when a CUDA error line appears, the cuda_error_tx
     // watch channel is triggered.
@@ -1933,7 +1933,7 @@ mod tests {
         assert!(*rx.borrow(), "error state should be true after CUDA error");
     }
 
-    // === VAL-VLLM-011: Normal CUDA lines do NOT trigger watch channel ===
+    // Normal CUDA lines do NOT trigger watch channel
     #[tokio::test]
     async fn test_vllm_normal_cuda_lines_dont_trigger_watch() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1963,7 +1963,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-013: Log capture task terminated on stop() ===
+    // Log capture task terminated on stop()
     //
     // Verifies that stop() aborts the log capture task handle.
     #[tokio::test]
@@ -2064,7 +2064,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-013: Log capture handles docker compose process ending gracefully ===
+    // Log capture handles docker compose process ending gracefully
     //
     // The spawn_log_capture task should handle the subprocess ending
     // without panicking. We test this by spawning a short-lived process
@@ -2139,7 +2139,7 @@ mod tests {
         );
     }
 
-    // === VAL-CROSS-002: Compose generation failure returns error before Docker commands ===
+    // Compose generation failure returns error before Docker commands
     //
     // When VllmBackend::start() is called with a config that causes
     // generate_compose() to fail (e.g., missing model), the error is
@@ -2239,7 +2239,7 @@ mod tests {
         );
     }
 
-    // === VAL-VLLM-013: spawn_log_capture sets log_task handle ===
+    // spawn_log_capture sets log_task handle
     //
     // After calling spawn_log_capture, the log_task field should
     // contain a JoinHandle.
@@ -2268,7 +2268,7 @@ mod tests {
         }
     }
 
-    // === VAL-VLLM-009: start() writes compose file AND invokes docker compose up ===
+    // start() writes compose file AND invokes docker compose up
     //
     // Calls VllmBackend::start() with a valid config. Verifies that:
     // (a) The compose file is written to the expected path.
@@ -2383,7 +2383,7 @@ mod tests {
         let _ = backend.docker_compose_cmd(&["down"]).await;
     }
 
-    // === VAL-VLLM-013: Log capture spawns during start and prefixes [vllm] ===
+    // Log capture spawns during start and prefixes [vllm]
     //
     // Tests that spawn_log_capture() produces log lines with [vllm] prefix
     // in the LogBuffer. Uses a real docker compose file with a lightweight
@@ -2454,7 +2454,7 @@ mod tests {
         let _ = backend.docker_compose_cmd(&["down"]).await;
     }
 
-    // ── Backend interaction tests (VAL-BACK-001, VAL-BACK-002, VAL-BACK-003) ──
+    // ── Backend interaction tests ( ──
 
     /// Helper: write an executable script to a path, syncing to disk before
     /// returning to prevent ETXTBSY when the script is immediately executed.
@@ -2520,7 +2520,7 @@ mod tests {
         }
     }
 
-    // === VAL-BACK-001: LlamaServerBackend start + health check succeeds with mock server ===
+    // LlamaServerBackend start + health check succeeds with mock server
     //
     // Tests the full start+health interaction: LlamaServerBackend::start() spawns
     // a process, then wait_for_health() confirms the mock server is responding.
@@ -2595,7 +2595,7 @@ mod tests {
         mock.shutdown().await;
     }
 
-    // === VAL-BACK-001: LlamaServerBackend start with failing health — error, process cleaned up ===
+    // LlamaServerBackend start with failing health — error, process cleaned up
     //
     // When the health check fails after start(), the process should be
     // cleaned up (stopped). This tests the failure path of the start+health
@@ -2653,7 +2653,7 @@ mod tests {
         );
     }
 
-    // === VAL-BACK-002: Swap drain lifecycle — LlamaServerBackend ===
+    // Swap drain lifecycle — LlamaServerBackend
     //
     // Tests the full drain lifecycle during swap: start backend, set draining,
     // verify state, clear draining, verify state. Also checks that
@@ -2714,7 +2714,7 @@ mod tests {
         );
     }
 
-    // === VAL-BACK-002: Swap drain lifecycle — VllmBackend ===
+    // Swap drain lifecycle — VllmBackend
     //
     // Same lifecycle test for VllmBackend. Since VllmBackend uses AtomicBool
     // for draining (independent of container state), this verifies the drain
@@ -2748,7 +2748,7 @@ mod tests {
         assert!(!backend.is_draining(), "should exit drain mode again");
     }
 
-    // === VAL-BACK-002: Backend replacement during swap ===
+    // Backend replacement during swap
     //
     // During a swap, the old backend is draining while a new backend is
     // created fresh. This test verifies that the new backend starts with
@@ -2814,7 +2814,7 @@ mod tests {
         );
     }
 
-    // === VAL-BACK-003: Backend error channel propagates CUDA errors ===
+    // Backend error channel propagates CUDA errors
     //
     // Tests that CUDA errors detected in the backend's process stderr
     // propagate through subscribe_errors(). Uses a script that outputs
@@ -2871,7 +2871,7 @@ mod tests {
         backend.stop().await.unwrap();
     }
 
-    // === VAL-BACK-001/VAL-BACK-003: create_backend with full Config ===
+    // === create_backend with full Config
     //
     // Tests that create_backend() returns the correct backend type for
     // profiles from a more complete Config, and that each backend starts
@@ -3064,9 +3064,9 @@ mod tests {
         (config, "integration_vllm".to_string())
     }
 
-    // === Integration: Start VllmBackend, verify container starts and health passes ===
+    // === Integration: Start VllmBackend, verify container starts and health passes
     //
-    // Covers VAL-CROSS-006: Start vLLM profile end-to-end.
+    // Start vLLM profile end-to-end.
     // Tests the full start lifecycle: compose generation → docker compose up -d →
     // health check → Running state with BackendType::Vllm and container_id.
     #[tokio::test]
@@ -3143,9 +3143,9 @@ mod tests {
         backend.stop().await.expect("stop should succeed");
     }
 
-    // === Integration: Stop VllmBackend, verify container is removed ===
+    // === Integration: Stop VllmBackend, verify container is removed
     //
-    // Covers VAL-CROSS-009: Graceful shutdown cleans up vLLM container.
+    // Graceful shutdown cleans up vLLM container.
     // Tests that after stop(), the container is fully removed and state is cleared.
     #[tokio::test]
     async fn test_integration_vllm_stop_removes_container() {
@@ -3219,7 +3219,7 @@ mod tests {
         }
     }
 
-    // === Integration: is_running() returns correct state through lifecycle ===
+    // === Integration: is_running() returns correct state through lifecycle
     //
     // Tests that is_running() accurately reflects container state at each
     // point in the lifecycle: idle → started → stopped.
@@ -3258,9 +3258,9 @@ mod tests {
         );
     }
 
-    // === Integration: Orphan adoption — start, create fresh backend, adopt, verify ===
+    // === Integration: Orphan adoption — start, create fresh backend, adopt, verify
     //
-    // Covers VAL-CROSS-008: Daemon restart recovery with vLLM container.
+    // Daemon restart recovery with vLLM container.
     // Simulates the daemon restart scenario:
     // 1. Start a vLLM container
     // 2. Create a FRESH VllmBackend (simulating daemon restart)

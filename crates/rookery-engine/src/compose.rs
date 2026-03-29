@@ -214,7 +214,7 @@ gpu_memory_utilization = {gpu_mem}
         lines.join("\n")
     }
 
-    // === VAL-VLLM-001: Compose file includes correct Docker image and port mapping ===
+    // Compose file includes correct Docker image and port mapping
     #[test]
     fn test_compose_image_and_port_mapping() {
         let config = make_vllm_config(
@@ -241,7 +241,7 @@ gpu_memory_utilization = {gpu_mem}
         assert_eq!(ports[0].as_str().unwrap(), "8081:8000");
     }
 
-    // === VAL-VLLM-002: Compose file includes NVIDIA GPU reservation and runtime ===
+    // Compose file includes NVIDIA GPU reservation and runtime
     #[test]
     fn test_compose_gpu_reservation_and_runtime() {
         let config = make_vllm_config(default_vllm_config(), 8081, "test/model");
@@ -263,7 +263,7 @@ gpu_memory_utilization = {gpu_mem}
         assert_eq!(caps[0].as_str().unwrap(), "gpu");
     }
 
-    // === VAL-VLLM-003: Compose file includes --model argument from profile ===
+    // Compose file includes --model argument from profile
     #[test]
     fn test_compose_model_argument() {
         let config = make_vllm_config(default_vllm_config(), 8081, "kaitchup/Qwen3.5-27B-NVFP4");
@@ -285,7 +285,7 @@ gpu_memory_utilization = {gpu_mem}
         assert_eq!(command[model_idx + 1], "kaitchup/Qwen3.5-27B-NVFP4");
     }
 
-    // === VAL-VLLM-004: Compose file includes gpu_memory_utilization ===
+    // Compose file includes gpu_memory_utilization
     #[test]
     fn test_compose_gpu_memory_utilization() {
         let config = make_vllm_config(
@@ -314,7 +314,7 @@ gpu_memory_utilization = {gpu_mem}
         assert_eq!(command[idx + 1], "0.89");
     }
 
-    // === VAL-VLLM-005: Compose file omits optional params when None, includes when set ===
+    // Compose file omits optional params when None, includes when set
     #[test]
     fn test_compose_optional_params_present_when_set() {
         let config = make_vllm_config(
@@ -385,7 +385,7 @@ gpu_memory_utilization = {gpu_mem}
         assert!(command.contains(&"--port".to_string()));
     }
 
-    // === VAL-VLLM-006: Compose file passes extra_args verbatim ===
+    // Compose file passes extra_args verbatim
     #[test]
     fn test_compose_extra_args_verbatim() {
         let config = make_vllm_config(
@@ -425,7 +425,7 @@ gpu_memory_utilization = {gpu_mem}
         );
     }
 
-    // === VAL-VLLM-007: Compose file passes HF_TOKEN from environment ===
+    // Compose file passes HF_TOKEN from environment
     #[test]
     fn test_compose_hf_token_environment() {
         let config = make_vllm_config(default_vllm_config(), 8081, "test/model");
@@ -448,7 +448,7 @@ gpu_memory_utilization = {gpu_mem}
         );
     }
 
-    // === VAL-VLLM-008: Generated compose file is valid YAML ===
+    // Generated compose file is valid YAML
     #[test]
     fn test_compose_valid_yaml() {
         let config = make_vllm_config(
@@ -482,7 +482,7 @@ gpu_memory_utilization = {gpu_mem}
         );
     }
 
-    // === Additional: error cases ===
+    // === Additional: error cases
 
     #[test]
     fn test_compose_error_profile_not_found() {
@@ -553,7 +553,7 @@ docker_image = "vllm/vllm-openai:latest"
         assert!(path.ends_with("rookery/vllm-compose.yml"));
     }
 
-    // === Additional: comprehensive full config test ===
+    // === Additional: comprehensive full config test
     #[test]
     fn test_compose_full_config_all_fields() {
         let toml_str = r#"
@@ -640,7 +640,7 @@ extra_args = ["--enable-chunked-prefill"]
         assert_eq!(device["capabilities"][0].as_str().unwrap(), "gpu");
     }
 
-    // === Additional: model with no repo (edge case) ===
+    // === Additional: model with no repo (edge case)
     #[test]
     fn test_compose_model_without_repo() {
         let toml_str = r#"
@@ -669,7 +669,7 @@ docker_image = "vllm/vllm-openai:latest"
         );
     }
 
-    // === Additional: different port ===
+    // === Additional: different port
     #[test]
     fn test_compose_different_port() {
         let config = make_vllm_config(default_vllm_config(), 9999, "test/model");
@@ -683,7 +683,7 @@ docker_image = "vllm/vllm-openai:latest"
         );
     }
 
-    // === VAL-EDGE-007: Compose generation edge cases ===
+    // Compose generation edge cases
 
     #[test]
     fn test_compose_all_optional_vllm_params_set_simultaneously() {

@@ -1261,7 +1261,7 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
 mod tests {
     use super::*;
 
-    // === Fix #3: StatusResponse always includes 'backend' key (null when stopped) ===
+    // === Fix #3: StatusResponse always includes 'backend' key (null when stopped)
     #[test]
     fn test_status_response_includes_backend_when_stopped() {
         let state = rookery_core::state::ServerState::Stopped;
@@ -1314,7 +1314,7 @@ mod tests {
         );
     }
 
-    // === Fix #4: status_from_state returns 'starting'/'stopping' not 'transitioning' ===
+    // === Fix #4: status_from_state returns 'starting'/'stopping' not 'transitioning'
     #[test]
     fn test_status_from_state_starting() {
         let state = rookery_core::state::ServerState::Starting {
@@ -1364,7 +1364,7 @@ mod tests {
         assert!(resp.backend.is_some());
     }
 
-    // === Swap drain flag cleanup: drain is cleared on failure paths ===
+    // === Swap drain flag cleanup: drain is cleared on failure paths
     //
     // Simulates the swap drain logic from post_swap() to verify that
     // set_draining(false) is called even when the swap fails partway through.
@@ -1427,7 +1427,7 @@ mod tests {
         );
     }
 
-    // === status_json_from_state always includes backend key ===
+    // === status_json_from_state always includes backend key
     #[test]
     fn test_status_json_from_state_always_has_backend() {
         let states = vec![
@@ -1454,7 +1454,7 @@ mod tests {
         }
     }
 
-    // === VAL-SSE-001: SSE state events include backend field ===
+    // SSE state events include backend field
     //
     // status_json_from_state() is the function used to build SSE state event
     // payloads (via broadcast_state). When the server is Running, the JSON
@@ -1521,7 +1521,7 @@ mod tests {
         );
     }
 
-    // === VAL-API-002: /api/profiles includes backend per profile ===
+    // /api/profiles includes backend per profile
     //
     // Tests the get_profiles logic by verifying that each profile in the JSON
     // response includes a 'backend' field derived from the profile configuration.
@@ -1680,7 +1680,7 @@ mod tests {
         );
     }
 
-    // === VAL-CROSS-001: Capacity gate adapts for vLLM profiles ===
+    // Capacity gate adapts for vLLM profiles
     //
     // For vLLM profiles, the capacity gate should NOT block the start.
     // vLLM manages its own GPU memory via gpu_memory_utilization, so
@@ -1805,7 +1805,7 @@ mod tests {
         );
     }
 
-    // === VAL-CROSS-002: Compose generation failure returns error before Docker commands ===
+    // Compose generation failure returns error before Docker commands
     //
     // When invalid config values cause compose file generation to fail (e.g., missing model),
     // an error is returned before any Docker commands are executed. The state should
@@ -1991,7 +1991,7 @@ mod tests {
         assert_eq!(status.profile, Some("bad_vllm".into()));
     }
 
-    // === VAL-API-003: GET /api/model-info returns null props for vLLM ===
+    // GET /api/model-info returns null props for vLLM
     //
     // When the /props endpoint returns a non-success status (404 for vLLM),
     // the ModelInfoResponse should have props: null (not omitted).
@@ -2039,7 +2039,7 @@ mod tests {
         assert_eq!(json["props"]["total_slots"], 1);
     }
 
-    // === VAL-API-004: GET /api/server-stats returns null slots for vLLM ===
+    // GET /api/server-stats returns null slots for vLLM
     //
     // When the /slots endpoint returns a non-success status (404 for vLLM),
     // the server-stats response should have slots: null.
@@ -2080,7 +2080,7 @@ mod tests {
         );
     }
 
-    // === Combined: verify /props and /slots status code check logic ===
+    // === Combined: verify /props and /slots status code check logic
     //
     // The get_model_info and get_server_stats handlers now check
     // resp.status().is_success() before trying to parse the response body.

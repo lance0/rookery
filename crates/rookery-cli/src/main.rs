@@ -1041,7 +1041,7 @@ async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
 mod tests {
     use super::*;
 
-    // === VAL-CLI-004: StatusResponse deserialization backward-compatible ===
+    // StatusResponse deserialization backward-compatible
     //
     // CLI's StatusResponse struct can deserialize JSON from old daemons (no
     // 'backend' field) and new daemons (with 'backend' field). Missing field
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(resp.backend, None);
     }
 
-    // === VAL-CLI-001: Status command shows backend type (running) and omits it (stopped) ===
+    // Status command shows backend type (running) and omits it (stopped)
     //
     // Tests the formatting logic for `rookery status` by verifying the output
     // includes a "backend:" line when running and omits it when stopped. Also
@@ -1257,7 +1257,7 @@ mod tests {
         );
     }
 
-    // === VAL-CLI-003: Profiles command shows backend type per profile ===
+    // Profiles command shows backend type per profile
     //
     // Tests the formatting logic for `rookery profiles` by verifying the output
     // includes a [backend] prefix for each profile.
@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     // =========================================================================
-    // VAL-CLI-001: Clap argument parsing covers all commands
+    // Clap argument parsing covers all commands
     // =========================================================================
 
     /// Verify all top-level subcommands parse correctly.
@@ -1576,7 +1576,7 @@ mod tests {
     }
 
     // =========================================================================
-    // VAL-CLI-002: Status display formatting for all states
+    // Status display formatting for all states
     // =========================================================================
 
     /// Running state shows all fields: state, profile, backend, pid, port, api, uptime.

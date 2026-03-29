@@ -410,8 +410,7 @@ mod tests {
 
     // ── Tests ─────────────────────────────────────────────────────────
 
-    // === Test 1: Canary check succeeds when backend is healthy — no restart ===
-    // VAL-CANARY-001, VAL-CANARY-003
+    // === Test 1: Canary check succeeds when backend is healthy — no restart
     #[tokio::test]
     async fn test_canary_healthy_backend_no_restart() {
         let server = MockHttpServer::healthy().await;
@@ -434,8 +433,7 @@ mod tests {
         server.shutdown().await;
     }
 
-    // === Test 2: Canary triggers restart after inference check fails twice ===
-    // VAL-CANARY-002, VAL-CANARY-003
+    // === Test 2: Canary triggers restart after inference check fails twice
     #[tokio::test]
     async fn test_canary_restart_after_two_inference_failures() {
         let dead = dead_port().await;
@@ -467,8 +465,8 @@ mod tests {
         healthy_server.shutdown().await;
     }
 
-    // === Test 3: Canary skips check when backend is draining ===
-    // VAL-CANARY-003
+    // === Test 3: Canary skips check when backend is draining
+
     #[tokio::test]
     async fn test_canary_skips_when_draining() {
         let mock_backend = CanaryMockBackend::new(1);
@@ -488,8 +486,8 @@ mod tests {
         assert!(!restarted, "should skip check when draining");
     }
 
-    // === Test 4: Canary skips check when backend is not running ===
-    // VAL-CANARY-003
+    // === Test 4: Canary skips check when backend is not running
+
     #[tokio::test]
     async fn test_canary_skips_when_not_running() {
         let mock_backend = CanaryMockBackend::new(1);
@@ -509,8 +507,8 @@ mod tests {
         assert!(!restarted, "should skip check when not running");
     }
 
-    // === Test 5: CUDA error on watch channel triggers immediate canary check ===
-    // VAL-CANARY-002
+    // === Test 5: CUDA error on watch channel triggers immediate canary check
+
     //
     // The canary loop in main() uses `cuda_error_rx.changed()` in a
     // `tokio::select!` to break out of the sleep interval. This test
@@ -529,7 +527,7 @@ mod tests {
         assert!(*rx.borrow(), "CUDA error flag should be true after trigger");
     }
 
-    // === Test 6: Canary acquires op_lock during restart ===
+    // === Test 6: Canary acquires op_lock during restart
     // Verifies the canary serializes restart with manual start/stop/swap.
     //
     // The canary does two inference checks with a CANARY_RETRY_DELAY (5s) between
@@ -600,7 +598,7 @@ mod tests {
         healthy_server.shutdown().await;
     }
 
-    // === Test 7: Restart transitions: Running → stop → start → Running ===
+    // === Test 7: Restart transitions: Running → stop → start → Running
     #[tokio::test]
     async fn test_canary_restart_transitions_running_stop_start_running() {
         let dead = dead_port().await;
@@ -637,7 +635,7 @@ mod tests {
         healthy_server.shutdown().await;
     }
 
-    // === Test 8: Restart failure transitions to Failed state ===
+    // === Test 8: Restart failure transitions to Failed state
     // Uses tokio::time::pause to make the 120s health timeout instant.
     #[tokio::test(start_paused = true)]
     async fn test_canary_restart_failure_transitions_to_failed() {
@@ -669,7 +667,7 @@ mod tests {
         );
     }
 
-    // === Test 9: Canary skips restart if server stopped during lock wait ===
+    // === Test 9: Canary skips restart if server stopped during lock wait
     #[tokio::test]
     async fn test_canary_skips_restart_if_stopped_during_lock_wait() {
         let dead = dead_port().await;
@@ -713,7 +711,7 @@ mod tests {
         );
     }
 
-    // === Test 10: start() failure still returns true (restart attempted) ===
+    // === Test 10: start() failure still returns true (restart attempted)
     #[tokio::test]
     async fn test_canary_start_failure_returns_true() {
         let dead = dead_port().await;
@@ -740,7 +738,7 @@ mod tests {
         );
     }
 
-    // === Test 11: Canary operates through trait interface (VAL-CANARY-003) ===
+    // === Test 11: Canary operates through trait interface
     // All tests above use CanaryMockBackend via Box<dyn InferenceBackend>,
     // proving the canary works through the trait. This test makes it explicit.
     #[tokio::test]

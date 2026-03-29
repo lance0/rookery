@@ -267,7 +267,7 @@ mod tests {
         assert!(matches!(reconciled, ServerState::Stopped));
     }
 
-    // === VAL-TRAIT-007: ServerState::Running includes backend_type and container_id ===
+    // ServerState::Running includes backend_type and container_id
     #[test]
     fn test_running_state_has_backend_type_and_container_id() {
         let state = ServerState::Running {
@@ -313,7 +313,7 @@ mod tests {
         }
     }
 
-    // === VAL-TRAIT-008: ServerState backward-compatible deserialization ===
+    // ServerState backward-compatible deserialization
     #[test]
     fn test_state_backward_compat_no_backend_type() {
         // Simulate old state.json without backend_type or container_id fields
@@ -353,7 +353,7 @@ mod tests {
         }
     }
 
-    // === VAL-TRAIT-009: StatePersistence save/load roundtrip with backend metadata ===
+    // StatePersistence save/load roundtrip with backend metadata
     #[test]
     fn test_state_persistence_roundtrip_with_backend_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -392,7 +392,7 @@ mod tests {
         }
     }
 
-    // === VAL-TRAIT-009 (continued): Roundtrip with LlamaServer defaults ===
+    // Roundtrip with LlamaServer defaults
     #[test]
     fn test_state_persistence_roundtrip_llama_server_defaults() {
         let dir = tempfile::tempdir().unwrap();
@@ -428,7 +428,7 @@ mod tests {
         }
     }
 
-    // === VAL-TRAIT-009: Save/load roundtrip with BackendType::Vllm and container_id='abc123' ===
+    // Save/load roundtrip with BackendType::Vllm and container_id='abc123'
     //
     // Explicit test with the exact values from the validation contract:
     // backend_type=Vllm and container_id=Some("abc123").
@@ -476,7 +476,7 @@ mod tests {
         }
     }
 
-    // === VAL-TRAIT-009: reconcile() with dead PID returns Stopped ===
+    // reconcile() with dead PID returns Stopped
     //
     // When the daemon restarts and the previously-running process has died,
     // reconcile() should return Stopped regardless of backend_type.
@@ -501,7 +501,7 @@ mod tests {
         );
     }
 
-    // === VAL-EDGE-006: State persistence edge cases ===
+    // State persistence edge cases
 
     #[test]
     fn test_state_persistence_load_missing_file_returns_stopped() {

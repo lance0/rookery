@@ -663,7 +663,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    // === VAL-CFG-001: Parse llama-server profile with sub-table ===
+    // Parse llama-server profile with sub-table
     #[test]
     fn test_config_parse_llama_server_subtable() {
         let toml_str = r#"
@@ -727,7 +727,7 @@ extra_args = ["--verbose"]
         assert_eq!(ls.extra_args, vec!["--verbose".to_string()]);
     }
 
-    // === VAL-CFG-002: Parse vLLM profile with sub-table ===
+    // Parse vLLM profile with sub-table
     #[test]
     fn test_config_parse_vllm_subtable() {
         let toml_str = r#"
@@ -774,7 +774,7 @@ extra_args = ["--enable-chunked-prefill"]
         );
     }
 
-    // === VAL-CFG-003: Backward compatibility — flat profile defaults to llama-server ===
+    // Backward compatibility — flat profile defaults to llama-server
     #[test]
     fn test_config_backward_compat_flat_profile() {
         let toml_str = r#"
@@ -817,7 +817,7 @@ ctx_size = 262144
         assert_eq!(ls.min_p, 0.0); // default
     }
 
-    // === VAL-CFG-004: Default values for vLLM sub-table fields ===
+    // Default values for vLLM sub-table fields
     #[test]
     fn test_config_vllm_defaults() {
         let toml_str = r#"
@@ -848,7 +848,7 @@ docker_image = "vllm/vllm-openai:latest"
         assert!(vllm.extra_args.is_empty());
     }
 
-    // === VAL-CFG-005: Config with mixed backend profiles parses successfully ===
+    // Config with mixed backend profiles parses successfully
     #[test]
     fn test_config_mixed_backends() {
         let toml_str = r#"
@@ -891,7 +891,7 @@ gpu_memory_utilization = 0.85
         assert_eq!(vllm.vllm_config().unwrap().gpu_memory_utilization, 0.85);
     }
 
-    // === VAL-CFG-006: vLLM model source — repo without file field ===
+    // vLLM model source — repo without file field
     #[test]
     fn test_config_vllm_model_hf_repo_no_file() {
         let toml_str = r#"
@@ -918,7 +918,7 @@ docker_image = "vllm/vllm-openai:latest"
         config.validate().unwrap();
     }
 
-    // === VAL-CFG-007: Validation rejects profile with both backend sub-tables ===
+    // Validation rejects profile with both backend sub-tables
     #[test]
     fn test_config_validate_rejects_dual_backend() {
         let toml_str = r#"
@@ -949,7 +949,7 @@ docker_image = "vllm/vllm-openai:latest"
         );
     }
 
-    // === VAL-CFG-008: Validation rejects vLLM profile missing docker_image ===
+    // Validation rejects vLLM profile missing docker_image
     #[test]
     fn test_config_validate_rejects_vllm_missing_docker_image() {
         // docker_image is a required field in VllmConfig, so this should fail at parse time
@@ -976,7 +976,7 @@ gpu_memory_utilization = 0.9
         );
     }
 
-    // === VAL-CFG-009: Validation rejects invalid gpu_memory_utilization range ===
+    // Validation rejects invalid gpu_memory_utilization range
     #[test]
     fn test_config_validate_gpu_memory_utilization_boundaries() {
         let make_config = |gpu_mem: f64| -> Config {
@@ -1047,7 +1047,7 @@ gpu_memory_utilization = 0.9
         assert!(make_config(0.5).validate().is_ok());
     }
 
-    // === VAL-CFG-010: resolve_command_line for vLLM produces Docker command ===
+    // resolve_command_line for vLLM produces Docker command
     #[test]
     fn test_resolve_vllm_command_line() {
         let toml_str = r#"
@@ -1106,7 +1106,7 @@ extra_args = ["--enable-chunked-prefill"]
         assert!(!args.contains(&"--jinja".to_string()));
     }
 
-    // === VAL-CFG-010 (continued): vLLM command omits optional params when None ===
+    // vLLM command omits optional params when None
     #[test]
     fn test_resolve_vllm_command_line_minimal() {
         let toml_str = r#"
@@ -1145,7 +1145,7 @@ docker_image = "vllm/vllm-openai:latest"
         assert!(!args.contains(&"--kv-cache-dtype".to_string()));
     }
 
-    // === VAL-CFG-011: Config serialization roundtrip preserves all fields ===
+    // Config serialization roundtrip preserves all fields
     #[test]
     fn test_config_serialization_roundtrip() {
         // Test with explicit llama_server sub-table
@@ -1222,7 +1222,7 @@ extra_args = ["--enable-chunked-prefill"]
         assert_eq!(restored.models["qwen_nvfp4"].file, None);
     }
 
-    // === VAL-CFG-011 (continued): Legacy flat profile roundtrip ===
+    // Legacy flat profile roundtrip
     #[test]
     fn test_config_serialization_roundtrip_flat_profile() {
         let toml_str = r#"
@@ -1254,7 +1254,7 @@ temp = 0.5
         assert_eq!(ls.temp, 0.5);
     }
 
-    // === VAL-CFG-012: config.example.toml parses and contains both backend types ===
+    // config.example.toml parses and contains both backend types
     #[test]
     fn test_config_example_toml_parses() {
         let example_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1286,7 +1286,7 @@ temp = 0.5
         assert!(has_vllm, "config.example.toml should have a vLLM profile");
     }
 
-    // === VAL-CFG-013: llama_server binary path not required for vLLM-only configs ===
+    // llama_server binary path not required for vLLM-only configs
     #[test]
     fn test_config_vllm_only_no_llama_binary_required() {
         let toml_str = r#"
@@ -1309,7 +1309,7 @@ docker_image = "vllm/vllm-openai:latest"
         config.validate().unwrap(); // should NOT error
     }
 
-    // === VAL-CFG-014: validate() errors when llama-server profiles exist but path is empty ===
+    // validate() errors when llama-server profiles exist but path is empty
     #[test]
     fn test_config_validate_llama_empty_path_with_llama_profiles() {
         let toml_str = r#"
@@ -1336,7 +1336,7 @@ ctx_size = 262144
         );
     }
 
-    // === VAL-CFG-014: Config validation checks llama_server binary for llama-server profiles ===
+    // Config validation checks llama_server binary for llama-server profiles
     #[test]
     fn test_config_validate_llama_binary_required_for_llama_profiles() {
         let toml_str = r#"
@@ -1361,7 +1361,7 @@ ctx_size = 262144
         );
     }
 
-    // === VAL-CFG-014 (continued): vLLM-only config with missing binary passes ===
+    // vLLM-only config with missing binary passes
     #[test]
     fn test_config_validate_vllm_only_missing_binary_passes() {
         let toml_str = r#"
@@ -1384,7 +1384,7 @@ docker_image = "vllm/vllm-openai:latest"
         config.validate().unwrap();
     }
 
-    // === Existing test: backward compat parse ===
+    // === Existing test: backward compat parse
     #[test]
     fn test_parse_config() {
         let toml_str = r#"
@@ -1413,7 +1413,7 @@ ctx_size = 262144
         assert_eq!(config.profiles["fast"].threads_batch, 24);
     }
 
-    // === Existing test: backward compat resolve_command_line ===
+    // === Existing test: backward compat resolve_command_line
     #[test]
     fn test_resolve_command_line() {
         let toml_str = r#"
@@ -1439,7 +1439,7 @@ ctx_size = 262144
         assert!(args.contains(&"--jinja".to_string()));
     }
 
-    // === BackendType serde tests ===
+    // === BackendType serde tests
     #[test]
     fn test_backend_type_serde() {
         // Serialize
@@ -1458,14 +1458,14 @@ ctx_size = 262144
         assert_eq!(BackendType::default(), BackendType::LlamaServer);
     }
 
-    // === BackendType Display ===
+    // === BackendType Display
     #[test]
     fn test_backend_type_display() {
         assert_eq!(BackendType::LlamaServer.to_string(), "llama-server");
         assert_eq!(BackendType::Vllm.to_string(), "vllm");
     }
 
-    // === VAL-EDGE-005: Config edge cases ===
+    // Config edge cases
 
     #[test]
     fn test_config_save_load_roundtrip_via_filesystem() {

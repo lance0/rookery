@@ -1179,7 +1179,7 @@ name = "test-agent"
         }
     }
 
-    // === VAL-AGENT-002: adopt() registers PID and is_running returns true ===
+    // adopt() registers PID and is_running returns true
     #[tokio::test]
     async fn test_agent_adopt_registers_pid_and_is_tracked() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1216,7 +1216,7 @@ name = "test-agent"
         drop(child);
     }
 
-    // === VAL-AGENT-002: stop() on adopted agent uses kill-by-PID path ===
+    // stop() on adopted agent uses kill-by-PID path
     #[tokio::test]
     async fn test_agent_stop_adopted_kills_by_pid() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1254,7 +1254,7 @@ name = "test-agent"
         drop(child);
     }
 
-    // === VAL-AGENT-001: stop_all() stops multiple running agents ===
+    // stop_all() stops multiple running agents
     #[tokio::test]
     async fn test_agent_stop_all_stops_multiple_agents() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1303,7 +1303,7 @@ name = "test-agent"
         join.expect("watchdog task should exit cleanly");
     }
 
-    // === VAL-AGENT-001: list() returns correct status and cleans up dead agents ===
+    // list() returns correct status and cleans up dead agents
     #[tokio::test]
     async fn test_agent_list_returns_status_and_cleans_dead() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1349,7 +1349,7 @@ name = "test-agent"
         manager.stop("long-lived").await.unwrap();
     }
 
-    // === VAL-AGENT-002: Agent persistence — save and load round-trip ===
+    // Agent persistence — save and load round-trip
     #[test]
     fn test_agent_persistence_save_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -1387,7 +1387,7 @@ name = "test-agent"
         assert_eq!(loaded.agents["agent-b"].pid, 67890);
     }
 
-    // === VAL-AGENT-002: Agent persistence — load from nonexistent file returns empty ===
+    // Agent persistence — load from nonexistent file returns empty
     #[test]
     fn test_agent_persistence_load_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1398,7 +1398,7 @@ name = "test-agent"
         assert!(state.agents.is_empty());
     }
 
-    // === VAL-AGENT-002: Agent persistence — reconcile removes dead agents ===
+    // Agent persistence — reconcile removes dead agents
     #[test]
     fn test_agent_persistence_reconcile_removes_dead() {
         let dir = tempfile::tempdir().unwrap();
@@ -1431,7 +1431,7 @@ name = "test-agent"
         assert!(reconciled.agents.contains_key("alive-agent"));
     }
 
-    // === Agent env var passing — spawn with custom env, verify they're set ===
+    // === Agent env var passing — spawn with custom env, verify they're set
     #[tokio::test]
     async fn test_agent_env_var_passing() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1476,7 +1476,7 @@ name = "test-agent"
         );
     }
 
-    // === Agent workdir setting — spawn with custom workdir ===
+    // === Agent workdir setting — spawn with custom workdir
     #[tokio::test]
     async fn test_agent_workdir_setting() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1511,7 +1511,7 @@ name = "test-agent"
         );
     }
 
-    // === is_running() for adopted (PID check) vs owned (try_wait) ===
+    // === is_running() for adopted (PID check) vs owned (try_wait)
     #[tokio::test]
     async fn test_agent_is_running_adopted_vs_owned() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1547,7 +1547,7 @@ name = "test-agent"
         drop(child);
     }
 
-    // === Crash detection — agent exits unexpectedly, detected on next list() ===
+    // === Crash detection — agent exits unexpectedly, detected on next list()
     #[tokio::test]
     async fn test_agent_crash_detected_on_list() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1590,7 +1590,7 @@ name = "test-agent"
         );
     }
 
-    // === Error count tracking — stderr error lines increment counter ===
+    // === Error count tracking — stderr error lines increment counter
     #[tokio::test]
     async fn test_agent_error_count_tracking() {
         let log_buffer = Arc::new(LogBuffer::new(100));
@@ -1638,7 +1638,7 @@ name = "test-agent"
         manager.stop("error-agent").await.unwrap();
     }
 
-    // === stop() on nonexistent agent returns NotFound error ===
+    // === stop() on nonexistent agent returns NotFound error
     #[tokio::test]
     async fn test_agent_stop_not_found() {
         let log_buffer = Arc::new(LogBuffer::new(100));
