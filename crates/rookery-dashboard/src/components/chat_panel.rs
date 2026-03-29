@@ -14,6 +14,7 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let (messages, set_messages) = signal(Vec::<ChatMessage>::new());
     let (input, set_input) = signal(String::new());
     let (streaming, set_streaming) = signal(false);
+    let (abort_ctrl, set_abort_ctrl) = signal(Option::<web_sys::AbortController>::None);
 
     let send_message = move || {
         let text = input.get().trim().to_string();
@@ -44,13 +45,20 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
         });
         set_streaming.set(true);
 
+        // Create AbortController for this request
+        let controller = web_sys::AbortController::new().ok();
+        set_abort_ctrl.set(controller.clone());
+
         let set_toasts = set_toasts.clone();
 
         wasm_bindgen_futures::spawn_local(async move {
-            match stream_chat(chat_msgs, set_messages).await {
+            match stream_chat(chat_msgs, set_messages, controller.as_ref()).await {
                 Ok(()) => {}
                 Err(e) => {
-                    show_toast(set_toasts, format!("chat error: {e}"), ToastKind::Error);
+                    // Don't show toast for user-initiated aborts
+                    if !e.contains("abort") && !e.contains("Abort") {
+                        show_toast(set_toasts, format!("chat error: {e}"), ToastKind::Error);
+                    }
                     set_messages.update(|msgs| {
                         if let Some(last) = msgs.last() {
                             if last.role == "assistant" {
@@ -67,6 +75,7 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                 }
             }
             set_streaming.set(false);
+            set_abort_ctrl.set(None);
         });
     };
 
@@ -82,6 +91,12 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let on_clear = move |_| {
         if !streaming.get() {
             set_messages.set(Vec::new());
+        }
+    };
+
+    let on_stop = move |_| {
+        if let Some(ctrl) = abort_ctrl.get() {
+            ctrl.abort();
         }
     };
 
@@ -123,13 +138,21 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                     rows="2"
                 />
                 <div class="chat-btn-col">
-                    <button
-                        class="btn"
-                        on:click=on_send
-                        disabled=move || streaming.get() || input.get().trim().is_empty()
-                    >
-                        {move || if streaming.get() { "..." } else { "Send" }}
-                    </button>
+                    {move || if streaming.get() {
+                        view! {
+                            <button class="btn danger" on:click=on_stop>"Stop"</button>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <button
+                                class="btn"
+                                on:click=on_send
+                                disabled=move || input.get().trim().is_empty()
+                            >
+                                "Send"
+                            </button>
+                        }.into_any()
+                    }}
                     <button
                         class="btn"
                         on:click=on_clear
@@ -146,6 +169,7 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
 async fn stream_chat(
     messages: Vec<serde_json::Value>,
     set_messages: WriteSignal<Vec<ChatMessage>>,
+    abort_controller: Option<&web_sys::AbortController>,
 ) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
 
@@ -154,7 +178,7 @@ async fn stream_chat(
         "max_tokens": 2048,
     });
 
-    let mut opts = web_sys::RequestInit::new();
+    let opts = web_sys::RequestInit::new();
     opts.set_method("POST");
 
     let headers = web_sys::Headers::new().map_err(|e| format!("{e:?}"))?;
@@ -164,6 +188,10 @@ async fn stream_chat(
     opts.set_headers(&headers);
 
     opts.set_body(&JsValue::from_str(&body.to_string()));
+
+    if let Some(ctrl) = abort_controller {
+        opts.set_signal(Some(&ctrl.signal()));
+    }
 
     let request =
         web_sys::Request::new_with_str_and_init("/api/chat", &opts).map_err(|e| format!("{e:?}"))?;

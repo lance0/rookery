@@ -386,8 +386,22 @@ body {
 /* Section */
 .section { margin-bottom: 10px; }
 
-/* Empty */
+/* Empty / Loading / Error */
 .empty { color: var(--muted); font-size: 11px; }
+.loading { color: var(--muted); font-size: 12px; text-align: center; padding: 40px 0; }
+
+.load-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    background: var(--surface);
+    border: 1px solid var(--red);
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--red);
+}
 
 /* Settings */
 .settings-header { margin-bottom: 10px; }

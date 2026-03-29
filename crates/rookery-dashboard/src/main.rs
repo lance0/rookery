@@ -167,6 +167,9 @@ fn App() -> impl IntoView {
     let (toasts, set_toasts) = signal(Vec::<Toast>::new());
     let (is_light, set_is_light) = signal(init_theme());
 
+    let (loading, set_loading) = signal(true);
+    let (load_error, set_load_error) = signal(Option::<String>::None);
+
     // Load initial data
     let set_profiles_init = set_profiles.clone();
     let set_agents_init = set_agents.clone();
@@ -174,18 +177,27 @@ fn App() -> impl IntoView {
     let set_model_info_init = set_model_info.clone();
 
     wasm_bindgen_futures::spawn_local(async move {
+        let mut any_ok = false;
         if let Ok(p) = api::fetch_profiles().await {
             set_profiles_init.set(p);
+            any_ok = true;
         }
         if let Ok(a) = api::fetch_agents().await {
             set_agents_init.set(a);
+            any_ok = true;
         }
         if let Ok(l) = api::fetch_logs(100).await {
             set_logs_init.set(l);
+            any_ok = true;
         }
         if let Ok(m) = api::fetch_model_info().await {
             set_model_info_init.set(m);
+            any_ok = true;
         }
+        if !any_ok {
+            set_load_error.set(Some("failed to connect to rookeryd".into()));
+        }
+        set_loading.set(false);
     });
 
     // SSE connection
@@ -409,8 +421,26 @@ fn App() -> impl IntoView {
                 {tab_btn(Tab::Models, "Models", "7")}
             </div>
 
+            {move || {
+                if let Some(err) = load_error.get() {
+                    return view! {
+                        <div class="load-error">
+                            <span>{err}</span>
+                            <button class="btn" on:click=move |_| {
+                                web_sys::window().and_then(|w| w.location().reload().ok());
+                            }>"Retry"</button>
+                        </div>
+                    }.into_any();
+                }
+                view! { <span></span> }.into_any()
+            }}
+
             <div class="tab-content">
-                {move || match tab.get() {
+                {move || {
+                if loading.get() {
+                    return view! { <div class="loading">"loading..."</div> }.into_any();
+                }
+                match tab.get() {
                     Tab::Overview => view! {
                         <div>
                             <div class="grid">
@@ -461,6 +491,7 @@ fn App() -> impl IntoView {
                             <ModelsPanel set_toasts=set_toasts />
                         </div>
                     }.into_any(),
+                }.into_any()
                 }}
             </div>
 

@@ -52,6 +52,8 @@
 - [x] Chat playground — streaming chat tab with SSE proxy
 - [x] Dark/light theme toggle with localStorage persistence
 - [x] Keyboard shortcuts (1-7 tabs, s/x start/stop, t theme)
+- [x] Dedicated Agents tab with agent cards, filtered agent logs, watchdog state display
+- [x] Compact agent summary pills on Overview tab
 - [x] Toast notifications (success/error on all actions)
 - [x] Config API (GET /api/config, PUT /api/config/profile/:name)
 
@@ -80,12 +82,12 @@
 - [x] Fix polling loop accumulation: move ServerStats polling to App level (single loop, passed as prop)
 - [x] Fix chat payload: build message list before pushing empty assistant message
 - [x] SSE onopen handler: set connected=true on successful reconnection
-- [ ] Chat abort controller: allow canceling in-flight stream requests
+- [x] Chat abort controller: allow canceling in-flight stream requests
 - [x] Partial stream failure: mark incomplete assistant messages with " [incomplete]", filter from API payloads
 
 ### Frontend — UX Reliability
 - [x] Settings input validation: range checks on sampling params, error toasts for invalid values
-- [ ] Loading/error states for initial data fetch (profiles, agents, logs)
+- [x] Loading/error states for initial data fetch (profiles, agents, logs)
 - [x] Bench panel: show error toast on failure
 - [x] Fix CSS variable: --text-muted → --muted in header connection status
 
@@ -143,6 +145,7 @@
 - [x] Agent stderr error counting: atomic counter shared with stderr capture task
 - [x] Restart reason tracking: "crash", "swap", "port_recovery", "daemon_restart"
 - [x] Enriched `/api/agents` list: includes health metrics for all running agents (no N+1 calls needed)
+- [x] Enriched `/api/agents/{name}/health`: watchdog state, backoff, dependency port status, last restart timestamp
 - [x] Error count reset on restart: `error_count` resets per session, `lifetime_errors` accumulates
 - [ ] Agent chat timeout config: kill hung requests after configurable timeout
 - [x] Agent restart on error patterns: `restart_on_error_patterns` config, watch channel triggers immediate restart via watchdog select!
@@ -263,6 +266,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 
 ## Quality of Life (Inspired by Competitive Research)
 - [x] Model aliasing: `aliases` field on profiles, resolved in CLI and API (e.g., "fast" → qwen_fast)
+- [x] CLI auto-detects daemon address from config (no hardcoded port)
 - [x] Auto-sleep: `idle_timeout` config, `Sleeping` state, wake-on-request, manual `sleep`/`wake` CLI + API
 - [ ] API key auth: optional bearer token for dashboard and API access
 - [ ] Swagger/OpenAPI spec generation for the REST API
