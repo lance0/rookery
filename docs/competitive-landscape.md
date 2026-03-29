@@ -1,124 +1,87 @@
-# Competitive Landscape (March 2026)
+# Competitive Landscape
 
-## Direct Competitors
+How Rookery compares to other local inference management tools.
 
-### llama-swap (2.9k stars)
-**Closest competitor.** Go binary that hot-swaps models on API requests.
+## Comparison
+
+### llama-swap
+Go binary that hot-swaps models on API requests. The closest tool to Rookery in concept.
 
 | Feature | llama-swap | Rookery |
 |---------|-----------|---------|
-| Model hot-swap | API-based auto-swap | CLI/API profile swap |
-| GPU monitoring | None | NVML (VRAM, temp, power, processes) |
-| Agent management | None | Full lifecycle (watchdog, health, restart) |
-| Inference health | None | Canary + CUDA stderr detection |
-| Metrics export | Prometheus + Grafana | Prometheus `/metrics` + Dashboard |
+| Model hot-swap | Auto-swap on request | CLI/API/dashboard profile swap |
+| GPU monitoring | None | NVML (VRAM, temp, power, per-process) |
+| Agent management | None | Full lifecycle (watchdog, health, error patterns) |
+| Inference health | None | Canary + CUDA stderr detection + auto-restart |
+| Idle management | Auto-unload | Auto-sleep with wake-on-request |
+| Metrics | Prometheus + Grafana | Prometheus `/metrics` + live dashboard |
 | Backend support | llama.cpp, vLLM, tabbyAPI, SD | llama.cpp, vLLM (Docker Compose) |
-| Model aliasing | Yes | No (use profile names) |
+| Model aliasing | Yes | Yes (profile aliases) |
 | Request rewriting | Yes | No |
-| Docker orchestration | Yes | Yes (vLLM via Docker Compose) |
+| Dashboard | No | Embedded WASM (7 tabs) |
+| Model discovery | No | HuggingFace search + VRAM-aware recommendations |
 
-### llamactl (101 stars)
-**Architecturally similar.** Go binary with React dashboard, multi-backend.
+### Ollama (130k+ stars)
+The mainstream default for local inference. User-friendly but adds overhead and limits control.
 
-- Has: vLLM + MLX + llama.cpp backends, SQLite persistence, port range allocation
-- Missing: GPU monitoring, agent management, inference canary, capacity gate
-
-### Ollama (130k stars)
-**Mainstream default.** User-friendly but adds ~20-30% overhead.
-
-- Has: Massive ecosystem, Modelfile system, model library, cross-platform
-- Missing: Direct llama.cpp control, agent management, per-profile params, reliability features
-- Known issues: Stability under sustained load, hangs requiring restarts
+- Massive ecosystem, Modelfile system, built-in model library, cross-platform
+- Adds ~20-30% inference overhead vs raw llama.cpp
+- No direct control over llama.cpp parameters, no agent management, no per-profile sampling params
+- Known stability issues under sustained load
 
 ### LM Studio (proprietary)
-**GUI-first.** Desktop app with visual model browser.
+GUI-first desktop app with a polished model browser.
 
-- Has: Multi-GPU controls, polished UI, headless daemon mode, speculative decoding
-- Missing: Agent management, inference canary, open source, CLI-first workflow
+- Multi-GPU controls, visual quant selector, headless daemon mode, speculative decoding
+- Proprietary, no CLI-first workflow, no agent management, no inference canary
 
 ### GPUStack (7k stars)
-**Enterprise cluster manager.** Multi-node GPU scheduling.
+Enterprise-grade multi-node GPU cluster manager.
 
-- Has: Multi-node, load balancing, Grafana/Prometheus, user management
-- Overkill for single-machine use
+- Multi-node scheduling, load balancing, Grafana/Prometheus, user management
+- Designed for clusters — overkill for single-machine setups
 
 ### LocalAI (30k stars)
-**Multi-modal Swiss army knife.** 35+ backends, image/audio/video.
+Multi-modal Swiss army knife with 35+ backends.
 
-- Has: Broad backend/modal support, dynamic memory reclaimer
-- Missing: Agent management, per-model tuning, lightweight design
+- Broad backend and modality support (image, audio, video), dynamic memory reclaimer
+- No agent management, limited per-model tuning, heavier footprint
 
-## Rookery's Unique Position
+### llamactl
+Go binary with React dashboard and multi-backend support.
+
+- vLLM + MLX + llama.cpp backends, SQLite persistence, port range allocation
+- No GPU monitoring, no agent management, no inference canary
+
+## What Makes Rookery Different
+
+Rookery is built for **always-on single-machine inference** — the use case where you run a local model 24/7 for agents, coding tools, and chat, and you need it to stay healthy without babysitting.
 
 No single competitor has this combination:
-1. **Inference canary** with auto-restart on CUDA zombie state
-2. **Agent lifecycle management** (watchdog, error patterns, dependency port health)
-3. **Orphan process adoption** across daemon restarts
-4. **VRAM capacity gate** before model loading
-5. **Hardware-aware model recommendations** from HuggingFace
-6. **Per-profile sampling params** + custom chat templates
 
-## Features to Adopt from Competitors
+1. **Inference canary** — periodic completion requests detect CUDA zombie state, auto-restart on double failure
+2. **Agent lifecycle management** — watchdog with crash recovery, dependency port health, error pattern restart, exponential backoff
+3. **Orphan process adoption** — daemon restart discovers and adopts running llama-server processes
+4. **Auto-sleep / wake-on-request** — unloads after idle timeout, wakes transparently on next API call
+5. **VRAM capacity gate** — checks free GPU memory before loading a model
+6. **Model discovery** — search HuggingFace, browse quants with VRAM-aware recommendations, one-click download
+7. **Live dashboard** — embedded WASM frontend with GPU gauges, agent controls, chat playground, model browser
+8. **Multi-backend** — llama-server and vLLM from the same config, hot-swap between them
 
-| Feature | Source | Priority | Effort |
-|---------|--------|----------|--------|
-| ~~Prometheus metrics export~~ | ~~llama-swap, GPUStack~~ | ~~High~~ | **Done** |
-| Multi-backend (vLLM, MLX) | llamactl | High | Already planned |
-| Model aliasing / friendly names | llama-swap | Medium | Low |
-| Request rewriting / filtering | llama-swap | Low | Medium |
-| Docker container orchestration | llama-swap | Medium | Part of vLLM plan |
-| Auto-unload on idle timeout | llama-swap, KoboldCpp | Medium | Medium |
-| Swagger/OpenAPI docs | llamactl | Low | Low |
+## Feature Matrix
 
-## Community Feature Requests (What Users Want)
-
-### Most Requested (from GitHub issues, HN, Reddit)
-
-1. **Model idle timeout / auto-sleep** — llama.cpp router never unloads, Ollama eviction is buggy. Users want configurable idle timeouts with reload on request.
-2. **VRAM-based eviction** — unload based on VRAM pressure, not just model count.
-3. **Model pinning** — pin latency-sensitive models (code completion) so they never get evicted.
-4. **Always-on home AI server** — daemon that manages full lifecycle, serves every device on LAN. 55% of enterprise AI inference is now on-premises (up from 12% in 2023).
-5. **Speculative decoding management** — small draft model proposes tokens, large model verifies.
-6. **Prometheus + Grafana metrics** — vLLM has `/metrics`, llama-server doesn't. No tool provides integrated GPU + inference metrics.
-7. **Agent crash recovery** — OpenClaw reported 8+ hours of agent downtime from hanging tool calls.
-
-### The "Three Tool Problem"
-
-Users currently need:
-- LM Studio for model discovery
-- Ollama for dev
-- vLLM for production
-
-They want **one tool that does all three**. Rookery is positioned to be that tool.
-
-### Rookery's Feature Matrix vs Community Requests
-
-| Request | Rookery Status |
-|---------|---------------|
-| Model hot-swap with drain | Done |
-| VRAM capacity gate | Done |
-| Agent watchdog + crash recovery | Done |
-| Dependency port health | Done |
-| Inference canary | Done |
-| CUDA crash detection | Done |
-| HuggingFace model discovery | Done |
-| Hardware-profiled recommendations | Done |
-| GPU dashboard (NVML) | Done |
-| systemd + OOM protection | Done |
-| Auto-sleep / idle timeout | Roadmap |
-| Prometheus metrics | **Done** |
-| vLLM backend | **Done** |
-| Model aliasing | Roadmap |
-| Multi-model concurrent | Roadmap |
-| Speculative decoding | Future |
-| Model pinning | Future |
-| VRAM-based eviction | Future |
-
-## Sources
-
-- [Ollama vs vLLM comparison 2026](https://www.glukhov.org/llm-hosting/comparisons/hosting-llms-ollama-localai-jan-lmstudio-vllm-comparison/)
-- [llama.cpp model management](https://huggingface.co/blog/ggml-org/model-management-in-llamacpp)
-- [llamactl: Unified management](https://github.com/lordmathis/llamactl)
-- [Ask HN: Who's running local AI workstations in 2026?](https://news.ycombinator.com/item?id=46560663)
-- [Monitoring LLM Inference: Prometheus & Grafana](https://www.glukhov.org/observability/monitoring-llm-inference-prometheus-grafana/)
-- [Local LLM Inference 2026: Complete Guide](https://blog.starmorph.com/blog/local-llm-inference-tools-guide)
+| Feature | Rookery | llama-swap | Ollama | GPUStack | LocalAI |
+|---------|---------|-----------|--------|----------|---------|
+| Hot-swap profiles | Yes | Yes | No | No | No |
+| Multi-backend | Yes | Partial | No | Partial | Yes |
+| Live dashboard | Yes | No | No | Yes | No |
+| Agent management | Yes | No | No | No | No |
+| Model browser + download | Yes | No | No | Yes | Yes |
+| VRAM-aware recommendations | Yes | No | No | Yes | No |
+| Auto-sleep / wake | Yes | Yes | Partial | No | No |
+| Inference canary | Yes | No | No | Yes | No |
+| CUDA crash detection | Yes | No | No | No | No |
+| Prometheus metrics | Yes | Yes | No | Yes | Yes |
+| Single binary + dashboard | Yes | Yes | Yes | No | No |
+| API key auth | Yes | No | No | Yes | Yes |
+| systemd + OOM protection | Yes | No | No | Yes | No |
