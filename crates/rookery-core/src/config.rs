@@ -379,6 +379,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub version_file: Option<PathBuf>,
 
+    /// Shell command used to update the agent in place.
+    #[serde(default)]
+    pub update_command: Option<String>,
+
+    /// Working directory used for the update command. Falls back to `workdir`.
+    #[serde(default)]
+    pub update_workdir: Option<PathBuf>,
+
     /// Stderr patterns that trigger an immediate restart (case-insensitive substring match).
     /// Example: ["telegram.error.TimedOut", "ReadTimeout", "CLOSE_WAIT"]
     #[serde(default)]

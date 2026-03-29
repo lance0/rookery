@@ -106,6 +106,16 @@ pub async fn stop_agent(name: &str) -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+pub async fn update_agent(name: &str) -> Result<serde_json::Value, String> {
+    let resp = Request::post(&format!("/api/agents/{name}/update"))
+        .json(&serde_json::json!({}))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 pub async fn run_bench() -> Result<serde_json::Value, String> {
     let resp = Request::get("/api/bench")
         .send()

@@ -429,6 +429,7 @@ async fn main() {
         .route("/api/agents", get(routes::get_agents))
         .route("/api/agents/start", post(routes::post_agent_start))
         .route("/api/agents/stop", post(routes::post_agent_stop))
+        .route("/api/agents/{name}/update", post(routes::post_agent_update))
         .route("/api/agents/{name}/health", get(routes::get_agent_health))
         .route("/api/config", get(routes::get_config))
         .route("/api/config/profile/{name}", put(routes::put_profile))

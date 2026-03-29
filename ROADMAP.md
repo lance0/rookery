@@ -163,8 +163,8 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Error pattern analysis: classify crashes (OOM, timeout, connection) vs normal restarts
 
 ### CLI — Update Coordination
-- [ ] `rookery agent update hermes --to <version>` — set desired version, trigger hermes update, restart
-- [ ] `rookery agent update hermes --latest` — update to latest available version
+- [x] `rookery agent update hermes` — run update_command, stop/restart, report version diff
+- [ ] `rookery agent update hermes --to <version>` — version-targeted update (deferred)
 - [ ] `rookery agent version hermes` — show desired vs actual version, update available
 - [x] `rookery agent describe hermes` — full status (PID, uptime, version, restart count, health, errors)
 

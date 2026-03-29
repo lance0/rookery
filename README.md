@@ -32,6 +32,7 @@ rookery logs                # last 50 log lines
 rookery logs -f             # follow mode (stream via SSE)
 rookery agent start hermes  # start a managed agent
 rookery agent stop hermes   # stop a managed agent
+rookery agent update hermes # stop, update, restart a managed agent
 rookery agent status        # list agents and their status
 rookery agent describe hermes # detailed health, restarts, errors
 rookery config              # validate config, show resolved commands
@@ -114,6 +115,7 @@ The daemon exposes a REST API:
 | `/api/agents` | GET | List agents and their status |
 | `/api/agents/start` | POST | Start agent `{ "name": "hermes" }` |
 | `/api/agents/stop` | POST | Stop agent `{ "name": "hermes" }` |
+| `/api/agents/{name}/update` | POST | Stop, update, and restart an agent |
 | `/api/config` | GET | Full config (agent env vars redacted) |
 | `/api/config/profile/{name}` | PUT | Update profile sampling params |
 | `/api/model-info` | GET | Model ID, context window from llama-server |

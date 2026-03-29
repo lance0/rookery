@@ -182,6 +182,14 @@ enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Update an agent using its configured update command
+    Update {
+        /// Agent name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // Response types matching daemon API
@@ -271,6 +279,7 @@ async fn main() {
             AgentCommands::Describe { name, json } => {
                 cmd_agent_describe(&client, &name, json).await
             }
+            AgentCommands::Update { name, json } => cmd_agent_update(&client, &name, json).await,
         },
         Commands::Models { cmd } => match cmd {
             ModelCommands::Search { query, json } => cmd_models_search(&client, &query, json).await,
@@ -702,6 +711,42 @@ async fn cmd_agent_describe(
     println!("Errors:   {errors} (lifetime: {lifetime})");
     if let Some(started) = resp["started_at"].as_str() {
         println!("Started:  {started}");
+    }
+
+    Ok(())
+}
+
+async fn cmd_agent_update(
+    client: &DaemonClient,
+    name: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    if !json {
+        println!("updating agent '{name}'...");
+    }
+
+    let resp: serde_json::Value = client
+        .post(&format!("/api/agents/{name}/update"), &EmptyBody {})
+        .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let success = resp["success"].as_bool().unwrap_or(false);
+    let message = resp["message"].as_str().unwrap_or("");
+    if success {
+        println!("{message}");
+    } else {
+        eprintln!("{message}");
+    }
+    if let Some(version) = resp["version"].as_str() {
+        println!("version: {version}");
     }
 
     Ok(())
@@ -1596,6 +1641,7 @@ mod tests {
             vec!["rookery", "agent", "start", "myagent"],
             vec!["rookery", "agent", "stop", "myagent"],
             vec!["rookery", "agent", "status"],
+            vec!["rookery", "agent", "update", "myagent"],
         ];
 
         for args in &subcommands {
@@ -1622,6 +1668,7 @@ mod tests {
             vec!["rookery", "sleep", "--json"],
             vec!["rookery", "wake", "--json"],
             vec!["rookery", "config", "--json"],
+            vec!["rookery", "agent", "update", "myagent", "--json"],
         ];
 
         for args in &commands_with_json {

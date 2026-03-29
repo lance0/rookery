@@ -115,4 +115,6 @@ restart_on_swap = true
 restart_on_crash = true
 depends_on_port = 8081
 version_file = "/home/lance/.hermes/hermes-agent/pyproject.toml"
+update_command = "/home/lance/.local/bin/hermes update"
+update_workdir = "/home/lance/.hermes/hermes-agent"
 restart_on_error_patterns = ["telegram.error.TimedOut", "ReadTimeout", "deleteWebhook"]

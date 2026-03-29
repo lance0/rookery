@@ -1022,6 +1022,81 @@ pub struct AgentActionResponse {
     pub message: String,
 }
 
+#[derive(Serialize)]
+pub struct AgentUpdateResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<String>,
+}
+
+async fn capture_prefixed_output<R>(
+    reader: R,
+    prefix: String,
+    log_buffer: Arc<rookery_engine::logs::LogBuffer>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncBufReadExt;
+
+    let reader = tokio::io::BufReader::new(reader);
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        log_buffer.push(format!("{prefix} {line}"));
+    }
+}
+
+async fn run_agent_update_command(
+    state: &Arc<AppState>,
+    name: &str,
+    config: &rookery_core::config::AgentConfig,
+    command: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-lc").arg(command);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(false);
+
+    if let Some(workdir) = config.update_workdir.as_ref().or(config.workdir.as_ref()) {
+        cmd.current_dir(workdir);
+    }
+    for (key, value) in &config.env {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let prefix = format!("[agent:{name}:update]");
+
+    let stdout_task = child.stdout.take().map(|stdout| {
+        tokio::spawn(capture_prefixed_output(
+            stdout,
+            prefix.clone(),
+            state.log_buffer.clone(),
+        ))
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(capture_prefixed_output(
+            stderr,
+            prefix,
+            state.log_buffer.clone(),
+        ))
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    if let Some(task) = stdout_task {
+        let _ = task.await;
+    }
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+
+    Ok(status)
+}
+
 pub async fn post_agent_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AgentActionRequest>,
@@ -1054,6 +1129,122 @@ pub async fn post_agent_stop(
             success: false,
             message: e.to_string(),
         })),
+    }
+}
+
+pub async fn post_agent_update(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<AgentUpdateResponse>, StatusCode> {
+    let _op_guard = state.op_lock.lock().await;
+
+    let agent_config = {
+        let config = state.config.read().await;
+        config
+            .agents
+            .get(&name)
+            .cloned()
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+
+    let update_command = match agent_config.update_command.as_deref() {
+        Some(command) if !command.trim().is_empty() => command.to_string(),
+        _ => {
+            return Ok(Json(AgentUpdateResponse {
+                success: false,
+                message: format!("agent '{name}' has no update_command configured"),
+                version: None,
+                previous_version: None,
+            }));
+        }
+    };
+
+    let previous_version = agent_config
+        .version_file
+        .as_deref()
+        .and_then(rookery_engine::agent::read_version_file);
+    let was_running = state.agent_manager.is_running(&name).await;
+
+    if was_running && let Err(e) = state.agent_manager.stop(&name).await {
+        return Ok(Json(AgentUpdateResponse {
+            success: false,
+            message: format!("failed to stop agent '{name}' before update: {e}"),
+            version: previous_version.clone(),
+            previous_version,
+        }));
+    }
+
+    tracing::info!(agent = %name, command = %update_command, "running agent update");
+    let update_status =
+        run_agent_update_command(&state, &name, &agent_config, &update_command).await;
+
+    match update_status {
+        Ok(status) if status.success() => {
+            let version = agent_config
+                .version_file
+                .as_deref()
+                .and_then(rookery_engine::agent::read_version_file);
+
+            match state.agent_manager.start(&name, &agent_config).await {
+                Ok(info) => {
+                    let message = match (&previous_version, &version) {
+                        (Some(from), Some(to)) if from != to => {
+                            format!("updated {name} from {from} to {to}")
+                        }
+                        (_, Some(to)) => format!("updated {name} to {to}"),
+                        _ => format!("updated {name}"),
+                    };
+
+                    tracing::info!(agent = %name, pid = info.pid, "agent update completed");
+                    Ok(Json(AgentUpdateResponse {
+                        success: true,
+                        message,
+                        version,
+                        previous_version,
+                    }))
+                }
+                Err(e) => Ok(Json(AgentUpdateResponse {
+                    success: false,
+                    message: format!("updated {name}, but failed to restart agent: {e}"),
+                    version,
+                    previous_version,
+                })),
+            }
+        }
+        Ok(status) => {
+            let exit_detail = status
+                .code()
+                .map(|code| format!("exit code {code}"))
+                .unwrap_or_else(|| "terminated by signal".to_string());
+            let restart_result = state.agent_manager.start(&name, &agent_config).await;
+            let restart_suffix = match restart_result {
+                Ok(_) => "agent restarted on previous code".to_string(),
+                Err(e) => format!("failed to restart previous agent after update error: {e}"),
+            };
+
+            Ok(Json(AgentUpdateResponse {
+                success: false,
+                message: format!("update failed for {name} ({exit_detail}); {restart_suffix}"),
+                version: previous_version.clone(),
+                previous_version,
+            }))
+        }
+        Err(e) => {
+            let restart_result = state.agent_manager.start(&name, &agent_config).await;
+            let restart_suffix = match restart_result {
+                Ok(_) => "agent restarted on previous code".to_string(),
+                Err(restart_error) => {
+                    format!("failed to restart previous agent after update error: {restart_error}")
+                }
+            };
+
+            Ok(Json(AgentUpdateResponse {
+                success: false,
+                message: format!("failed to run update for {name}: {e}; {restart_suffix}"),
+                version: previous_version.clone(),
+                previous_version,
+            }))
+        }
     }
 }
 
@@ -2476,6 +2667,8 @@ mod tests {
                         auto_start: false,
                         depends_on_port: None,
                         version_file: None,
+                        update_command: None,
+                        update_workdir: None,
                         restart_on_error_patterns: vec![],
                     },
                 );
@@ -2866,6 +3059,7 @@ mod tests {
                 .route("/api/agents", get(super::get_agents))
                 .route("/api/agents/start", post(super::post_agent_start))
                 .route("/api/agents/stop", post(super::post_agent_stop))
+                .route("/api/agents/{name}/update", post(super::post_agent_update))
                 .route("/api/hardware", get(super::get_hardware))
                 .fallback(super::get_dashboard)
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
@@ -3399,6 +3593,8 @@ mod tests {
                         auto_start: false,
                         depends_on_port: None,
                         version_file: None,
+                        update_command: None,
+                        update_workdir: None,
                         restart_on_error_patterns: vec![],
                     },
                 );
@@ -3448,6 +3644,8 @@ mod tests {
                         auto_start: false,
                         depends_on_port: None,
                         version_file: None,
+                        update_command: None,
+                        update_workdir: None,
                         restart_on_error_patterns: vec![],
                     },
                 );
@@ -3497,6 +3695,191 @@ mod tests {
             assert!(
                 msg.contains("sleeper") && msg.contains("stopped"),
                 "message should confirm agent stopped, got: {msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_route_agent_update_success_restarts_and_reports_version() {
+            let (_dir, state) = build_test_app_state(None);
+            let agent_dir = tempfile::tempdir().unwrap();
+            let version_path = agent_dir.path().join("pyproject.toml");
+            std::fs::write(
+                &version_path,
+                "[project]\nname = \"hermes\"\nversion = \"0.4.0\"\n",
+            )
+            .unwrap();
+
+            let agent_config = rookery_core::config::AgentConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-lc".into(), "sleep 60".into()],
+                workdir: Some(agent_dir.path().to_path_buf()),
+                env: std::collections::HashMap::new(),
+                restart_on_swap: false,
+                restart_on_crash: false,
+                auto_start: false,
+                depends_on_port: None,
+                version_file: Some(version_path.clone()),
+                update_command: Some(
+                    "printf '[project]\\nname = \"hermes\"\\nversion = \"0.5.0\"\\n' > pyproject.toml && echo updated".into(),
+                ),
+                update_workdir: Some(agent_dir.path().to_path_buf()),
+                restart_on_error_patterns: vec![],
+            };
+
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert("hermes".into(), agent_config.clone());
+            }
+
+            state
+                .agent_manager
+                .start("hermes", &agent_config)
+                .await
+                .unwrap();
+
+            let app = test_router_full(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/hermes/update")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], true);
+            assert_eq!(json["previous_version"], "0.4.0");
+            assert_eq!(json["version"], "0.5.0");
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("updated hermes from 0.4.0 to 0.5.0")
+            );
+            assert!(state.agent_manager.is_running("hermes").await);
+
+            let health = state.agent_manager.get_health("hermes").await.unwrap();
+            assert_eq!(health.version.as_deref(), Some("0.5.0"));
+
+            let logs = state.log_buffer.last_n(20).join("\n");
+            assert!(logs.contains("[agent:hermes:update] updated"));
+        }
+
+        #[tokio::test]
+        async fn test_route_agent_update_failure_restarts_old_agent() {
+            let (_dir, state) = build_test_app_state(None);
+            let agent_dir = tempfile::tempdir().unwrap();
+            let version_path = agent_dir.path().join("pyproject.toml");
+            std::fs::write(
+                &version_path,
+                "[project]\nname = \"hermes\"\nversion = \"0.4.0\"\n",
+            )
+            .unwrap();
+
+            let agent_config = rookery_core::config::AgentConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-lc".into(), "sleep 60".into()],
+                workdir: Some(agent_dir.path().to_path_buf()),
+                env: std::collections::HashMap::new(),
+                restart_on_swap: false,
+                restart_on_crash: false,
+                auto_start: false,
+                depends_on_port: None,
+                version_file: Some(version_path.clone()),
+                update_command: Some("echo boom >&2; exit 7".into()),
+                update_workdir: Some(agent_dir.path().to_path_buf()),
+                restart_on_error_patterns: vec![],
+            };
+
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert("hermes".into(), agent_config.clone());
+            }
+
+            state
+                .agent_manager
+                .start("hermes", &agent_config)
+                .await
+                .unwrap();
+
+            let app = test_router_full(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/hermes/update")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], false);
+            assert_eq!(json["previous_version"], "0.4.0");
+            assert_eq!(json["version"], "0.4.0");
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("agent restarted on previous code")
+            );
+            assert!(state.agent_manager.is_running("hermes").await);
+
+            let health = state.agent_manager.get_health("hermes").await.unwrap();
+            assert_eq!(health.version.as_deref(), Some("0.4.0"));
+
+            let logs = state.log_buffer.last_n(20).join("\n");
+            assert!(logs.contains("[agent:hermes:update] boom"));
+        }
+
+        #[tokio::test]
+        async fn test_route_agent_update_missing_command_returns_failure() {
+            let (_dir, state) = build_test_app_state(None);
+
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert(
+                    "hermes".into(),
+                    rookery_core::config::AgentConfig {
+                        command: "/bin/echo".into(),
+                        args: vec![],
+                        workdir: None,
+                        env: std::collections::HashMap::new(),
+                        restart_on_swap: false,
+                        restart_on_crash: false,
+                        auto_start: false,
+                        depends_on_port: None,
+                        version_file: None,
+                        update_command: None,
+                        update_workdir: None,
+                        restart_on_error_patterns: vec![],
+                    },
+                );
+            }
+
+            let app = test_router_full(state);
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/hermes/update")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert_eq!(json["success"], false);
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("has no update_command configured")
             );
         }
 

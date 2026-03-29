@@ -138,5 +138,7 @@ restart_on_swap = true
 restart_on_crash = true
 depends_on_port = 8081
 version_file = "/path/to/pyproject.toml"
+update_command = "/home/lance/.local/bin/hermes update"
+update_workdir = "/path/to/agent/repo"
 restart_on_error_patterns = ["telegram.error.TimedOut"]
 ```

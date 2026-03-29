@@ -26,6 +26,7 @@ The Rookery dashboard is a Leptos WASM application embedded in the daemon binary
 - **Sleep / Wake controls** — status card exposes manual sleep and wake without leaving the dashboard
 - **Sleeping state** — status card shows `sleeping` with the remembered profile and no stale PID/port
 - **Agent panel** — green/gray dot, version, uptime, restart count (yellow), error count (red)
+- **Agent updates** — each agent row exposes an Update button backed by the daemon API
 - **GPU gauges** — live VRAM, temperature, utilization, power from NVML
 - **Mobile responsive** — tabs scroll horizontally, cards stack vertically on small screens
 - **SSE auto-reconnect** — dashboard reconnects automatically if the daemon restarts

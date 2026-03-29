@@ -108,7 +108,7 @@ impl AgentManager {
         tracing::info!(agent = name, pid = entry.pid, "adopting existing agent");
         let version = config
             .and_then(|c| c.version_file.as_ref())
-            .and_then(read_version_file);
+            .and_then(|path| read_version_file(path));
         let info = AgentInfo {
             name: name.to_string(),
             pid: entry.pid,
@@ -251,7 +251,10 @@ impl AgentManager {
             });
         }
 
-        let version = config.version_file.as_ref().and_then(read_version_file);
+        let version = config
+            .version_file
+            .as_ref()
+            .and_then(|path| read_version_file(path));
         let info = AgentInfo {
             name: name.to_string(),
             pid,
@@ -808,7 +811,7 @@ impl AgentManager {
 }
 
 /// Read a version string from a pyproject.toml or Cargo.toml file.
-fn read_version_file(path: &std::path::PathBuf) -> Option<String> {
+pub fn read_version_file(path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     // Parse as TOML and look for version in common locations
     let table: toml::Table = content.parse().ok()?;
@@ -955,6 +958,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         };
 
@@ -984,6 +989,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         };
 
@@ -1009,6 +1016,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         };
 
@@ -1043,6 +1052,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         };
 
@@ -1078,6 +1089,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         };
 
@@ -1110,6 +1123,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
         };
 
@@ -1146,6 +1161,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
         };
 
@@ -1211,6 +1228,8 @@ name = "test-agent"
             restart_on_crash: false,
             depends_on_port: None,
             version_file: None,
+            update_command: None,
+            update_workdir: None,
             restart_on_error_patterns: vec![],
         }
     }

@@ -20,6 +20,8 @@ pub fn AgentPanel(
     set_agents: WriteSignal<AgentsData>,
     set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
+    let (updating_agent, set_updating_agent) = signal(Option::<String>::None);
+
     view! {
         <div class="card">
             <h2>"Agents"</h2>
@@ -45,11 +47,15 @@ pub fn AgentPanel(
                             let errors = agent.and_then(|a| a.error_count).unwrap_or(0);
                             let dot_class = if is_running { "agent-dot running" } else { "agent-dot stopped" };
                             let btn_text = if is_running { "Stop" } else { "Start" };
+                            let display_name = name.clone();
+                            let updating_name = name.clone();
+                            let updating_name_text = name.clone();
 
                             let click_name = name.clone();
                             let running = is_running;
                             let set_agents = set_agents.clone();
                             let set_toasts = set_toasts.clone();
+                            let set_updating_agent = set_updating_agent;
                             let on_click = move |_| {
                                 let n = click_name.clone();
                                 let sa = set_agents.clone();
@@ -73,10 +79,32 @@ pub fn AgentPanel(
                                 });
                             };
 
+                            let update_name = name.clone();
+                            let set_agents_update = set_agents.clone();
+                            let set_toasts_update = set_toasts.clone();
+                            let on_update = move |_| {
+                                let n = update_name.clone();
+                                let sa = set_agents_update.clone();
+                                let st = set_toasts_update.clone();
+                                set_updating_agent.set(Some(n.clone()));
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    match api::update_agent(&n).await {
+                                        Ok(resp) => {
+                                            let msg = resp["message"].as_str().unwrap_or("updated").to_string();
+                                            let success = resp["success"].as_bool().unwrap_or(false);
+                                            show_toast(st, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                                        }
+                                        Err(e) => show_toast(st, format!("update failed: {e}"), ToastKind::Error),
+                                    }
+                                    if let Ok(a) = api::fetch_agents().await { sa.set(a); }
+                                    set_updating_agent.set(None);
+                                });
+                            };
+
                             view! {
                                 <div class="agent-row">
                                     <div class=dot_class></div>
-                                    <span class="agent-name">{name}</span>
+                                    <span class="agent-name">{display_name}</span>
                                     {version.map(|v| view! { <span class="agent-version">"v"{v}</span> })}
                                     {uptime.map(|s| view! { <span class="agent-uptime">{format_uptime(s)}</span> })}
                                     {(restarts > 0).then(|| view! {
@@ -85,6 +113,19 @@ pub fn AgentPanel(
                                     {(errors > 0).then(|| view! {
                                         <span class="agent-errors">{format!("{errors} err{}", if errors == 1 { "" } else { "s" })}</span>
                                     })}
+                                    <button
+                                        class="btn"
+                                        on:click=on_update
+                                        disabled=move || updating_agent.get().as_deref() == Some(updating_name.as_str())
+                                    >
+                                        {move || {
+                                            if updating_agent.get().as_deref() == Some(updating_name_text.as_str()) {
+                                                "Updating..."
+                                            } else {
+                                                "Update"
+                                            }
+                                        }}
+                                    </button>
                                     <button class="btn" on:click=on_click>{btn_text}</button>
                                 </div>
                             }

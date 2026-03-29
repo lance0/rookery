@@ -13,6 +13,8 @@ restart_on_swap = true               # restart when model is hot-swapped
 restart_on_crash = true              # watchdog auto-restarts on crash
 depends_on_port = 8081               # bounce when this port recovers (server restart)
 version_file = "/path/to/pyproject.toml"  # read version from project file
+update_command = "/home/lance/.local/bin/hermes update"  # run for updates
+update_workdir = "/path/to/agent/repo"    # optional working directory for updates
 restart_on_error_patterns = [        # immediate restart on these stderr patterns
     "telegram.error.TimedOut",
     "ReadTimeout",
@@ -27,6 +29,7 @@ restart_on_error_patterns = [        # immediate restart on these stderr pattern
 ```bash
 rookery agent start hermes    # start agent
 rookery agent stop hermes     # stop agent (intentional, won't trigger watchdog)
+rookery agent update hermes   # stop, update, restart
 rookery agent status          # list agents with status
 rookery agent status --json   # machine-readable
 ```
@@ -56,6 +59,17 @@ Returns:
     "lifetime_errors": 3
 }
 ```
+
+### Update Flow
+
+`rookery agent update <name>` and `POST /api/agents/{name}/update` run the configured `update_command` under rookery control:
+
+1. stop the agent if it is running
+2. run the update command with `[agent:<name>:update]` log prefix
+3. restart the agent
+4. report the resulting version if `version_file` is configured
+
+If the update command exits non-zero, rookery attempts to restart the previous agent code and returns a failure response instead of leaving the agent down.
 
 ## Reliability Features
 
@@ -135,6 +149,7 @@ The Agents panel on the Overview tab shows:
 - Restart count (yellow if > 0)
 - Error count (red if > 0)
 - Start/Stop button
+- Update button
 
 ### Logs
 

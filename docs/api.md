@@ -30,6 +30,7 @@ All endpoints are served by the rookeryd daemon.
 | `/api/agents` | GET | List agents with health metrics |
 | `/api/agents/start` | POST | Start agent `{"name": "hermes"}` |
 | `/api/agents/stop` | POST | Stop agent `{"name": "hermes"}` |
+| `/api/agents/{name}/update` | POST | Stop, update, and restart an agent |
 | `/api/agents/{name}/health` | GET | Detailed agent health |
 
 ## Model Discovery

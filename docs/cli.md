@@ -37,6 +37,7 @@ rookery gpu                   # VRAM, temp, utilization, power, processes
 ```bash
 rookery agent start <name>    # start an agent
 rookery agent stop <name>     # stop an agent
+rookery agent update <name>   # stop, update, restart
 rookery agent status          # list agents with status
 rookery agent describe <name> # detailed health, uptime, restarts, errors
 ```
