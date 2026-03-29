@@ -97,6 +97,11 @@ pub async fn run_canary_check(
     let stopped = rookery_core::state::ServerState::Stopped;
     let _ = state_persistence.save(&stopped);
 
+    if is_shutdown() {
+        tracing::info!("canary: shutdown during restart, aborting");
+        return true;
+    }
+
     let config = config.read().await;
     let backend_guard = backend.lock().await;
     match backend_guard.start(&config, &profile).await {
