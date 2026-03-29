@@ -656,4 +656,181 @@ mod tests {
                 .ends_with("unsloth_Qwen3-8B-GGUF_Qwen3-8B-Q4_K_M.gguf")
         );
     }
+
+    #[test]
+    fn test_recommend_quant_picks_highest_quality_that_fits() {
+        use crate::hardware::{CpuProfile, GpuProfile, HardwareProfile};
+
+        let profile = HardwareProfile {
+            gpu: Some(GpuProfile {
+                name: "RTX 4090".into(),
+                vram_total_mb: 24576,
+                compute_capability: (8, 9),
+                memory_bandwidth_gbps: 1008.0,
+            }),
+            cpu: CpuProfile {
+                name: "test".into(),
+                cores: 8,
+                threads: 16,
+                ram_total_mb: 65536,
+            },
+        };
+
+        // Create quants ordered by preference (higher quality first, larger)
+        let quants = vec![
+            QuantInfo {
+                label: "Q8_0".into(),
+                files: vec![],
+                total_bytes: 10 * 1024 * 1024 * 1024, // 10 GB — too big
+                is_downloaded: false,
+                perf_estimate: None,
+            },
+            QuantInfo {
+                label: "Q6_K".into(),
+                files: vec![],
+                total_bytes: 7 * 1024 * 1024 * 1024, // 7 GB — fits
+                is_downloaded: false,
+                perf_estimate: None,
+            },
+            QuantInfo {
+                label: "Q4_K_M".into(),
+                files: vec![],
+                total_bytes: 5 * 1024 * 1024 * 1024, // 5 GB — fits
+                is_downloaded: false,
+                perf_estimate: None,
+            },
+        ];
+
+        // 8192 MB VRAM free: Q8_0 needs ~10*1.15=11.5 GB (~11776 MB) — doesn't fit
+        // Q6_K needs ~7*1.15=8.05 GB (~8243 MB) — fits in 8192 MB
+        let rec = recommend_quant(&quants, &profile, 8500, 32000).unwrap();
+        assert_eq!(rec.label, "Q6_K");
+    }
+
+    #[test]
+    fn test_recommend_quant_returns_none_when_nothing_fits() {
+        use crate::hardware::{CpuProfile, GpuProfile, HardwareProfile};
+
+        let profile = HardwareProfile {
+            gpu: Some(GpuProfile {
+                name: "RTX 3060".into(),
+                vram_total_mb: 12288,
+                compute_capability: (8, 6),
+                memory_bandwidth_gbps: 360.0,
+            }),
+            cpu: CpuProfile {
+                name: "test".into(),
+                cores: 4,
+                threads: 8,
+                ram_total_mb: 8192,
+            },
+        };
+
+        let quants = vec![QuantInfo {
+            label: "Q4_K_M".into(),
+            files: vec![],
+            total_bytes: 30 * 1024 * 1024 * 1024, // 30 GB — way too big
+            is_downloaded: false,
+            perf_estimate: None,
+        }];
+
+        // Only 2 GB VRAM + 4 GB RAM = 6 GB total, model needs ~34.5 GB
+        let rec = recommend_quant(&quants, &profile, 2048, 4096);
+        assert!(rec.is_none());
+    }
+
+    #[test]
+    fn test_quant_preference_ordering_ud_variants_first() {
+        // Verify UD variants appear before their non-UD counterparts
+        let ud_idx = QUANT_PREFERENCE
+            .iter()
+            .position(|&p| p == "UD-Q4_K_XL")
+            .unwrap();
+        let q8_idx = QUANT_PREFERENCE.iter().position(|&p| p == "Q8_0").unwrap();
+        let q4_km_idx = QUANT_PREFERENCE
+            .iter()
+            .position(|&p| p == "Q4_K_M")
+            .unwrap();
+        let f16_idx = QUANT_PREFERENCE.iter().position(|&p| p == "F16").unwrap();
+
+        assert!(ud_idx < q8_idx, "UD variants should come before Q8_0");
+        assert!(q8_idx < q4_km_idx, "Q8_0 should come before Q4_K_M");
+        assert!(q4_km_idx < f16_idx, "Q4_K_M should come before F16");
+    }
+
+    #[test]
+    fn test_scan_cache_with_empty_directory() {
+        // scan_cache() reads from ~/.cache/llama.cpp which may or may not exist
+        // This test verifies it doesn't panic and returns a Vec
+        let models = scan_cache();
+        // Just verify it returns without panic — content depends on local cache
+        let _ = models.len();
+    }
+
+    #[test]
+    fn test_normalize_repo_already_normalized() {
+        // Already has owner/ prefix and -GGUF suffix
+        assert_eq!(
+            normalize_repo("bartowski/Llama-3-8B-GGUF"),
+            "bartowski/Llama-3-8B-GGUF"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_bare_name() {
+        // Bare model name with no slash and no -GGUF
+        assert_eq!(normalize_repo("Qwen3-8B"), "unsloth/Qwen3-8B-GGUF");
+    }
+
+    #[test]
+    fn test_normalize_repo_with_owner_no_gguf() {
+        // Has owner/ but no -GGUF suffix
+        assert_eq!(
+            normalize_repo("bartowski/Qwen3-8B"),
+            "bartowski/Qwen3-8B-GGUF"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_case_insensitive_gguf_suffix() {
+        // The function uses to_uppercase().ends_with("-GGUF"), so lowercase
+        // "-gguf" is also recognized as having the GGUF suffix
+        assert_eq!(normalize_repo("test/model-gguf"), "test/model-gguf");
+        assert_eq!(normalize_repo("test/model-GGUF"), "test/model-GGUF");
+        assert_eq!(normalize_repo("test/model-Gguf"), "test/model-Gguf");
+    }
+
+    #[test]
+    fn test_recommend_quant_partial_offload_fallback() {
+        use crate::hardware::{CpuProfile, FitMode, GpuProfile, HardwareProfile};
+
+        let profile = HardwareProfile {
+            gpu: Some(GpuProfile {
+                name: "RTX 4090".into(),
+                vram_total_mb: 24576,
+                compute_capability: (8, 9),
+                memory_bandwidth_gbps: 1008.0,
+            }),
+            cpu: CpuProfile {
+                name: "test".into(),
+                cores: 8,
+                threads: 16,
+                ram_total_mb: 65536,
+            },
+        };
+
+        let quants = vec![QuantInfo {
+            label: "Q4_K_M".into(),
+            files: vec![],
+            total_bytes: 20 * 1024 * 1024 * 1024, // 20 GB
+            is_downloaded: false,
+            perf_estimate: None,
+        }];
+
+        // VRAM = 10 GB (too small for full GPU: 20*1.15=23 GB)
+        // but VRAM + RAM = 10 + 20 = 30 GB > 23 GB → partial offload
+        let rec = recommend_quant(&quants, &profile, 10240, 20480).unwrap();
+        assert_eq!(rec.label, "Q4_K_M");
+        assert_eq!(rec.perf_estimate.fit_mode, FitMode::PartialOffload);
+    }
 }

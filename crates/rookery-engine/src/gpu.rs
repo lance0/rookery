@@ -110,9 +110,33 @@ impl GpuMonitor {
 }
 
 /// Read process name from /proc/<pid>/comm
-fn process_name(pid: u32) -> String {
+pub(crate) fn process_name(pid: u32) -> String {
     let comm_path = PathBuf::from(format!("/proc/{pid}/comm"));
     std::fs::read_to_string(&comm_path)
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| format!("pid:{pid}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_name_returns_current_process() {
+        let pid = std::process::id();
+        let name = process_name(pid);
+        // The test binary name should be something related to rookery_engine
+        // At minimum, it should NOT fall back to "pid:N"
+        assert!(
+            !name.starts_with("pid:"),
+            "process_name for our own PID should not fall back, got: {name}"
+        );
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_process_name_fallback_for_nonexistent_pid() {
+        let name = process_name(999_999_999);
+        assert_eq!(name, "pid:999999999");
+    }
 }

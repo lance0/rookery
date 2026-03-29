@@ -72,4 +72,63 @@ mod tests {
         let last3 = buf.last_n(3);
         assert_eq!(last3, vec!["line 7", "line 8", "line 9"]);
     }
+
+    #[tokio::test]
+    async fn test_subscribe_receives_pushed_messages() {
+        let buf = LogBuffer::new(100);
+        let mut rx = buf.subscribe();
+
+        buf.push("hello".into());
+        buf.push("world".into());
+
+        let msg1 = rx.recv().await.unwrap();
+        let msg2 = rx.recv().await.unwrap();
+        assert_eq!(msg1, "hello");
+        assert_eq!(msg2, "world");
+    }
+
+    #[test]
+    fn test_len_and_is_empty_after_push() {
+        let buf = LogBuffer::new(100);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+
+        buf.push("first".into());
+        assert!(!buf.is_empty());
+        assert_eq!(buf.len(), 1);
+
+        buf.push("second".into());
+        assert_eq!(buf.len(), 2);
+
+        // Push beyond capacity to verify len stays at capacity
+        let small_buf = LogBuffer::new(2);
+        small_buf.push("a".into());
+        small_buf.push("b".into());
+        small_buf.push("c".into()); // evicts "a"
+        assert_eq!(small_buf.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_push_from_multiple_tasks() {
+        use std::sync::Arc;
+
+        let buf = Arc::new(LogBuffer::new(1000));
+        let mut handles = Vec::new();
+
+        for task_id in 0..10 {
+            let buf_clone = Arc::clone(&buf);
+            handles.push(tokio::spawn(async move {
+                for i in 0..100 {
+                    buf_clone.push(format!("task{task_id}-line{i}"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 1000 lines pushed, buffer capacity is 1000
+        assert_eq!(buf.len(), 1000);
+    }
 }

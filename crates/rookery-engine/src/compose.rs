@@ -683,6 +683,106 @@ docker_image = "vllm/vllm-openai:latest"
         );
     }
 
+    // === VAL-EDGE-007: Compose generation edge cases ===
+
+    #[test]
+    fn test_compose_all_optional_vllm_params_set_simultaneously() {
+        let config = make_vllm_config(
+            VllmConfig {
+                docker_image: "vllm/vllm-openai:cu130-nightly".into(),
+                gpu_memory_utilization: 0.95,
+                max_num_seqs: Some(8),
+                max_num_batched_tokens: Some(8192),
+                max_model_len: Some(65536),
+                quantization: Some("gptq".into()),
+                tool_call_parser: Some("hermes".into()),
+                kv_cache_dtype: Some("fp8_e5m2".into()),
+                extra_args: vec![
+                    "--enable-prefix-caching".into(),
+                    "--disable-log-requests".into(),
+                    "--max-log-len".into(),
+                    "100".into(),
+                ],
+            },
+            7777,
+            "org/model-repo",
+        );
+
+        let yaml_str = generate_compose(&config, "test_vllm").unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+
+        let command: Vec<String> = parsed["services"]["vllm"]["command"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        // All optional params present
+        assert!(command.contains(&"--max-num-seqs".to_string()));
+        assert!(command.contains(&"8".to_string()));
+        assert!(command.contains(&"--max-num-batched-tokens".to_string()));
+        assert!(command.contains(&"8192".to_string()));
+        assert!(command.contains(&"--max-model-len".to_string()));
+        assert!(command.contains(&"65536".to_string()));
+        assert!(command.contains(&"--quantization".to_string()));
+        assert!(command.contains(&"gptq".to_string()));
+        assert!(command.contains(&"--tool-call-parser".to_string()));
+        assert!(command.contains(&"hermes".to_string()));
+        assert!(command.contains(&"--kv-cache-dtype".to_string()));
+        assert!(command.contains(&"fp8_e5m2".to_string()));
+        // Extra args present
+        assert!(command.contains(&"--enable-prefix-caching".to_string()));
+        assert!(command.contains(&"--disable-log-requests".to_string()));
+        assert!(command.contains(&"--max-log-len".to_string()));
+        assert!(command.contains(&"100".to_string()));
+
+        // Port mapping uses the custom port
+        assert_eq!(
+            parsed["services"]["vllm"]["ports"][0].as_str().unwrap(),
+            "7777:8000"
+        );
+    }
+
+    #[test]
+    fn test_compose_with_max_model_len_field() {
+        let config = make_vllm_config(
+            VllmConfig {
+                docker_image: "vllm/vllm-openai:latest".into(),
+                gpu_memory_utilization: 0.9,
+                max_num_seqs: None,
+                max_num_batched_tokens: None,
+                max_model_len: Some(32768),
+                quantization: None,
+                tool_call_parser: None,
+                kv_cache_dtype: None,
+                extra_args: vec![],
+            },
+            8081,
+            "test/model",
+        );
+
+        let yaml_str = generate_compose(&config, "test_vllm").unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+
+        let command: Vec<String> = parsed["services"]["vllm"]["command"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        let idx = command
+            .iter()
+            .position(|a| a == "--max-model-len")
+            .expect("--max-model-len should be present");
+        assert_eq!(command[idx + 1], "32768");
+
+        // Other optional params should NOT be present
+        assert!(!command.contains(&"--max-num-seqs".to_string()));
+        assert!(!command.contains(&"--quantization".to_string()));
+    }
+
     /// Default VllmConfig for test convenience.
     fn default_vllm_config() -> VllmConfig {
         VllmConfig {

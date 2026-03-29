@@ -1518,4 +1518,159 @@ ctx_size = 262144
         assert_eq!(BackendType::LlamaServer.to_string(), "llama-server");
         assert_eq!(BackendType::Vllm.to_string(), "vllm");
     }
+
+    // === VAL-EDGE-005: Config edge cases ===
+
+    #[test]
+    fn test_config_save_load_roundtrip_via_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let config = Config {
+            llama_server: PathBuf::from("/usr/bin/llama-server"),
+            default_profile: "fast".into(),
+            listen: "127.0.0.1:3000".parse().unwrap(),
+            models: HashMap::from([(
+                "qwen".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("unsloth/Qwen3-8B-GGUF".into()),
+                    file: Some("Q4_K_M.gguf".into()),
+                    path: None,
+                    estimated_vram_mb: Some(5000),
+                },
+            )]),
+            profiles: HashMap::from([(
+                "fast".into(),
+                Profile {
+                    model: "qwen".into(),
+                    port: 8081,
+                    llama_server: Some(LlamaServerConfig {
+                        ctx_size: 131072,
+                        ..LlamaServerConfig::default()
+                    }),
+                    vllm: None,
+                    ctx_size: default_ctx_size(),
+                    threads: default_threads(),
+                    threads_batch: default_threads_batch(),
+                    batch_size: default_batch_size(),
+                    ubatch_size: default_ubatch_size(),
+                    gpu_layers: default_gpu_layers(),
+                    gpu_index: None,
+                    cache_type_k: default_cache_type(),
+                    cache_type_v: default_cache_type(),
+                    flash_attention: default_true(),
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: default_temp(),
+                    top_p: default_top_p(),
+                    top_k: default_top_k(),
+                    min_p: 0.0,
+                    extra_args: Vec::new(),
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        // Serialize to TOML and write
+        let content = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&config_path, &content).unwrap();
+
+        // Read back and parse
+        let loaded_content = std::fs::read_to_string(&config_path).unwrap();
+        let loaded: Config = toml::from_str(&loaded_content).unwrap();
+
+        assert_eq!(loaded.default_profile, "fast");
+        assert_eq!(loaded.models["qwen"].estimated_vram_mb, Some(5000));
+        let ls = loaded.profiles["fast"].llama_server_config().unwrap();
+        assert_eq!(ls.ctx_size, 131072);
+    }
+
+    #[test]
+    fn test_validate_rejects_missing_default_profile() {
+        let config = Config {
+            llama_server: PathBuf::new(),
+            default_profile: "nonexistent_profile".into(),
+            listen: "127.0.0.1:3000".parse().unwrap(),
+            models: HashMap::from([(
+                "m".into(),
+                Model {
+                    source: "hf".into(),
+                    repo: Some("test/model".into()),
+                    file: None,
+                    path: None,
+                    estimated_vram_mb: None,
+                },
+            )]),
+            profiles: HashMap::from([(
+                "existing".into(),
+                Profile {
+                    model: "m".into(),
+                    port: 8081,
+                    llama_server: None,
+                    vllm: Some(VllmConfig {
+                        docker_image: "vllm/vllm-openai:latest".into(),
+                        gpu_memory_utilization: 0.9,
+                        max_num_seqs: None,
+                        max_num_batched_tokens: None,
+                        max_model_len: None,
+                        quantization: None,
+                        tool_call_parser: None,
+                        kv_cache_dtype: None,
+                        extra_args: Vec::new(),
+                    }),
+                    ctx_size: default_ctx_size(),
+                    threads: default_threads(),
+                    threads_batch: default_threads_batch(),
+                    batch_size: default_batch_size(),
+                    ubatch_size: default_ubatch_size(),
+                    gpu_layers: default_gpu_layers(),
+                    gpu_index: None,
+                    cache_type_k: default_cache_type(),
+                    cache_type_v: default_cache_type(),
+                    flash_attention: default_true(),
+                    reasoning_budget: 0,
+                    chat_template: None,
+                    temp: default_temp(),
+                    top_p: default_top_p(),
+                    top_k: default_top_k(),
+                    min_p: 0.0,
+                    extra_args: Vec::new(),
+                },
+            )]),
+            agents: HashMap::new(),
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::ProfileNotFound(ref name) if name == "nonexistent_profile"),
+            "should reject missing default_profile: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_profile_name_none_returns_default() {
+        let toml_str = r#"
+default_profile = "my_default"
+
+[models.m]
+source = "hf"
+repo = "test/model"
+
+[profiles.my_default]
+model = "m"
+port = 8081
+[profiles.my_default.vllm]
+docker_image = "vllm/vllm-openai:latest"
+
+[profiles.other]
+model = "m"
+port = 8082
+[profiles.other.vllm]
+docker_image = "vllm/vllm-openai:latest"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.resolve_profile_name(None), "my_default");
+        assert_eq!(config.resolve_profile_name(Some("other")), "other");
+    }
 }

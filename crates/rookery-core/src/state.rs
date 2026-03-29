@@ -500,4 +500,147 @@ mod tests {
             "reconcile with dead PID should return Stopped, got {reconciled:?}"
         );
     }
+
+    // === VAL-EDGE-006: State persistence edge cases ===
+
+    #[test]
+    fn test_state_persistence_load_missing_file_returns_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent_state.json");
+        let persistence = StatePersistence { path };
+
+        let state = persistence.load().unwrap();
+        assert!(matches!(state, ServerState::Stopped));
+    }
+
+    #[test]
+    fn test_profile_name_for_all_server_state_variants() {
+        // Stopped → None
+        let stopped = ServerState::Stopped;
+        assert_eq!(stopped.profile_name(), None);
+
+        // Starting → Some(profile)
+        let starting = ServerState::Starting {
+            profile: "fast".into(),
+            since: Utc::now(),
+        };
+        assert_eq!(starting.profile_name(), Some("fast"));
+
+        // Running → Some(profile)
+        let running = ServerState::Running {
+            profile: "prod".into(),
+            pid: 123,
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: BackendType::LlamaServer,
+            container_id: None,
+        };
+        assert_eq!(running.profile_name(), Some("prod"));
+
+        // Stopping → None
+        let stopping = ServerState::Stopping { since: Utc::now() };
+        assert_eq!(stopping.profile_name(), None);
+
+        // Failed → Some(profile)
+        let failed = ServerState::Failed {
+            last_error: "crash".into(),
+            profile: "broken".into(),
+            since: Utc::now(),
+        };
+        assert_eq!(failed.profile_name(), Some("broken"));
+    }
+
+    #[test]
+    fn test_is_running_for_all_variants() {
+        assert!(!ServerState::Stopped.is_running());
+
+        assert!(
+            !ServerState::Starting {
+                profile: "x".into(),
+                since: Utc::now(),
+            }
+            .is_running()
+        );
+
+        assert!(
+            ServerState::Running {
+                profile: "x".into(),
+                pid: 1,
+                port: 8081,
+                since: Utc::now(),
+                command_line: vec![],
+                exe_path: None,
+                backend_type: BackendType::LlamaServer,
+                container_id: None,
+            }
+            .is_running()
+        );
+
+        assert!(!ServerState::Stopping { since: Utc::now() }.is_running());
+
+        assert!(
+            !ServerState::Failed {
+                last_error: "e".into(),
+                profile: "x".into(),
+                since: Utc::now(),
+            }
+            .is_running()
+        );
+    }
+
+    #[test]
+    fn test_agent_persistence_save_load_reconcile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let persistence = AgentPersistence { path };
+
+        // Save some agents
+        let mut agents = HashMap::new();
+        agents.insert(
+            "agent1".into(),
+            AgentEntry {
+                pid: std::process::id(), // our own PID — guaranteed alive
+                started_at: Utc::now(),
+            },
+        );
+        agents.insert(
+            "agent2".into(),
+            AgentEntry {
+                pid: 999_999_999, // dead PID
+                started_at: Utc::now(),
+            },
+        );
+        let state = AgentState { agents };
+
+        persistence.save(&state).unwrap();
+
+        // Load back
+        let loaded = persistence.load().unwrap();
+        assert_eq!(loaded.agents.len(), 2);
+        assert!(loaded.agents.contains_key("agent1"));
+        assert!(loaded.agents.contains_key("agent2"));
+
+        // Reconcile should remove the dead agent
+        let reconciled = persistence.reconcile(loaded);
+        assert!(
+            reconciled.agents.contains_key("agent1"),
+            "live agent should be kept"
+        );
+        assert!(
+            !reconciled.agents.contains_key("agent2"),
+            "dead agent should be removed"
+        );
+    }
+
+    #[test]
+    fn test_agent_persistence_load_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent_agents.json");
+        let persistence = AgentPersistence { path };
+
+        let state = persistence.load().unwrap();
+        assert!(state.agents.is_empty());
+    }
 }
