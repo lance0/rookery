@@ -1,0 +1,169 @@
+{
+  "milestone": "test-expansion",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cargo test --workspace",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cargo check --workspace",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "cargo clippy --workspace",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 13,
+    "passed": 5,
+    "failed": 8,
+    "failedFeatures": [
+      "agent-manager-gap-tests",
+      "canary-behavior-tests",
+      "cli-tests",
+      "edge-case-tests",
+      "health-check-tests",
+      "process-manager-lifecycle-tests",
+      "route-integration-tests-extended",
+      "sse-tests"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "agent-manager-gap-tests",
+      "severity": "blocking",
+      "description": "New tests rely on fixed `tokio::time::sleep(...)` delays before asserting process/output state (e.g., lines 1136, 1167, 1192, 1321, 1353, 1417, 1456). Mission AGENTS.md explicitly disallows sleep-based timing assertions and requires deterministic tests; these should be replaced with bounded polling/timeouts or synchronization signals."
+    },
+    {
+      "featureId": "canary-behavior-tests",
+      "severity": "blocking",
+      "description": "The test intended to prove op_lock acquisition (`test_canary_acquires_op_lock_during_restart`) sleeps only 500ms before releasing the lock, but canary logic always waits 5s before second inference retry and lock acquisition (`CANARY_RETRY_DELAY` at line 18, sleep at line 57). The lock is released before canary attempts to acquire it, so this test can pass without validating serialization behavior required by feature item #6."
+    },
+    {
+      "featureId": "cli-tests",
+      "severity": "blocking",
+      "description": "Formatting tests replicate logic instead of testing CLI implementation paths. Examples include copied formatting blocks for status/GPU/bench output (see comments at lines 1594, 1702, 1878). Because tests build their own strings instead of invoking the real formatting/code path, they can pass even when command output behavior regresses."
+    },
+    {
+      "featureId": "edge-case-tests",
+      "severity": "blocking",
+      "description": "The feature explicitly called for a Config::save() + Config::load() filesystem roundtrip test, but test_config_save_load_roundtrip_via_filesystem manually serializes/writes/reads TOML and never invokes Config::save() (line 701) or Config::load() (line 481), leaving those methods unverified."
+    },
+    {
+      "featureId": "health-check-tests",
+      "severity": "blocking",
+      "description": "`test_wait_for_health_succeeds_after_initial_failures` does not actually validate initial failures followed by success after retries. The test creates a `health_fail_after(3)` server, then switches to a different delayed-success server and only asserts eventual success, leaving the required 'server becomes healthy after N retries' behavior unverified."
+    },
+    {
+      "featureId": "health-check-tests",
+      "severity": "blocking",
+      "description": "Required `check_inference` non-200 coverage is missing. The section contains tests for 200, connection-refused, and timeout, but no test where `/v1/chat/completions` returns a non-200 HTTP status."
+    },
+    {
+      "featureId": "health-check-tests",
+      "severity": "blocking",
+      "description": "Feature scope explicitly required using `MockLlamaServer` for HTTP-dependent tests, but `test_check_inference_false_on_timeout` uses an inline axum server instead."
+    },
+    {
+      "featureId": "process-manager-lifecycle-tests",
+      "severity": "blocking",
+      "description": "`test_start_and_wait_returns_failed_on_health_timeout` does not call `ProcessManager::start_and_wait`; it manually calls `start()`, `health::wait_for_health(...)`, and constructs `ServerState::Failed` itself. This misses direct verification of the actual `start_and_wait` timeout/failure path required by the feature."
+    },
+    {
+      "featureId": "process-manager-lifecycle-tests",
+      "severity": "blocking",
+      "description": "The success-path health test uses `make_sleep_script()` as the spawned process while a separate `MockLlamaServer` is started independently on the checked port. This does not use the mock server as the spawned process target and can pass even if the spawned child never serves health, weakening the intended health-dependent lifecycle coverage."
+    },
+    {
+      "featureId": "route-integration-tests-extended",
+      "severity": "blocking",
+      "description": "The running swap test asserts an intentional 500 failure (`\"swap should fail when new backend can't start\"`) instead of validating the required successful drain \u2192 stop \u2192 start-new-profile path. This leaves the primary happy-path swap behavior untested."
+    },
+    {
+      "featureId": "route-integration-tests-extended",
+      "severity": "blocking",
+      "description": "The `test_route_swap_when_stopped` case uses `{\"profile\":\"nonexistent\"}`, so it only verifies profile-not-found error handling, not the specified 'swap when stopped' behavior for a valid profile/state gate."
+    },
+    {
+      "featureId": "sse-tests",
+      "severity": "blocking",
+      "description": "Feature requirement #4 requires a test that SSE connection count decrements on disconnect (features.json:315), but the test suite explicitly states this behavior cannot be reliably tested via oneshot and only verifies increment/rejection paths (sse.rs:360-363, 402)."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "services.yaml",
+      "description": "Added `commands.init: bash .factory/init.sh` to capture a setup command used in worker transcripts.",
+      "sourceFeature": "health-check-tests"
+    },
+    {
+      "target": "library",
+      "description": "Added testing-structure notes in `.factory/library/architecture.md` documenting that `rookery-daemon` is binary-only and `rookery-engine/src/test_utils.rs` is `#[cfg(test)]` crate-local.",
+      "sourceFeature": "mock-llama-server-infrastructure"
+    },
+    {
+      "target": "library",
+      "description": "Added a factual ETXTBSY testing gotcha/mitigation note for temp scripts in `.factory/library/architecture.md`.",
+      "sourceFeature": "fix-etxtbsy-flaky-tests"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": ".factory/skills/test-worker/SKILL.md",
+      "suggestion": "Add explicit guidance to avoid fixed sleep-based timing assertions and prefer deterministic polling/synchronization patterns in async/process tests.",
+      "evidence": "Blocking findings in agent-manager-gap-tests and canary-behavior-tests plus repeated conventions observations (agent-manager-gap-tests, health-check-tests, mock-llama-server-infrastructure, process-manager-lifecycle-tests).",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/test-worker/SKILL.md",
+      "suggestion": "Document cross-crate test utility boundaries: `rookery-engine/src/test_utils.rs` is `#[cfg(test)]` and not importable from other crates; recommend crate-local mocks in daemon tests.",
+      "evidence": "Shared observations from canary-behavior-tests and route-integration-tests-core report churn from attempting to reuse engine test_utils across crates.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/test-worker/SKILL.md",
+      "suggestion": "Add ETXTBSY reliability guidance for temp script tests (sync/perm + brief delay) and a clear flaky-test rerun/reporting policy when baseline tests are unstable.",
+      "evidence": "Observations in backend-interaction-tests, process-manager-lifecycle-tests, cli-tests, edge-case-tests, and fix-etxtbsy-flaky-tests all call out recurring ETXTBSY/flaky-test handling gaps.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/test-worker/SKILL.md",
+      "suggestion": "Add guidance for testing global/static shared state under parallel tests (e.g., serialize with a global mutex when needed).",
+      "evidence": "sse-tests introduced `SSE_COUNTER_LOCK` and reported missing procedural guidance for static-state safety under parallel execution.",
+      "isSystemic": false
+    },
+    {
+      "target": "/home/lance/.factory/missions/176a155a-88c6-4afa-bf46-3ade18f75dda/AGENTS.md",
+      "suggestion": "Clarify whether non-test artifacts (analysis/docs files) are allowed in test-only feature scopes.",
+      "evidence": "edge-case-tests added `docs/test-gap-analysis.md`, while mission boundaries focus on test-only changes and production-behavior limits.",
+      "isSystemic": false
+    },
+    {
+      "target": ".factory/skills/test-worker/SKILL.md",
+      "suggestion": "For route swap tests, add a recommended pattern to verify happy-path swap behavior when `post_swap` internally creates a backend (e.g., test seam/mocked factory strategy).",
+      "evidence": "route-integration-tests-extended failed partly because tests validated failure-path behavior instead of required successful swap lifecycle.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Add mission AGENTS known-issue entries for ETXTBSY flake as-is from review reports.",
+      "reason": "ambiguous"
+    },
+    {
+      "observation": "Conventions note that sleep-based assertions are disallowed but existing legacy tests still use sleeps.",
+      "reason": "recommendation captured via suggestedGuidanceUpdates; duplicate observation entries rejected from direct application"
+    },
+    {
+      "observation": "Service manifest mismatch reports duplicated across multiple features for missing init command.",
+      "reason": "duplicate"
+    }
+  ],
+  "previousRound": null
+}

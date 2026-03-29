@@ -910,52 +910,13 @@ mod tests {
     // It verifies the BackendInfo fields are populated correctly.
     #[tokio::test]
     async fn test_llama_server_backend_start_returns_correct_backend_info() {
-        use rookery_core::config::{Config, Model, Profile};
-        use std::collections::HashMap;
+        // Use a tiny shell script instead of /bin/sleep directly so it stays
+        // alive even when resolve_command_line() appends many llama-server args.
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("fake_llama_server.sh");
+        write_test_script(&script_path, "#!/bin/sh\nsleep 300\n");
 
-        // Create a config that uses /bin/sleep as a fake binary
-        let config = Config {
-            llama_server: PathBuf::from("/bin/sleep"),
-            default_profile: "test".into(),
-            listen: "127.0.0.1:19999".parse().unwrap(),
-            models: HashMap::from([(
-                "test_model".into(),
-                Model {
-                    source: "local".into(),
-                    repo: None,
-                    file: None,
-                    path: Some(PathBuf::from("/tmp/fake.gguf")),
-                    estimated_vram_mb: None,
-                },
-            )]),
-            profiles: HashMap::from([(
-                "test".into(),
-                Profile {
-                    model: "test_model".into(),
-                    port: 19999,
-                    llama_server: None,
-                    vllm: None,
-                    ctx_size: 1024,
-                    threads: 1,
-                    threads_batch: 1,
-                    batch_size: 512,
-                    ubatch_size: 256,
-                    gpu_layers: 0,
-                    gpu_index: None,
-                    cache_type_k: "f16".into(),
-                    cache_type_v: "f16".into(),
-                    flash_attention: false,
-                    reasoning_budget: 0,
-                    chat_template: None,
-                    temp: 0.7,
-                    top_p: 0.8,
-                    top_k: 20,
-                    min_p: 0.0,
-                    extra_args: vec![],
-                },
-            )]),
-            agents: HashMap::new(),
-        };
+        let config = make_backend_test_config(script_path.to_str().unwrap(), 19999);
 
         let log_buffer = Arc::new(LogBuffer::new(100));
         let backend = LlamaServerBackend::new(log_buffer);
@@ -976,7 +937,7 @@ mod tests {
             !info.command_line.is_empty(),
             "command_line should be populated"
         );
-        assert_eq!(info.exe_path, Some(PathBuf::from("/bin/sleep")));
+        assert_eq!(info.exe_path, Some(script_path.clone()));
 
         // is_running should be true now
         assert!(backend.is_running().await, "should be running after start");
