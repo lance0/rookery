@@ -9,7 +9,7 @@ ExecStart=/home/lance/projects/rookery/target/release/rookeryd
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=45
 OOMScoreAdjust=-900
 Environment=RUST_LOG=rookery=info
 WorkingDirectory=/home/lance/projects/rookery

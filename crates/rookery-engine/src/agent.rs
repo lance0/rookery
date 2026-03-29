@@ -68,6 +68,8 @@ pub struct AgentManager {
     fatal_error_rx: tokio::sync::watch::Receiver<Option<String>>,
     /// Set to true during graceful shutdown — watchdog stops restarting agents.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Notifies the watchdog to wake up immediately (used during shutdown).
+    shutdown_notify: tokio::sync::Notify,
 }
 
 impl AgentManager {
@@ -80,6 +82,7 @@ impl AgentManager {
             fatal_error_tx,
             fatal_error_rx,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            shutdown_notify: tokio::sync::Notify::new(),
             crash_counts: Mutex::new(HashMap::new()),
         }
     }
@@ -350,6 +353,7 @@ impl AgentManager {
     pub fn begin_shutdown(&self) {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
     }
 
     pub async fn stop_all(&self) {
@@ -497,9 +501,13 @@ impl AgentManager {
                     return;
                 }
 
-                // Wait for either the regular poll interval or a fatal error trigger
+                // Wait for poll interval, fatal error, or shutdown signal
                 tokio::select! {
                     _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    _ = manager.shutdown_notify.notified() => {
+                        tracing::info!("watchdog: shutdown notification received, exiting");
+                        return;
+                    }
                     _ = fatal_rx.changed() => {
                         if manager.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
                             tracing::info!("watchdog: shutdown flag set, exiting");
