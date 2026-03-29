@@ -231,6 +231,15 @@ struct GpuStats {
     utilization_pct: u32,
     power_watts: f32,
     power_limit_watts: f32,
+    #[serde(default)]
+    processes: Vec<GpuProcess>,
+}
+
+#[derive(Deserialize)]
+struct GpuProcess {
+    pid: u32,
+    name: String,
+    vram_mb: u64,
 }
 
 #[derive(Serialize)]
@@ -507,6 +516,9 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
             "utilization_pct": g.utilization_pct,
             "power_watts": g.power_watts,
             "power_limit_watts": g.power_limit_watts,
+            "processes": g.processes.iter().map(|p| serde_json::json!({
+                "pid": p.pid, "name": p.name, "vram_mb": p.vram_mb
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>() })
             )?
         );
@@ -525,6 +537,12 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
                 "  Power: {:.0}W / {:.0}W",
                 gpu.power_watts, gpu.power_limit_watts
             );
+            if !gpu.processes.is_empty() {
+                println!("  Processes:");
+                for p in &gpu.processes {
+                    println!("    {} ({}) — {} MB", p.name, p.pid, p.vram_mb);
+                }
+            }
         }
     }
 
@@ -1900,6 +1918,7 @@ mod tests {
             utilization_pct: 95,
             power_watts: 350.0,
             power_limit_watts: 450.0,
+            processes: vec![],
         };
 
         // Replicate the exact formatting from cmd_gpu
