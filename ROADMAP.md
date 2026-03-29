@@ -187,15 +187,22 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
 - [x] Pre-commit hook: `.githooks/pre-commit` runs fmt + clippy (configured via `core.hooksPath`)
 
-### Test Coverage
-- [x] `rookery-core`: config parsing, state serialization, reconciliation (4 tests)
-- [x] `rookery-engine`: log buffer, model utils, is_pid_alive, version parsing, AgentManager (20 tests)
-- [ ] `rookery-engine`: ProcessManager start/stop/swap (needs mock llama-server)
-- [ ] `rookery-engine`: watchdog behavior (crash restart, backoff, port recovery bounce)
-- [ ] `rookery-daemon`: route handler integration tests (axum test client)
-- [ ] `rookery-daemon`: SSE event stream tests
-- [ ] `rookery-cli`: CLI argument parsing, output formatting
-- [ ] End-to-end: daemon startup → start → swap → agent lifecycle
+### Test Coverage (317 tests total)
+- [x] `rookery-core`: config parsing, state serialization, reconciliation, validation, backend type serde (29 tests)
+- [x] `rookery-engine`: MockLlamaServer test infrastructure (shared mock HTTP server)
+- [x] `rookery-engine`: health checks — wait_for_health, check_health, check_inference (14 tests)
+- [x] `rookery-engine`: ProcessManager lifecycle — start, stop, adopt, is_running, log capture (18 tests)
+- [x] `rookery-engine`: AgentManager — start/stop/health/remove_tracking/record_restart/fatal patterns (13 tests)
+- [x] `rookery-engine`: Backend interaction — LlamaServer/Vllm trait implementations (7 tests)
+- [x] `rookery-engine`: compose generation, model utils, log buffer, hardware (38 tests)
+- [x] `rookery-daemon`: canary extraction + behavior tests with mock backend (11 tests)
+- [x] `rookery-daemon`: route integration tests — status, gpu, start, stop, swap, bench, agents, chat, dashboard (27 tests)
+- [x] `rookery-daemon`: SSE — initial state, connection limit, event format (7 tests)
+- [x] `rookery-daemon`: config save isolation (tests write to temp dir, not production config)
+- [x] `rookery-cli`: argument parsing, output formatting for all subcommands (15 tests)
+- [x] Edge cases: logs, models, config, state, GPU, compose (23 tests)
+- [ ] End-to-end: daemon startup → start → swap → agent lifecycle (manual only)
+- [ ] vLLM integration tests (gated behind `ROOKERY_INTEGRATION=1`, needs Docker + free GPU)
 
 ### CI Pipeline
 - [ ] GitHub Actions workflow: build + test + clippy + fmt on push/PR
