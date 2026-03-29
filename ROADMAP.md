@@ -190,7 +190,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] CI check: `cargo fmt --check && cargo clippy -- -D warnings` in GitHub Actions
 - [x] Pre-commit hook: `.githooks/pre-commit` runs fmt + clippy (configured via `core.hooksPath`)
 
-### Test Coverage (317 tests total)
+### Test Coverage (337 tests total)
 - [x] `rookery-core`: config parsing, state serialization, reconciliation, validation, backend type serde (29 tests)
 - [x] `rookery-engine`: MockLlamaServer test infrastructure (shared mock HTTP server)
 - [x] `rookery-engine`: health checks — wait_for_health, check_health, check_inference (14 tests)
@@ -268,7 +268,9 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] Model aliasing: `aliases` field on profiles, resolved in CLI and API (e.g., "fast" → qwen_fast)
 - [x] CLI auto-detects daemon address from config (no hardcoded port)
 - [x] Auto-sleep: `idle_timeout` config, `Sleeping` state, wake-on-request, manual `sleep`/`wake` CLI + API
-- [ ] API key auth: optional bearer token for dashboard and API access
+- [x] API key auth: optional bearer token for dashboard and API access
+- [x] Auto-start default profile on daemon boot (`auto_start` config flag)
+- [x] Multi-cache model scanner (HF hub + llama.cpp + custom `model_dirs`)
 - [ ] Swagger/OpenAPI spec generation for the REST API
 
 ## Production Deployment
@@ -277,7 +279,21 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Systemd unit points to `/usr/local/bin/rookeryd` (stable path, survives `cargo clean`)
 - [ ] Deploy script or `make install` target for clean build → install → restart cycle
 
+## Open Source Launch Prep
+- [ ] README polish: feature list, quick demo, screenshots/GIF, comparison to alternatives
+- [ ] LICENSE file (choose license)
+- [ ] CONTRIBUTING.md (build instructions, PR guidelines, code style)
+- [ ] Review all docs for accuracy and completeness
+- [ ] Remove any hardcoded paths or lancebox-specific references from code
+- [ ] Publish to crates.io (optional — evaluate if workspace structure allows it)
+
 ## Future
+- Multi-GPU support (data model ready, engine picks GPU 0 for now)
+- Reverse proxy drain (axum proxies to llama-server, 503 during swap)
+- Custom agent framework (build/test agents against local models)
+- ~~`--json` flag on all remaining commands~~ (done)
+- Request rewriting / filtering (proxy layer for API requests)
+- Multi-model concurrent serving (multiple profiles on different ports simultaneously)
 - Multi-GPU support (data model ready, engine picks GPU 0 for now)
 - Reverse proxy drain (axum proxies to llama-server, 503 during swap)
 - Custom agent framework (build/test agents against local models)
