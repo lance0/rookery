@@ -124,11 +124,31 @@ impl StatePersistence {
     /// Check if a previously-running process is still alive and matches expectations.
     pub fn reconcile(&self, state: ServerState) -> ServerState {
         match &state {
-            ServerState::Running { pid, exe_path, .. } => {
+            ServerState::Running {
+                pid,
+                exe_path,
+                backend_type: BackendType::LlamaServer,
+                ..
+            } => {
                 if is_process_alive(*pid, exe_path.as_deref()) {
                     state
                 } else {
                     tracing::warn!(pid, "previous process no longer running, resetting state");
+                    ServerState::Stopped
+                }
+            }
+            ServerState::Running {
+                container_id,
+                backend_type: BackendType::Vllm,
+                ..
+            } => {
+                if container_id
+                    .as_deref()
+                    .is_some_and(|cid| !cid.trim().is_empty())
+                {
+                    state
+                } else {
+                    tracing::warn!("previous vLLM state missing container_id, resetting state");
                     ServerState::Stopped
                 }
             }
@@ -485,12 +505,11 @@ mod tests {
         }
     }
 
-    // reconcile() with dead PID returns Stopped
+    // reconcile() preserves vLLM state when container identity is present.
     //
-    // When the daemon restarts and the previously-running process has died,
-    // reconcile() should return Stopped regardless of backend_type.
+    // Runtime verification happens later in daemon startup via the backend trait.
     #[test]
-    fn test_reconcile_dead_pid_returns_stopped_with_vllm() {
+    fn test_reconcile_vllm_with_container_id_preserves_running_state() {
         let persistence = StatePersistence::new();
         let state = ServerState::Running {
             profile: "vllm_prod".into(),
@@ -505,9 +524,33 @@ mod tests {
 
         let reconciled = persistence.reconcile(state);
         assert!(
-            matches!(reconciled, ServerState::Stopped),
-            "reconcile with dead PID should return Stopped, got {reconciled:?}"
+            matches!(
+                reconciled,
+                ServerState::Running {
+                    backend_type: BackendType::Vllm,
+                    ..
+                }
+            ),
+            "reconcile should preserve vLLM running state for daemon verification, got {reconciled:?}"
         );
+    }
+
+    #[test]
+    fn test_reconcile_vllm_missing_container_id_returns_stopped() {
+        let persistence = StatePersistence::new();
+        let state = ServerState::Running {
+            profile: "vllm_prod".into(),
+            pid: 0,
+            port: 8081,
+            since: Utc::now(),
+            command_line: vec![],
+            exe_path: None,
+            backend_type: BackendType::Vllm,
+            container_id: None,
+        };
+
+        let reconciled = persistence.reconcile(state);
+        assert!(matches!(reconciled, ServerState::Stopped));
     }
 
     // State persistence edge cases

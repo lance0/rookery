@@ -21,6 +21,19 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
+async fn reconciled_backend_alive(
+    backend_type: rookery_core::config::BackendType,
+    running_pid: u32,
+    backend: &dyn InferenceBackend,
+) -> bool {
+    match backend_type {
+        rookery_core::config::BackendType::LlamaServer => {
+            rookery_engine::process::is_pid_alive(running_pid)
+        }
+        rookery_core::config::BackendType::Vllm => backend.is_running().await,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Handle --version / -V before initializing anything
@@ -114,70 +127,97 @@ async fn main() {
             ..
         } = reconciled
         {
-            if !rookery_engine::process::is_pid_alive(running_pid) {
-                tracing::warn!(
-                    pid = running_pid,
-                    "adopted process is a zombie — marking stopped"
-                );
-                final_state = ServerState::Stopped;
-            } else if rookery_engine::health::check_health(port, std::time::Duration::from_secs(3))
-                .await
-            {
-                // Health endpoint responds — now verify inference actually works
-                if rookery_engine::health::check_inference(port, std::time::Duration::from_secs(10))
-                    .await
-                {
-                    tracing::info!(
-                        pid = running_pid,
-                        port,
-                        "adopted process is healthy (inference canary passed)"
-                    );
+            if let Some(profile_cfg) = config.profiles.get(profile) {
+                match backend::create_backend(profile_cfg, log_buffer.clone()) {
+                    Ok(correct_backend) => {
+                        if !reconciled_backend_alive(
+                            *backend_type,
+                            running_pid,
+                            correct_backend.as_ref(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                backend_type = ?backend_type,
+                                pid = running_pid,
+                                container_id = ?container_id,
+                                "adopted backend is no longer running, marking stopped"
+                            );
+                            final_state = ServerState::Stopped;
+                        } else if rookery_engine::health::check_health(
+                            port,
+                            std::time::Duration::from_secs(3),
+                        )
+                        .await
+                        {
+                            // Health endpoint responds — now verify inference actually works
+                            if rookery_engine::health::check_inference(
+                                port,
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await
+                            {
+                                tracing::info!(
+                                    backend_type = ?backend_type,
+                                    pid = running_pid,
+                                    container_id = ?container_id,
+                                    port,
+                                    "adopted backend is healthy (inference canary passed)"
+                                );
 
-                    // Create the correct backend for the reconciled profile and adopt
-                    let adopt_info = BackendInfo {
-                        pid: Some(running_pid),
-                        container_id: container_id.clone(),
-                        port,
-                        profile: profile.clone(),
-                        started_at: *since,
-                        backend_type: *backend_type,
-                        command_line: command_line.clone(),
-                        exe_path: exe_path.clone(),
-                    };
+                                let adopt_info = BackendInfo {
+                                    pid: match backend_type {
+                                        rookery_core::config::BackendType::LlamaServer => {
+                                            Some(running_pid)
+                                        }
+                                        rookery_core::config::BackendType::Vllm => None,
+                                    },
+                                    container_id: container_id.clone(),
+                                    port,
+                                    profile: profile.clone(),
+                                    started_at: *since,
+                                    backend_type: *backend_type,
+                                    command_line: command_line.clone(),
+                                    exe_path: exe_path.clone(),
+                                };
 
-                    // If the reconciled profile has a different backend type, create the right backend
-                    if let Some(profile_cfg) = config.profiles.get(profile) {
-                        match backend::create_backend(profile_cfg, log_buffer.clone()) {
-                            Ok(correct_backend) => {
-                                if let Err(e) = correct_backend.adopt(adopt_info).await {
-                                    tracing::warn!(error = %e, "failed to adopt into backend");
+                                match correct_backend.adopt(adopt_info).await {
+                                    Ok(()) => {
+                                        *backend.lock().await = correct_backend;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "failed to adopt into backend");
+                                        final_state = ServerState::Stopped;
+                                    }
                                 }
-                                *backend.lock().await = correct_backend;
+                            } else {
+                                tracing::warn!(
+                                    backend_type = ?backend_type,
+                                    pid = running_pid,
+                                    container_id = ?container_id,
+                                    port,
+                                    "adopted backend failed inference canary — marking stopped"
+                                );
+                                final_state = ServerState::Stopped;
                             }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to create backend for reconciled profile");
-                            }
-                        }
-                    } else {
-                        // Profile no longer in config — adopt into current backend
-                        if let Err(e) = backend.lock().await.adopt(adopt_info).await {
-                            tracing::warn!(error = %e, "failed to adopt into backend");
+                        } else {
+                            tracing::warn!(
+                                backend_type = ?backend_type,
+                                pid = running_pid,
+                                container_id = ?container_id,
+                                port,
+                                "adopted backend failed health check — marking stopped"
+                            );
+                            final_state = ServerState::Stopped;
                         }
                     }
-                } else {
-                    tracing::warn!(
-                        pid = running_pid,
-                        port,
-                        "adopted process failed inference canary — marking stopped"
-                    );
-                    final_state = ServerState::Stopped;
+                    Err(e) => {
+                        tracing::warn!(error = %e, profile = %profile, "failed to create backend for reconciled profile");
+                        final_state = ServerState::Stopped;
+                    }
                 }
             } else {
-                tracing::warn!(
-                    pid = running_pid,
-                    port,
-                    "adopted process failed health check — marking stopped"
-                );
+                tracing::warn!(profile = %profile, "reconciled profile missing from config, marking stopped");
                 final_state = ServerState::Stopped;
             }
         }
@@ -539,5 +579,81 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => tracing::info!("received CTRL+C"),
         () = terminate => tracing::info!("received SIGTERM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use rookery_core::config::BackendType;
+    use rookery_core::error::{Error, Result};
+    use tokio::sync::watch;
+
+    struct MockBackend {
+        running: bool,
+    }
+
+    #[async_trait]
+    impl InferenceBackend for MockBackend {
+        async fn start(&self, _config: &Config, _profile: &str) -> Result<BackendInfo> {
+            Err(Error::ConfigValidation("not used in test".into()))
+        }
+
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn is_running(&self) -> bool {
+            self.running
+        }
+
+        async fn process_info(&self) -> Option<BackendInfo> {
+            None
+        }
+
+        async fn adopt(&self, _info: BackendInfo) -> Result<()> {
+            Ok(())
+        }
+
+        async fn to_server_state(&self) -> ServerState {
+            ServerState::Stopped
+        }
+
+        fn is_draining(&self) -> bool {
+            false
+        }
+
+        fn set_draining(&self, _draining: bool) {}
+
+        fn subscribe_errors(&self) -> watch::Receiver<bool> {
+            let (_tx, rx) = watch::channel(false);
+            rx
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconciled_backend_alive_uses_pid_check_for_llama_server() {
+        let backend = MockBackend { running: false };
+        let alive =
+            reconciled_backend_alive(BackendType::LlamaServer, std::process::id(), &backend).await;
+        assert!(alive, "llama-server reconciliation should use PID liveness");
+    }
+
+    #[tokio::test]
+    async fn test_reconciled_backend_alive_uses_backend_check_for_vllm_true() {
+        let backend = MockBackend { running: true };
+        let alive = reconciled_backend_alive(BackendType::Vllm, 0, &backend).await;
+        assert!(alive, "vLLM reconciliation should use backend.is_running()");
+    }
+
+    #[tokio::test]
+    async fn test_reconciled_backend_alive_uses_backend_check_for_vllm_false() {
+        let backend = MockBackend { running: false };
+        let alive = reconciled_backend_alive(BackendType::Vllm, std::process::id(), &backend).await;
+        assert!(
+            !alive,
+            "vLLM reconciliation must ignore PID liveness and use backend.is_running()"
+        );
     }
 }

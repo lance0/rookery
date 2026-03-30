@@ -293,7 +293,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 ## From External Review (v0.1.1)
 
 ### Bugs (Priority)
-- [ ] vLLM restart reconciliation: PID 0 always fails /proc check, container-based backends not adopted on daemon restart — need container_id liveness check when backend_type == Vllm
+- [x] vLLM restart reconciliation: PID 0 always fails /proc check — fixed with backend-type-aware liveness (container_id for vLLM, PID for llama-server)
 - [x] HF download URL double slash: `{}//resolve` → `{}/resolve` in models.rs
 
 ### Security Hardening
