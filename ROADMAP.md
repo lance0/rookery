@@ -286,21 +286,35 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] README polish: feature list, comparison table, real-world use cases, install methods, full reference
 - [x] LICENSE file (dual MIT/Apache-2.0)
 - [x] CONTRIBUTING.md (dev setup, code style, project structure, PR guidelines)
-- [ ] CONTRIBUTING.md (build instructions, PR guidelines, code style)
 - [x] Review all docs for accuracy and completeness
 - [x] Remove any hardcoded paths or lancebox-specific references from code
 - [ ] Publish to crates.io (optional — evaluate if workspace structure allows it)
 
+## From External Review (v0.1.1)
+
+### Bugs (Priority)
+- [ ] vLLM restart reconciliation: PID 0 always fails /proc check, container-based backends not adopted on daemon restart — need container_id liveness check when backend_type == Vllm
+- [x] HF download URL double slash: `{}//resolve` → `{}/resolve` in models.rs
+
+### Security Hardening
+- [ ] Document security trade-offs explicitly: SSE query tokens leak via logs/caches, metrics public when auth on
+- [ ] Recommend mandatory auth when listen is not loopback (warn in daemon startup log)
+- [ ] Rate limiting on chat proxy endpoint
+- [ ] TLS termination guidance (reverse proxy templates for nginx/caddy)
+
+### Architecture
+- [ ] Split routes.rs by domain (server, agents, models, observability) — reviewability improvement
+- [ ] Replace std::sync::RwLock in LogBuffer with parking_lot or tokio lock for async safety
+- [ ] Backend plugin system: formalize InferenceBackend trait as a plugin registry for future backends (TGI, remote OpenAI)
+
+### Documentation
+- [ ] OpenAPI/Swagger spec for daemon API (machine-readable contract)
+- [ ] Document "two toolchains" contributor workflow (Rust + trunk/wasm for dashboard)
+
 ## Future
-- Multi-GPU support (data model ready, engine picks GPU 0 for now)
-- Reverse proxy drain (axum proxies to llama-server, 503 during swap)
-- Custom agent framework (build/test agents against local models)
-- ~~`--json` flag on all remaining commands~~ (done)
-- Request rewriting / filtering (proxy layer for API requests)
+- Multi-GPU support with explicit GPU placement per profile (data model ready, engine picks GPU 0)
 - Multi-model concurrent serving (multiple profiles on different ports simultaneously)
-- Multi-GPU support (data model ready, engine picks GPU 0 for now)
-- Reverse proxy drain (axum proxies to llama-server, 503 during swap)
+- Request rewriting / filtering (proxy layer for API requests)
 - Custom agent framework (build/test agents against local models)
-- ~~`--json` flag on all remaining commands~~ (done)
 - Request rewriting / filtering (proxy layer for API requests)
 - Multi-model concurrent serving (multiple profiles on different ports simultaneously)

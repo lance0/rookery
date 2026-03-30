@@ -229,7 +229,7 @@ impl HfClient {
         dest: &Path,
         progress_tx: Option<&tokio::sync::watch::Sender<DownloadProgress>>,
     ) -> Result<(), String> {
-        let url = format!("https://huggingface.co/{}//resolve/main/{}", repo, filename);
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", repo, filename);
 
         let resp = self
             .client
