@@ -14,6 +14,27 @@ Interactive terminal tools (Aider, OpenCode, Goose) should be configured to poin
 
 ## Managed Agents (Daemon/Server Mode)
 
+### Hermes (Nous Research)
+
+Open-source AI agent framework with tool calling, web browsing, vision, and multi-platform messaging (Telegram, Discord, and more). The primary agent Rookery was built to manage.
+
+- **URL**: https://github.com/NousResearch/hermes-agent
+- **Install**: `pip install hermes-agent`
+- **Local API**: Connects to any OpenAI-compatible endpoint
+
+```toml
+[agents.hermes]
+command = "/path/to/hermes"
+args = ["gateway", "run", "--replace"]
+auto_start = true
+restart_on_swap = true
+restart_on_crash = true
+depends_on_port = 8081
+version_file = "/path/to/hermes-agent/pyproject.toml"
+update_command = "hermes update"
+restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
+```
+
 ### OpenClaw
 
 AI agent gateway for chat platforms — Telegram, Discord, WhatsApp, Slack, and more. Similar to running your own ChatGPT across messaging apps.

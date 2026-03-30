@@ -53,7 +53,7 @@ See [Installation](#installation) below for setup instructions.
 - **Hot-swap** — switch between model profiles without restarting the daemon
 - **Live dashboard** — Leptos WASM frontend with 7 tabs: Overview, Settings, Agents, Chat, Bench, Logs, Models
 - **GPU monitoring** — real-time VRAM, temperature, utilization, power draw, per-process memory via NVML
-- **Agent management** — spawn, stop, update, and watchdog external processes (coding agents, Telegram bots, etc.)
+- **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (Telegram AI agent), coding assistants, or any service that depends on inference
 - **Model discovery** — search HuggingFace, browse quants, VRAM-aware recommendations, one-click download
 - **Auto-sleep** — unloads the model after idle timeout, wakes transparently on next request
 - **Inference canary** — periodic health checks detect CUDA zombies and auto-restart
@@ -78,17 +78,18 @@ See [Installation](#installation) below for setup instructions.
 
 ## Real-World Use Cases
 
-### Daily Driver for a Telegram Agent
-Run a dense model for reliable tool calling, with auto-restart if the agent crashes:
+### Daily Driver for Hermes AI Agent
+Run [Hermes](https://github.com/NousResearch/hermes-agent) with a dense model for reliable tool calling. Rookery manages the full lifecycle — auto-starts on boot, restarts on crash, bounces on model swap:
 ```bash
 rookery start qwen_dense           # 27B Q6 for best tool accuracy
 rookery agent start hermes         # Telegram gateway with crash watchdog
+rookery agent describe hermes      # check health, uptime, restarts
 ```
 
 ### Quick Experimentation
 Hot-swap between models without restarting anything:
 ```bash
-rookery start qwen_fast            # MoE at 160 tok/s
+rookery start qwen_fast            # MoE at 213 tok/s
 rookery bench                      # measure performance
 rookery swap qwen_dense            # switch to dense 27B
 rookery bench                      # compare
@@ -189,7 +190,20 @@ temp = 0.7
 top_p = 0.8
 ```
 
-See [config.example.toml](config.example.toml) for all options including vLLM backend, KV cache tuning, agent management, and API key auth.
+Agents are external processes managed alongside the server:
+
+```toml
+[agents.hermes]
+command = "/path/to/hermes"
+args = ["gateway", "run", "--replace"]
+auto_start = true
+restart_on_swap = true
+restart_on_crash = true
+depends_on_port = 8081
+restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
+```
+
+See [config.example.toml](config.example.toml) for all options including vLLM backend, KV cache tuning, and API key auth.
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
