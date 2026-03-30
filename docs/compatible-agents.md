@@ -37,7 +37,7 @@ restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 
 ### OpenClaw
 
-AI agent gateway for chat platforms — Telegram, Discord, WhatsApp, Slack, and more. Similar to running your own ChatGPT across messaging apps.
+Personal AI assistant platform — multi-platform messaging, tool calling, and extensible skills. Runs as a persistent gateway process.
 
 - **URL**: https://github.com/openclaw/openclaw
 - **Install**: `npm install -g openclaw@latest`
