@@ -136,7 +136,6 @@ These tools are interactive terminal sessions. Configure them to point at `local
 | [OpenCode](https://opencode.ai) | `opencode.json` with `baseURL: "http://localhost:8081/v1"` | Terminal coding agent |
 | [Goose](https://github.com/block/goose) | `OPENAI_HOST=http://localhost:8081` in config | Block's coding agent |
 | [Continue.dev](https://continue.dev) | VS Code extension, set provider to `openai` with local base URL | IDE assistant |
-| [Claude Code](https://claude.ai/code) | Requires Anthropic API (not local-compatible) | Not for local models |
 
 ## Writing Your Own Agent Config
 
