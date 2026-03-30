@@ -24,7 +24,7 @@ gen_tok/s ≈ memory_bandwidth_GB/s / model_size_GB
 | RTX 4070 Ti Super 16GB | 16 GB | 672 GB/s | 14B Q5_K_M | Qwen3.5-35B-A3B Q3_K_M | ~55 / ~80 |
 | RTX 4080 16GB | 16 GB | 717 GB/s | 14B Q5_K_M | Qwen3.5-35B-A3B Q3_K_M | ~60 / ~85 |
 | RTX 4090 24GB | 24 GB | 1,008 GB/s | 27B Q5_K_M | Qwen3.5-35B-A3B Q4_K_XL | ~45 / ~130 |
-| RTX 5090 32GB | 32 GB | 1,792 GB/s | 27B Q6_K_XL | Qwen3.5-35B-A3B Q5_K_XL | ~54 / ~170 |
+| RTX 5090 32GB | 32 GB | 1,792 GB/s | 27B Q6_K_XL | Qwen3.5-35B-A3B Q5_K_XL | ~54 / ~213 |
 
 ## Detailed Recommendations
 
@@ -147,7 +147,7 @@ flash_attention = true
 | Model | Quant | Size | Context | Est. tok/s |
 |-------|-------|------|---------|------------|
 | Qwen3.5-27B | Q6_K_XL | ~26GB | 128K | ~54 |
-| Qwen3.5-35B-A3B (MoE) | UD-Q5_K_XL | ~25GB | 262K | ~170 |
+| Qwen3.5-35B-A3B (MoE) | UD-Q5_K_XL | ~25GB | 262K | ~213 |
 | Nemotron-Cascade-2 (MoE) | Q4_K_M | ~23GB | 128K | ~295 |
 | 32B | Q5_K_M | ~23GB | 16-32K | ~60 |
 | Llama-3.3-70B | Q4_K_M | ~42GB | — | Doesn't fit |
@@ -166,7 +166,7 @@ cache_type_v = "q8_0"
 flash_attention = true
 ```
 
-**Tips**: 32GB + 1.8 TB/s is the current consumer ceiling. Run 27B dense at Q6+ for best quality, or MoE at Q5+ with full 262K context. MoE generation is exceptional (160-295 tok/s). **Build with CUDA 12.8** — CUDA 13.x has compiler bugs on Blackwell.
+**Tips**: 32GB + 1.8 TB/s is the current consumer ceiling. Run 27B dense at Q6+ for best quality, or MoE at Q5+ with full 262K context. MoE generation is exceptional (210-295 tok/s with llama.cpp b8580+). **Build with CUDA 12.8** — CUDA 13.x has compiler bugs on Blackwell.
 
 ## KV Cache Quantization
 
