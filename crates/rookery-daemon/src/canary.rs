@@ -84,12 +84,17 @@ pub async fn run_canary_check(
         return false;
     }
 
-    // Re-check state under lock — someone may have stopped/swapped already
+    // Re-read state under lock — a swap may have changed the profile while we waited
     let current = state.current_state().await;
-    if !current.is_running() {
-        tracing::info!("server already stopped, skipping canary restart");
-        return false;
-    }
+    let profile = match current {
+        rookery_core::state::ServerState::Running { ref profile, .. } => profile.clone(),
+        _ => {
+            tracing::info!(
+                "server no longer running after acquiring lock, skipping canary restart"
+            );
+            return false;
+        }
+    };
 
     let _ = state.backend.lock().await.stop().await;
     let stopped = rookery_core::state::ServerState::Stopped;
