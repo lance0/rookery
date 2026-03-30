@@ -107,6 +107,23 @@ restart_on_crash = true
 depends_on_port = 8081
 ```
 
+### Open WebUI
+
+Self-hosted ChatGPT-style web interface. The most popular local LLM frontend — supports any OpenAI-compatible API, conversation history, RAG, model selection, and multi-user auth.
+
+- **URL**: https://github.com/open-webui/open-webui
+- **Install**: `docker run -d -p 3000:8080 ghcr.io/open-webui/open-webui:main`
+- **Local API**: Set `OPENAI_API_BASE_URL=http://host.docker.internal:8081/v1` in Docker env
+
+```toml
+[agents.openwebui]
+command = "docker"
+args = ["run", "--rm", "-p", "3000:8080", "-e", "OPENAI_API_BASE_URL=http://host.docker.internal:8081/v1", "-v", "/path/to/data:/app/backend/data", "ghcr.io/open-webui/open-webui:main"]
+auto_start = false
+restart_on_crash = true
+depends_on_port = 8081
+```
+
 ### Open Interpreter (Server Mode)
 
 Natural language interface for executing code on your machine. Server mode exposes an API that other tools can call.
@@ -135,6 +152,7 @@ These tools are interactive terminal sessions. Configure them to point at `local
 | [Aider](https://aider.chat) | `aider --model openai/model --openai-api-base http://localhost:8081/v1` | AI pair programming |
 | [OpenCode](https://opencode.ai) | `opencode.json` with `baseURL: "http://localhost:8081/v1"` | Terminal coding agent |
 | [Goose](https://github.com/block/goose) | `OPENAI_HOST=http://localhost:8081` in config | Block's coding agent |
+| [Cline](https://github.com/cline/cline) | VS Code extension, set provider to OpenAI-compatible with local URL | Autonomous coding agent |
 | [Continue.dev](https://continue.dev) | VS Code extension, set provider to `openai` with local base URL | IDE assistant |
 
 ## Writing Your Own Agent Config
