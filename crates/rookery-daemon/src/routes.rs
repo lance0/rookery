@@ -917,6 +917,24 @@ pub async fn get_bench(
         .build()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Short and medium prompts test gen speed; long prompt saturates GPU for accurate PP measurement.
+    let long_prompt = "You are reviewing a complex distributed system. Here is the architecture: \
+        The system consists of a load balancer (HAProxy), 12 application servers running a Rust async \
+        runtime (Tokio), a PostgreSQL cluster with 3 replicas and streaming replication, a Redis \
+        cluster with 6 nodes for caching and session storage, a Kafka cluster with 5 brokers for \
+        event streaming, an Elasticsearch cluster with 3 data nodes for log aggregation, a \
+        Prometheus server scraping 200 targets every 15 seconds, a Grafana dashboard with 50 \
+        panels, a Kubernetes cluster with 20 nodes running across 3 availability zones, a CI/CD \
+        pipeline using GitHub Actions with 15 workflow files, a CDN (Cloudflare) with 200 edge \
+        locations, a DNS infrastructure using Route53 with health checks, a secrets management \
+        system (Vault) with auto-rotation, a service mesh (Istio) handling mTLS between services, \
+        an API gateway (Kong) with rate limiting and authentication, a message queue (RabbitMQ) \
+        for async job processing, a blob storage system (S3-compatible) for user uploads, a \
+        monitoring alerting pipeline (PagerDuty) with 300 alert rules, a feature flag system \
+        (LaunchDarkly) serving 50 flags, and a data warehouse (Snowflake) ingesting 2TB daily. \
+        Analyze the failure modes, identify single points of failure, and suggest improvements. \
+        Be thorough and specific.";
+
     let prompts = vec![
         (
             "short",
@@ -926,6 +944,7 @@ pub async fn get_bench(
             "medium",
             "Explain the difference between a mutex, semaphore, and condition variable. Give a code example for each in Rust.",
         ),
+        ("long", long_prompt),
     ];
 
     let mut tests = Vec::new();
