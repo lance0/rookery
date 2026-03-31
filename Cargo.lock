@@ -1351,6 +1351,7 @@ dependencies = [
  "futures-util",
  "nix",
  "nvml-wrapper",
+ "parking_lot",
  "reqwest",
  "rookery-core",
  "serde",

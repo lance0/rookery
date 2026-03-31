@@ -1,5 +1,5 @@
+use parking_lot::RwLock;
 use std::collections::VecDeque;
-use std::sync::RwLock;
 use tokio::sync::broadcast;
 
 pub struct LogBuffer {
@@ -21,7 +21,7 @@ impl LogBuffer {
     pub fn push(&self, line: String) {
         let _ = self.tx.send(line.clone());
 
-        let mut lines = self.lines.write().unwrap_or_else(|e| e.into_inner());
+        let mut lines = self.lines.write();
         if lines.len() >= self.capacity {
             lines.pop_front();
         }
@@ -29,7 +29,7 @@ impl LogBuffer {
     }
 
     pub fn last_n(&self, n: usize) -> Vec<String> {
-        let lines = self.lines.read().unwrap_or_else(|e| e.into_inner());
+        let lines = self.lines.read();
         lines.iter().rev().take(n).rev().cloned().collect()
     }
 
@@ -38,7 +38,7 @@ impl LogBuffer {
     }
 
     pub fn len(&self) -> usize {
-        self.lines.read().unwrap_or_else(|e| e.into_inner()).len()
+        self.lines.read().len()
     }
 
     pub fn is_empty(&self) -> bool {

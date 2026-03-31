@@ -297,14 +297,14 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [x] HF download URL double slash: `{}//resolve` → `{}/resolve` in models.rs
 
 ### Security Hardening
-- [ ] Document security trade-offs explicitly: SSE query tokens leak via logs/caches, metrics public when auth on
+- [x] Document security trade-offs explicitly: SSE query tokens, metrics exposure, TLS guidance, update_command logging
 - [ ] Recommend mandatory auth when listen is not loopback (warn in daemon startup log)
 - [ ] Rate limiting on chat proxy endpoint
 - [ ] TLS termination guidance (reverse proxy templates for nginx/caddy)
 
 ### Architecture
 - [ ] Split routes.rs by domain (server, agents, models, observability) — reviewability improvement
-- [ ] Replace std::sync::RwLock in LogBuffer with parking_lot or tokio lock for async safety
+- [x] Replace std::sync::RwLock in LogBuffer with parking_lot (no poison, faster uncontended)
 - [ ] Backend plugin system: formalize InferenceBackend trait as a plugin registry for future backends (TGI, remote OpenAI)
 
 ### Documentation

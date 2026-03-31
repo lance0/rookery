@@ -14,7 +14,23 @@ idle_timeout = 1800                        # seconds before auto-sleep; 0/omitte
 model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (optional)
 ```
 
-`api_key` is optional. When set, all API routes and the live SSE stream require authentication except `/api/health` and `/metrics`. The dashboard stores the key in browser `localStorage`, and the CLI automatically reads the same key from `~/.config/rookery/config.toml`.
+`api_key` is optional. When set, all `/api/*` data routes and the SSE stream require `Authorization: Bearer <key>`. The dashboard HTML shell loads without auth but shows an unlock prompt before fetching data. The CLI automatically reads the key from config.
+
+**Exempt endpoints** (always public): `/api/health`, `/metrics`.
+
+### Security Considerations
+
+- **`listen = "127.0.0.1:..."`** is the secure default. Only bind to `0.0.0.0` if you need LAN access, and always set `api_key` when doing so.
+- **SSE query tokens**: The SSE endpoint (`/api/events`) accepts `?token=<key>` because `EventSource` doesn't support custom headers. Query-string tokens may appear in reverse proxy logs, browser history, and HTTP referrer headers. For sensitive deployments, use a reverse proxy that strips or rewrites the query parameter.
+- **`/metrics` is always public** when auth is enabled. This is intentional for Prometheus scraping but means GPU stats, server state, and canary health are exposed without auth. If this is a concern, restrict `/metrics` at the reverse proxy level.
+- **Agent `update_command`** is executed via `sh -c` and logged to journald. Avoid embedding secrets or tokens directly in the command — use environment variables or credential files instead.
+- **TLS**: Rookery does not terminate TLS. For HTTPS, put a reverse proxy (nginx, caddy) in front. Example:
+  ```
+  # Caddy (automatic HTTPS)
+  lancebox.local {
+      reverse_proxy localhost:3131
+  }
+  ```
 
 `idle_timeout` is daemon-wide. When the active backend has been idle for that many seconds with no inference traffic, Rookery unloads it and transitions to `sleeping`. The next `/api/chat` request wakes the last active profile automatically before proxying.
 
