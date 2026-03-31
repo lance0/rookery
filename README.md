@@ -89,7 +89,7 @@ rookery agent describe hermes      # check health, uptime, restarts
 ### Quick Experimentation
 Hot-swap between models without restarting anything:
 ```bash
-rookery start qwen_fast            # MoE at 213 tok/s
+rookery start qwen_fast            # MoE at ~196 tok/s
 rookery bench                      # measure performance
 rookery swap qwen_dense            # switch to dense 27B
 rookery bench                      # compare
