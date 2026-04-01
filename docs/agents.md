@@ -1,6 +1,6 @@
 # Agent Management
 
-Rookery manages external processes (agents) alongside the inference server. Agents are long-running processes like Hermes (Telegram bot), coding assistants, or any service that depends on the inference API.
+Rookery manages external processes (agents) alongside the inference server. Agents are long-running processes like [Hermes](https://github.com/NousResearch/hermes-agent) (Nous Research's multi-platform AI agent), coding assistants, or any service that depends on the inference API.
 
 ## Configuration
 

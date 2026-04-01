@@ -53,7 +53,7 @@ See [Installation](#installation) below for setup instructions.
 - **Hot-swap** — switch between model profiles without restarting the daemon
 - **Live dashboard** — Leptos WASM frontend with 7 tabs: Overview, Settings, Agents, Chat, Bench, Logs, Models
 - **GPU monitoring** — real-time VRAM, temperature, utilization, power draw, per-process memory via NVML
-- **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (Telegram AI agent), coding assistants, or any service that depends on inference
+- **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (multi-platform AI agent with tool calling, web browsing, vision, and voice), coding assistants, or any service that depends on inference
 - **Model discovery** — search HuggingFace, browse quants, VRAM-aware recommendations, one-click download
 - **Auto-sleep** — unloads the model after idle timeout, wakes transparently on next request
 - **Inference canary** — periodic health checks detect CUDA zombies and auto-restart
@@ -82,7 +82,7 @@ See [Installation](#installation) below for setup instructions.
 Run [Hermes](https://github.com/NousResearch/hermes-agent) with a dense model for reliable tool calling. Rookery manages the full lifecycle — auto-starts on boot, restarts on crash, bounces on model swap:
 ```bash
 rookery start qwen_dense           # 27B Q6 for best tool accuracy
-rookery agent start hermes         # Telegram gateway with crash watchdog
+rookery agent start hermes         # AI agent with crash watchdog
 rookery agent describe hermes      # check health, uptime, restarts
 ```
 
