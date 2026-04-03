@@ -55,6 +55,13 @@ rookery models pull <repo> [--quant Q4_K_M]  # download a model
 rookery models hardware           # show hardware profile
 ```
 
+### Releases
+
+```bash
+rookery releases              # upstream release status (llama.cpp, vLLM)
+rookery releases --json       # JSON output for scripting
+```
+
 ### Logs
 
 ```bash

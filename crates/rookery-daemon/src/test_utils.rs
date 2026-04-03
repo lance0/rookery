@@ -222,6 +222,8 @@ pub fn build_test_app_state(
         )]),
         auto_start: false,
         model_dirs: vec![],
+        github_token: None,
+        release_check_interval: 0,
         agents: HashMap::new(),
     };
 
@@ -256,6 +258,8 @@ pub fn build_test_app_state(
         op_lock: Mutex::new(()),
         hf_client: HfClient::new(),
         hardware_profile,
+        github_client: rookery_engine::releases::GitHubClient::new(None),
+        release_cache: RwLock::new(rookery_engine::releases::ReleaseCache::default()),
     });
 
     (dir, app_state)

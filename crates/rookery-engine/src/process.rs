@@ -380,6 +380,8 @@ mod tests {
             )]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         }
     }

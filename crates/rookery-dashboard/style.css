@@ -278,6 +278,20 @@ body {
 .agent-pill .dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
 .agent-pill .dot.running { background: var(--green); }
 .agent-pill .dot.stopped { background: var(--muted); }
+
+/* Update banner */
+.update-banner .release-list { display: flex; flex-direction: column; gap: 8px; }
+.release-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.release-item:last-child { border-bottom: none; }
+.release-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.release-name { font-weight: 600; font-size: 12px; }
+.release-versions { font-size: 11px; color: var(--dim); }
+.release-arrow { color: var(--muted); margin: 0 4px; }
+.release-link { color: var(--accent); text-decoration: none; }
+.release-link:hover { text-decoration: underline; }
+.release-checked { font-size: 10px; color: var(--muted); margin-top: 8px; }
+.badge.update-available { color: var(--amber); border-color: var(--amber); }
+.badge.ahead { color: var(--accent); border-color: var(--accent); }
 .agent-pill-status { color: var(--muted); }
 .agent-pill.unhealthy { color: var(--red); border-color: var(--red); font-weight: 600; }
 

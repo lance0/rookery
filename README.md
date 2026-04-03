@@ -55,6 +55,7 @@ See [Installation](#installation) below for setup instructions.
 - **GPU monitoring** — real-time VRAM, temperature, utilization, power draw, per-process memory via NVML
 - **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (multi-platform AI agent with tool calling, web browsing, vision, and voice), coding assistants, or any service that depends on inference
 - **Model discovery** — search HuggingFace, browse quants, VRAM-aware recommendations, one-click download
+- **Upstream release monitor** — background polling of llama.cpp and vLLM releases with version comparison, dashboard banner, and `rookery releases` CLI
 - **Auto-sleep** — unloads the model after idle timeout, wakes transparently on next request
 - **Inference canary** — periodic health checks detect CUDA zombies and auto-restart
 - **Prometheus metrics** — `/metrics` endpoint for GPU, server, agent, and canary telemetry
@@ -246,6 +247,7 @@ rookery models quants <repo> # list quants with VRAM fit
 rookery models pull <repo>  # download best-fit quant
 rookery models list         # locally cached models
 rookery models hardware     # GPU/CPU/RAM profile
+rookery releases            # upstream release status (llama.cpp, vLLM)
 rookery config              # validate config
 rookery auth generate       # generate a random API key
 rookery completions <shell> # generate shell completions

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3 — 2026-04-03
+
+Upstream release monitoring.
+
+### Added
+- **Upstream release monitor** — background task polls GitHub releases for `ggml-org/llama.cpp` and `vllm-project/vllm` every 30 minutes (configurable via `release_check_interval`, set to 0 to disable)
+- **`/api/releases` endpoint** — returns cached release state with version comparison, update availability, and check timestamp
+- **`rookery releases` CLI command** — shows current vs latest version with color-coded status; `--json` for scripting
+- **Dashboard UpdateBanner** — Overview tab shows release status with "update available", "ahead of release", or "up to date" badges and links to release pages
+- **ETag caching** — conditional requests avoid counting against GitHub's rate limit when nothing has changed
+- **Version detection** — reads llama-server build info from `/props` (running) or `--version` (stopped)
+- **Optional `github_token` config** — for higher API rate limits (5000/hr vs 60/hr unauthenticated)
+- **Release cache persistence** — saved to `~/.local/state/rookery/releases.json`
+
 ## 0.4.0 — 2026-03-21
 
 Phase 7: Production hardening.

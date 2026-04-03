@@ -60,6 +60,14 @@ When `api_key` is configured in `config.toml`, all API endpoints require `Author
 | `/api/model-info` | GET | Model ID, context window from llama-server |
 | `/api/server-stats` | GET | Slot status, request count |
 
+## Upstream Releases
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/releases` | GET | Cached release status for llama.cpp and vLLM: latest version, current version, update availability |
+
+Returns cached data from periodic GitHub polling (interval configurable via `release_check_interval`). Includes `update_available` and `ahead_of_release` flags, current binary version, latest release tag/URL, and `checked_at` timestamp.
+
 ## Streaming
 
 | Endpoint | Method | Description |

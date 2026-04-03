@@ -12,6 +12,7 @@ pub mod toast;
 mod server_stats;
 mod chat_panel;
 mod models_panel;
+mod update_banner;
 
 pub use status_card::*;
 pub use gpu_panel::*;
@@ -27,3 +28,4 @@ pub use toast::*;
 pub use server_stats::*;
 pub use chat_panel::*;
 pub use models_panel::*;
+pub use update_banner::*;

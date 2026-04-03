@@ -12,6 +12,8 @@ api_key = "rky-..."                        # optional shared bearer token, unset
 auto_start = true                          # start default profile on daemon boot
 idle_timeout = 1800                        # seconds before auto-sleep; 0/omitted disables
 model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (optional)
+release_check_interval = 1800             # seconds between upstream release checks; 0 disables
+# github_token = "ghp_..."               # optional GitHub token for higher rate limits
 ```
 
 `api_key` is optional. When set, all `/api/*` data routes and the SSE stream require `Authorization: Bearer <key>`. The dashboard HTML shell loads without auth but shows an unlock prompt before fetching data. The CLI automatically reads the key from config.
@@ -35,6 +37,10 @@ model_dirs = ["/mnt/models"]              # extra dirs to scan for model files (
 `idle_timeout` is daemon-wide. When the active backend has been idle for that many seconds with no inference traffic, Rookery unloads it and transitions to `sleeping`. The next `/api/chat` request wakes the last active profile automatically before proxying.
 
 `model_dirs` adds custom directories to the model scanner. Rookery always scans the HuggingFace hub cache and llama.cpp cache automatically — use `model_dirs` for models stored outside those standard locations.
+
+`release_check_interval` controls how often the daemon polls GitHub for new llama.cpp and vLLM releases. Default is 1800 seconds (30 minutes). Set to 0 to disable. Uses ETag caching to avoid counting against GitHub's rate limit when nothing has changed.
+
+`github_token` is optional. Without it, GitHub allows 60 API requests per hour. With a personal access token, the limit is 5000/hr. Polling uses 2 requests per interval (one per tracked repo). The token only needs public repo read access.
 
 ## Models
 

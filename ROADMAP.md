@@ -311,6 +311,14 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] OpenAPI/Swagger spec for daemon API (machine-readable contract)
 - [ ] Document "two toolchains" contributor workflow (Rust + trunk/wasm for dashboard)
 
+## Improved Benchmarking
+- [ ] Run llama-bench directly (pp512/pp2048/pp8192 + tg128) instead of only API-level bench
+- [ ] Auto stop/start server around llama-bench to get exclusive GPU access
+- [ ] Report both llama-bench (raw hardware) and in-server (real-world) numbers
+- [ ] Compare against saved baselines per profile (detect regressions)
+- [ ] `rookery bench --full` flag for the extended llama-bench run
+- [ ] Store bench results history (JSON) for trend tracking
+
 ## Dashboard — Upstream Release Monitor
 - [ ] Backend changelog panel: poll GitHub releases API for llama.cpp + vLLM tags
 - [ ] Show current installed version vs latest release, highlight when update available

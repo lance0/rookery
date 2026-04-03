@@ -231,6 +231,11 @@ pub async fn fetch_cached_models() -> Result<serde_json::Value, String> {
     resp.json().await.map_err(|e| e.to_string())
 }
 
+pub async fn fetch_releases() -> Result<serde_json::Value, String> {
+    let resp = send(auth_request(Request::get("/api/releases"))).await?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
 pub async fn pull_model(repo: &str, quant: Option<&str>) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "repo": repo, "quant": quant });
     let request = auth_request(Request::post("/api/models/pull"));

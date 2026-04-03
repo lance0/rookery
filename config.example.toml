@@ -10,6 +10,10 @@ idle_timeout = 1800  # seconds; 0 disables auto-sleep
 # Extra directories to scan for GGUF models (in addition to HF cache)
 # model_dirs = ["/mnt/models", "/home/user/gguf-collection"]
 
+# Upstream release monitoring (checks llama.cpp + vLLM GitHub releases)
+release_check_interval = 1800  # seconds; 0 disables
+# github_token = "ghp_..."    # optional, for higher GitHub API rate limits
+
 # ── Models ────────────────────────────────────────────────────────────
 
 # HuggingFace model — downloaded automatically via llama-server -hf

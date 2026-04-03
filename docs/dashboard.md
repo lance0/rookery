@@ -8,7 +8,7 @@ When `api_key` is enabled, the SPA shell still loads normally, then prompts for 
 
 | Tab | Key | Description |
 |-----|-----|-------------|
-| **Overview** | `1` | GPU gauges, server status with backend badge, model info, server stats, compact agent summary |
+| **Overview** | `1` | GPU gauges, server status with backend badge, model info, server stats, compact agent summary, upstream release banner |
 | **Settings** | `2` | Profile switcher with backend indicators and sampling param editor |
 | **Agents** | `3` | Agent cards, controls, filtered logs, watchdog and health detail |
 | **Chat** | `4` | Streaming chat playground (SSE proxy to inference server) |

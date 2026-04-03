@@ -107,6 +107,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCommands,
     },
+    /// Show upstream release status (llama.cpp, vLLM)
+    Releases {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate shell completions
     Completions {
         /// Shell type
@@ -330,6 +336,7 @@ async fn main() {
             ModelCommands::Pull { repo, quant } => cmd_models_pull(&client, &repo, quant).await,
             ModelCommands::Hardware { json } => cmd_hardware(&client, json).await,
         },
+        Commands::Releases { json } => cmd_releases(&client, json).await,
         Commands::Auth { cmd } => match cmd {
             AuthCommands::Generate => cmd_auth_generate().await,
         },
@@ -979,6 +986,66 @@ fn generate_api_key() -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("rky-{suffix}")
+}
+
+async fn cmd_releases(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !client.health().await {
+        return Err("rookeryd is not running".into());
+    }
+
+    let resp: serde_json::Value = client.get("/api/releases").await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let repos = resp["repos"].as_array().cloned().unwrap_or_default();
+    if repos.is_empty() {
+        println!("no release data yet (check runs every 30 minutes)");
+        return Ok(());
+    }
+
+    for repo in &repos {
+        let name = repo["repo"].as_str().unwrap_or("unknown");
+        let short_name = name.rsplit('/').next().unwrap_or(name);
+
+        let current = repo["current_version"]["raw"].as_str().unwrap_or("unknown");
+        let latest = repo["latest"]["tag_name"].as_str().unwrap_or("unknown");
+
+        let status = if repo["ahead_of_release"].as_bool().unwrap_or(false) {
+            "\x1b[34m✓ ahead of latest release\x1b[0m"
+        } else if repo["update_available"].as_bool().unwrap_or(false) {
+            "\x1b[33m⬆ update available\x1b[0m"
+        } else {
+            "\x1b[32m✓ up to date\x1b[0m"
+        };
+
+        println!(
+            "{:<12} current: {:<20} latest: {:<10} {}",
+            short_name, current, latest, status
+        );
+    }
+
+    // Show last checked time
+    if let Some(first) = repos.first()
+        && let Some(checked) = first["checked_at"].as_str()
+        && let Ok(dt) = checked.parse::<chrono::DateTime<chrono::Utc>>()
+    {
+        let ago = chrono::Utc::now().signed_duration_since(dt);
+        let mins = ago.num_minutes();
+        if mins < 1 {
+            println!("checked just now");
+        } else {
+            println!(
+                "checked {} minute{} ago",
+                mins,
+                if mins == 1 { "" } else { "s" }
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn cmd_auth_generate() -> Result<(), Box<dyn std::error::Error>> {

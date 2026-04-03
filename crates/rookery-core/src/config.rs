@@ -168,6 +168,14 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_dirs: Vec<PathBuf>,
 
+    /// Optional GitHub token for higher API rate limits (5000/hr vs 60/hr).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_token: Option<String>,
+
+    /// Upstream release check interval in seconds. Default 1800 (30 min). 0 disables.
+    #[serde(default = "default_release_check_interval")]
+    pub release_check_interval: u64,
+
     #[serde(default)]
     pub models: HashMap<String, Model>,
 
@@ -184,6 +192,10 @@ fn default_profile() -> String {
 
 fn default_listen() -> SocketAddr {
     "127.0.0.1:3000".parse().unwrap()
+}
+
+fn default_release_check_interval() -> u64 {
+    1800
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1067,6 +1079,8 @@ gpu_memory_utilization = 0.9
                 )]),
                 auto_start: false,
                 model_dirs: vec![],
+                github_token: None,
+                release_check_interval: 0,
                 agents: HashMap::new(),
             }
         };
@@ -1558,6 +1572,8 @@ ctx_size = 262144
             )]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         };
 
@@ -1633,6 +1649,8 @@ ctx_size = 262144
             )]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         };
 

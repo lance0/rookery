@@ -340,6 +340,8 @@ async fn main() {
     let metrics = Arc::new(metrics::RuntimeMetrics::new());
     let should_auto_start = config.auto_start;
     let auto_start_profile = config.resolve_profile_name(None).to_string();
+    let github_token = config.github_token.clone();
+    let release_check_interval = config.release_check_interval;
 
     let state = Arc::new(AppState {
         config_path: rookery_core::config::Config::config_path(),
@@ -360,6 +362,8 @@ async fn main() {
         op_lock: Mutex::new(()),
         hf_client,
         hardware_profile,
+        github_client: rookery_engine::releases::GitHubClient::new(github_token.as_deref()),
+        release_cache: RwLock::new(rookery_engine::releases::ReleaseCache::default()),
     });
 
     // Auto-start default profile if configured and no server is running
@@ -486,6 +490,125 @@ async fn main() {
         }
     });
 
+    // Spawn upstream release monitor — polls GitHub for llama.cpp and vLLM releases.
+    let release_state = state.clone();
+    tokio::spawn(async move {
+        use rookery_engine::releases;
+
+        // Load cached release data from disk
+        let cache_path = releases::default_cache_path();
+        let cached = releases::ReleaseCache::load(&cache_path);
+        *release_state.release_cache.write().await = cached;
+
+        if release_check_interval == 0 {
+            tracing::info!("release monitor: disabled (interval=0)");
+            return;
+        }
+
+        tracing::info!(
+            interval_secs = release_check_interval,
+            "release monitor: started"
+        );
+
+        // Run first check after a short delay (don't block startup)
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        loop {
+            if release_state.agent_manager.is_shutting_down() {
+                return;
+            }
+
+            // Detect current llama-server version
+            let current_version = {
+                let current = release_state.current_state().await;
+                let config = release_state.config.read().await;
+                let port = current
+                    .profile_name()
+                    .and_then(|p| config.profiles.get(p))
+                    .map(|p| p.port)
+                    .unwrap_or(8081);
+
+                if current.is_running() {
+                    releases::detect_llama_version_from_props(port).await.ok()
+                } else {
+                    releases::detect_llama_version(&config.llama_server)
+                        .await
+                        .ok()
+                }
+            };
+
+            // Clone etag before the GitHub API call to avoid holding read lock
+            let cached_etag = release_state
+                .release_cache
+                .read()
+                .await
+                .get("ggml-org/llama.cpp")
+                .and_then(|s| s.etag.clone());
+
+            // Check llama.cpp
+            match release_state
+                .github_client
+                .latest_release("ggml-org/llama.cpp", cached_etag.as_deref())
+                .await
+            {
+                Ok(Some((release, new_etag))) => {
+                    let mut cache = release_state.release_cache.write().await;
+                    let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
+                    let (update, ahead) = current_version
+                        .as_ref()
+                        .map(|v| releases::compare_llama_versions(v, &release.tag_name))
+                        .unwrap_or((false, false));
+                    repo_state.latest = Some(release);
+                    repo_state.current_version = current_version.clone();
+                    repo_state.update_available = update;
+                    repo_state.ahead_of_release = ahead;
+                    repo_state.checked_at = Some(chrono::Utc::now());
+                    repo_state.etag = new_etag;
+                    tracing::info!(
+                        tag = repo_state.latest.as_ref().map(|r| r.tag_name.as_str()),
+                        update_available = update,
+                        ahead = ahead,
+                        "release monitor: checked llama.cpp"
+                    );
+                }
+                Ok(None) => {
+                    // 304 Not Modified — update timestamp and current version only
+                    let mut cache = release_state.release_cache.write().await;
+                    let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
+                    if let Some(ref cv) = current_version {
+                        let (update, ahead) = repo_state
+                            .latest
+                            .as_ref()
+                            .map(|r| releases::compare_llama_versions(cv, &r.tag_name))
+                            .unwrap_or((false, false));
+                        repo_state.current_version = Some(cv.clone());
+                        repo_state.update_available = update;
+                        repo_state.ahead_of_release = ahead;
+                    }
+                    repo_state.checked_at = Some(chrono::Utc::now());
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "release monitor: failed to check llama.cpp");
+                }
+            }
+
+            // Persist cache
+            let cache = release_state.release_cache.read().await;
+            if let Err(e) = cache.save(&cache_path) {
+                tracing::warn!(error = %e, "release monitor: failed to save cache");
+            }
+
+            // Wait for next check or shutdown
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(release_check_interval)) => {}
+                _ = release_state.agent_manager.shutdown_notified() => {
+                    tracing::info!("release monitor: shutdown, exiting");
+                    return;
+                }
+            }
+        }
+    });
+
     let auth_layer = middleware::from_fn_with_state(state.clone(), auth::require_api_key);
 
     let protected_api = Router::new()
@@ -516,6 +639,7 @@ async fn main() {
         .route("/models/recommend", get(routes::get_models_recommend))
         .route("/models/cached", get(routes::get_models_cached))
         .route("/models/pull", post(routes::post_models_pull))
+        .route("/releases", get(routes::get_releases))
         .route_layer(auth_layer);
 
     let app = Router::new()

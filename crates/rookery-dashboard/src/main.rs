@@ -340,6 +340,7 @@ fn App() -> impl IntoView {
     let (has_api_key, set_has_api_key) = signal(api::get_api_key().is_some());
     let (event_source, set_event_source) = signal(Option::<web_sys::EventSource>::None);
     let (server_stats, set_server_stats) = signal(Option::<serde_json::Value>::None);
+    let (releases, set_releases) = signal(Option::<serde_json::Value>::None);
 
     load_dashboard_data(
         set_profiles,
@@ -423,6 +424,21 @@ fn App() -> impl IntoView {
                     set_server_stats.set(None);
                 }
                 gloo_timers::future::sleep(std::time::Duration::from_millis(3000)).await;
+            }
+        });
+    }
+
+    // Periodic upstream release polling (every 5 minutes, daemon caches GitHub calls)
+    {
+        let auth_required_releases = auth_required;
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                if !auth_required_releases.get() {
+                    if let Ok(data) = api::fetch_releases().await {
+                        set_releases.set(Some(data));
+                    }
+                }
+                gloo_timers::future::sleep(std::time::Duration::from_secs(300)).await;
             }
         });
     }
@@ -688,6 +704,7 @@ fn App() -> impl IntoView {
                                             </div>
                                             <div class="grid">
                                                 <AgentSummary agents=agents set_tab=set_tab />
+                                                <UpdateBanner releases=releases />
                                             </div>
                                         </div>
                                     }.into_any(),

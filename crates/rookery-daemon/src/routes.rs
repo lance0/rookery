@@ -1528,6 +1528,13 @@ pub async fn post_models_pull(
     })))
 }
 
+// ── Upstream releases ───────────────────────────────────────────────
+
+pub async fn get_releases(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cache = state.release_cache.read().await;
+    Json(serde_json::to_value(&*cache).unwrap_or_default())
+}
+
 fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse {
     match state {
         rookery_core::state::ServerState::Stopped => StatusResponse {
@@ -1981,6 +1988,8 @@ mod tests {
             ]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         };
 
@@ -2236,6 +2245,8 @@ mod tests {
             )]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         };
 
@@ -2303,6 +2314,8 @@ mod tests {
             )]),
             auto_start: false,
             model_dirs: vec![],
+            github_token: None,
+            release_check_interval: 0,
             agents: HashMap::new(),
         };
 

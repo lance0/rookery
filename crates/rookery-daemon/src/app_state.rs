@@ -6,6 +6,7 @@ use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::hardware::HardwareProfile;
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::models::HfClient;
+use rookery_engine::releases::{GitHubClient, ReleaseCache};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -44,6 +45,8 @@ pub struct AppState {
     pub op_lock: Mutex<()>,
     pub hf_client: HfClient,
     pub hardware_profile: HardwareProfile,
+    pub github_client: GitHubClient,
+    pub release_cache: RwLock<ReleaseCache>,
 }
 
 impl AppState {
