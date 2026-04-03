@@ -311,10 +311,16 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] OpenAPI/Swagger spec for daemon API (machine-readable contract)
 - [ ] Document "two toolchains" contributor workflow (Rust + trunk/wasm for dashboard)
 
+## Dashboard — Upstream Release Monitor
+- [ ] Backend changelog panel: poll GitHub releases API for llama.cpp + vLLM tags
+- [ ] Show current installed version vs latest release, highlight when update available
+- [ ] Release notes preview (expandable, markdown rendered)
+- [ ] Notify on new releases relevant to current backend (llama-server or vLLM)
+- [ ] Quick diff: what changed since our build (commit count, notable PRs)
+- [ ] Optional: one-click rebuild trigger (for llama.cpp, runs cmake + build)
+
 ## Future
 - Multi-GPU support with explicit GPU placement per profile (data model ready, engine picks GPU 0)
 - Multi-model concurrent serving (multiple profiles on different ports simultaneously)
 - Request rewriting / filtering (proxy layer for API requests)
 - Custom agent framework (build/test agents against local models)
-- Request rewriting / filtering (proxy layer for API requests)
-- Multi-model concurrent serving (multiple profiles on different ports simultaneously)
