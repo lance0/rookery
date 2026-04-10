@@ -412,8 +412,9 @@ async fn main() {
             let mut cuda_error_rx = canary_state.backend.lock().await.subscribe_errors();
 
             // Wait for poll interval, CUDA error, or shutdown
+            let is_cuda_error;
             tokio::select! {
-                _ = tokio::time::sleep(CANARY_INTERVAL) => {}
+                _ = tokio::time::sleep(CANARY_INTERVAL) => { is_cuda_error = false; }
                 _ = canary_agent_mgr.shutdown_notified() => {
                     tracing::info!("inference canary: shutdown, exiting");
                     return;
@@ -422,6 +423,7 @@ async fn main() {
                     tracing::warn!("CUDA error detected, draining requests and running immediate canary");
                     // Immediately stop forwarding requests to the broken server
                     canary_state.backend.lock().await.set_draining(true);
+                    is_cuda_error = true;
                 }
             }
 
@@ -429,7 +431,16 @@ async fn main() {
                 return;
             }
 
-            canary::run_canary_check(&canary_state, Some(canary_agent_mgr.shutdown_flag())).await;
+            if is_cuda_error {
+                canary::run_canary_check_cuda_error(
+                    &canary_state,
+                    Some(canary_agent_mgr.shutdown_flag()),
+                )
+                .await;
+            } else {
+                canary::run_canary_check(&canary_state, Some(canary_agent_mgr.shutdown_flag()))
+                    .await;
+            };
         }
     });
 

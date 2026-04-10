@@ -34,6 +34,23 @@ pub async fn run_canary_check(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
 ) -> bool {
+    run_canary_check_inner(state, shutdown, false).await
+}
+
+/// Run canary check with explicit CUDA error flag.
+/// When `cuda_error` is true, skip inference checks and go straight to restart.
+pub async fn run_canary_check_cuda_error(
+    state: &Arc<AppState>,
+    shutdown: Option<&std::sync::atomic::AtomicBool>,
+) -> bool {
+    run_canary_check_inner(state, shutdown, true).await
+}
+
+async fn run_canary_check_inner(
+    state: &Arc<AppState>,
+    shutdown: Option<&std::sync::atomic::AtomicBool>,
+    cuda_error: bool,
+) -> bool {
     let is_shutdown = || {
         shutdown
             .map(|s| s.load(std::sync::atomic::Ordering::SeqCst))
@@ -41,10 +58,13 @@ pub async fn run_canary_check(
     };
     state.metrics.record_canary_check();
 
-    let cuda_error_draining = state.backend.lock().await.is_draining();
+    // If draining due to a swap (not CUDA error), skip entirely
+    if !cuda_error && state.backend.lock().await.is_draining() {
+        return false;
+    }
 
-    // If draining due to CUDA error, skip inference checks — go straight to restart
-    if !cuda_error_draining {
+    // If CUDA error triggered this check, skip inference checks — go straight to restart
+    if !cuda_error {
         // Normal path: only check when server is running
         if is_shutdown() {
             return false;
@@ -99,7 +119,7 @@ pub async fn run_canary_check(
     };
 
     state.metrics.inc_canary_restart();
-    if cuda_error_draining {
+    if cuda_error {
         tracing::error!(profile = %profile, "CUDA error detected, restarting server");
     } else {
         tracing::error!(profile = %profile, "inference canary failed twice, restarting server");
