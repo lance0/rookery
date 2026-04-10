@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
+use crate::backend::BackendErrorEvent;
 use crate::health;
 use crate::logs::LogBuffer;
 
@@ -40,6 +41,7 @@ pub struct ProcessManager {
     log_buffer: Arc<LogBuffer>,
     draining: AtomicBool,
     cuda_error_tx: watch::Sender<bool>,
+    daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,13 @@ pub struct ProcessInfo {
 
 impl ProcessManager {
     pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        Self::new_with_error_notifier(log_buffer, None)
+    }
+
+    pub fn new_with_error_notifier(
+        log_buffer: Arc<LogBuffer>,
+        daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+    ) -> Self {
         let (cuda_error_tx, _) = watch::channel(false);
         Self {
             child: Arc::new(Mutex::new(None)),
@@ -61,6 +70,7 @@ impl ProcessManager {
             log_buffer,
             draining: AtomicBool::new(false),
             cuda_error_tx,
+            daemon_error_tx,
         }
     }
 
@@ -137,6 +147,7 @@ impl ProcessManager {
         if let Some(stderr) = child.stderr.take() {
             let buf = log_buf.clone();
             let cuda_tx = self.cuda_error_tx.clone();
+            let daemon_error_tx = self.daemon_error_tx.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
@@ -146,6 +157,13 @@ impl ProcessManager {
                     if lower.contains("cuda error") || lower.contains("ggml_cuda_error") {
                         tracing::error!("CUDA error detected in stderr: {line}");
                         let _ = cuda_tx.send(true);
+                        if let Some(tx) = &daemon_error_tx {
+                            let _ = tx.send(Some(BackendErrorEvent {
+                                backend_type: rookery_core::config::BackendType::LlamaServer,
+                                pid: Some(pid),
+                                container_id: None,
+                            }));
+                        }
                     }
                     buf.push(line);
                 }

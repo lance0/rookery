@@ -19,7 +19,7 @@ use rookery_engine::gpu::GpuMonitor;
 use rookery_engine::logs::LogBuffer;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 async fn reconciled_backend_alive(
     backend_type: rookery_core::config::BackendType,
@@ -75,6 +75,8 @@ async fn main() {
 
     // Init log buffer
     let log_buffer = Arc::new(LogBuffer::new(10_000));
+    let (cuda_error_tx, _) =
+        watch::channel::<Option<rookery_engine::backend::BackendErrorEvent>>(None);
 
     // Init backend (defaults to LlamaServerBackend for the default profile)
     // This will be replaced during reconciliation if a different profile was running.
@@ -89,14 +91,21 @@ async fn main() {
                 .next()
                 .unwrap_or_else(|| panic!("no profiles configured"))
         };
-        match backend::create_backend(profile_for_backend, log_buffer.clone()) {
+        match backend::create_backend_with_error_notifier(
+            profile_for_backend,
+            log_buffer.clone(),
+            Some(cuda_error_tx.clone()),
+        ) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(error = %e, "default profile backend unavailable, falling back to LlamaServerBackend");
                 // Fallback: create a LlamaServerBackend as a placeholder
-                Box::new(rookery_engine::backend::LlamaServerBackend::new(
-                    log_buffer.clone(),
-                ))
+                Box::new(
+                    rookery_engine::backend::LlamaServerBackend::new_with_error_notifier(
+                        log_buffer.clone(),
+                        Some(cuda_error_tx.clone()),
+                    ),
+                )
             }
         }
     };
@@ -128,7 +137,11 @@ async fn main() {
         } = reconciled
         {
             if let Some(profile_cfg) = config.profiles.get(profile) {
-                match backend::create_backend(profile_cfg, log_buffer.clone()) {
+                match backend::create_backend_with_error_notifier(
+                    profile_cfg,
+                    log_buffer.clone(),
+                    Some(cuda_error_tx.clone()),
+                ) {
                     Ok(correct_backend) => {
                         if !reconciled_backend_alive(
                             *backend_type,
@@ -354,6 +367,7 @@ async fn main() {
         state_persistence,
         server_state: RwLock::new(initial_server_state.clone()),
         state_tx,
+        cuda_error_tx,
         last_inference_at: AtomicI64::new(if initial_server_state.is_running() {
             chrono::Utc::now().timestamp()
         } else {
@@ -406,35 +420,36 @@ async fn main() {
     let canary_agent_mgr = state.agent_manager.clone();
     tokio::spawn(async move {
         const CANARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut cuda_error_rx = canary_state.cuda_error_tx.subscribe();
 
         loop {
-            // Re-subscribe to the current backend's error channel each cycle.
-            let mut cuda_error_rx = canary_state.backend.lock().await.subscribe_errors();
-
             // Wait for poll interval, CUDA error, or shutdown
-            let cuda_error_pid: Option<u32>;
+            let cuda_error_event;
             tokio::select! {
-                _ = tokio::time::sleep(CANARY_INTERVAL) => { cuda_error_pid = None; }
+                _ = tokio::time::sleep(CANARY_INTERVAL) => { cuda_error_event = None; }
                 _ = canary_agent_mgr.shutdown_notified() => {
                     tracing::info!("inference canary: shutdown, exiting");
                     return;
                 }
-                _ = cuda_error_rx.changed() => {
+                changed = cuda_error_rx.changed() => {
+                    if changed.is_err() {
+                        tracing::info!("inference canary: CUDA error channel closed, exiting");
+                        return;
+                    }
+                    let error_event = cuda_error_rx.borrow().clone();
+                    let Some(error_event_inner) = error_event.clone() else {
+                        continue;
+                    };
                     // Hold backend lock across check-and-set to close TOCTOU gap
                     // with the swap path which also sets draining under this lock.
-                    // Capture current PID so canary can verify it hasn't changed.
                     let backend = canary_state.backend.lock().await;
                     if backend.is_draining() {
-                        tracing::debug!("CUDA error during swap/drain, ignoring");
-                        cuda_error_pid = None;
+                        tracing::debug!(?error_event_inner, "CUDA error during swap/drain, ignoring");
+                        cuda_error_event = None;
                     } else {
-                        let pid = match canary_state.current_state().await {
-                            rookery_core::state::ServerState::Running { pid, .. } => Some(pid),
-                            _ => None,
-                        };
-                        tracing::warn!(?pid, "CUDA error detected, draining requests and running immediate canary");
+                        tracing::warn!(?error_event_inner, "CUDA error detected, draining requests and running immediate canary");
                         backend.set_draining(true);
-                        cuda_error_pid = pid;
+                        cuda_error_event = error_event;
                     }
                     drop(backend);
                 }
@@ -444,11 +459,11 @@ async fn main() {
                 return;
             }
 
-            if let Some(pid) = cuda_error_pid {
+            if let Some(error_event) = cuda_error_event {
                 canary::run_canary_check_cuda_error(
                     &canary_state,
                     Some(canary_agent_mgr.shutdown_flag()),
-                    Some(pid),
+                    Some(error_event),
                 )
                 .await;
             } else {

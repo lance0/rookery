@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::app_state::AppState;
+use rookery_engine::backend::BackendErrorEvent;
 
 /// Timeout for inference canary requests.
 pub const CANARY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,22 +40,22 @@ pub async fn run_canary_check(
 
 /// Run canary check triggered by a CUDA error.
 /// Skips inference checks and goes straight to restart.
-/// `error_pid` is the PID of the backend that emitted the error — if the
-/// backend PID has changed by the time we acquire the op_lock (e.g. a swap
-/// completed), the error is stale and we skip the restart.
+/// `error_event` identifies which backend emitted the error. If the active
+/// backend changes by the time we acquire `op_lock` (e.g. a swap completes),
+/// the error is stale and we skip the restart.
 pub async fn run_canary_check_cuda_error(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
-    error_pid: Option<u32>,
+    error_event: Option<BackendErrorEvent>,
 ) -> bool {
-    run_canary_check_inner(state, shutdown, true, error_pid).await
+    run_canary_check_inner(state, shutdown, true, error_event).await
 }
 
 async fn run_canary_check_inner(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
     cuda_error: bool,
-    error_pid: Option<u32>,
+    error_event: Option<BackendErrorEvent>,
 ) -> bool {
     let is_shutdown = || {
         shutdown
@@ -138,10 +139,14 @@ async fn run_canary_check_inner(
 
     // Re-read state under lock — a swap may have changed the profile/PID while we waited
     let current = state.current_state().await;
-    let (profile, current_pid) = match current {
+    let (profile, current_pid, current_backend_type, current_container_id) = match current {
         rookery_core::state::ServerState::Running {
-            ref profile, pid, ..
-        } => (profile.clone(), pid),
+            ref profile,
+            pid,
+            backend_type,
+            ref container_id,
+            ..
+        } => (profile.clone(), pid, backend_type, container_id.clone()),
         _ => {
             tracing::info!(
                 "server no longer running after acquiring lock, skipping canary restart"
@@ -150,18 +155,26 @@ async fn run_canary_check_inner(
         }
     };
 
-    // If this was a CUDA error restart, verify the PID matches the backend that
-    // emitted the error. A swap may have replaced the backend while we waited
-    // for the op_lock — restarting the new healthy backend would be wrong.
-    if let Some(err_pid) = error_pid.filter(|&p| p != current_pid) {
-        tracing::info!(
-            error_pid = err_pid,
-            current_pid,
-            "CUDA error from stale backend (PID changed), skipping restart"
-        );
-        // Clear draining since we're not restarting
-        state.backend.lock().await.set_draining(false);
-        return false;
+    // If this was a CUDA error restart, verify the backend identity still matches
+    // the backend that emitted the error. A swap may have replaced the backend
+    // while we waited for the op_lock — restarting the new healthy backend would
+    // be wrong.
+    if let Some(error_event) = error_event {
+        let stale_pid = error_event.pid.is_some() && error_event.pid != Some(current_pid);
+        let stale_container =
+            error_event.container_id.is_some() && error_event.container_id != current_container_id;
+        if error_event.backend_type != current_backend_type || stale_pid || stale_container {
+            tracing::info!(
+                ?error_event,
+                current_pid,
+                ?current_backend_type,
+                ?current_container_id,
+                "CUDA error from stale backend, skipping restart"
+            );
+            // Clear draining since we're not restarting
+            state.backend.lock().await.set_draining(false);
+            return false;
+        }
     }
 
     {
@@ -743,6 +756,31 @@ mod tests {
         assert!(
             !result.unwrap().unwrap(),
             "should NOT restart — server was stopped during lock wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cuda_error_skips_restart_for_stale_backend_event() {
+        let dead = dead_port().await;
+        let (_dir, state) =
+            build_canary_state(Box::new(CanaryMockBackend::new(dead)), test_config(dead)).await;
+
+        let restarted = run_canary_check_cuda_error(
+            &state,
+            None,
+            Some(rookery_engine::backend::BackendErrorEvent {
+                backend_type: BackendType::LlamaServer,
+                pid: Some(12345),
+                container_id: None,
+            }),
+        )
+        .await;
+
+        assert!(!restarted, "stale backend error should not trigger restart");
+        assert!(state.current_state().await.is_running());
+        assert!(
+            !state.backend.lock().await.is_draining(),
+            "draining should be cleared when stale event is ignored"
         );
     }
 

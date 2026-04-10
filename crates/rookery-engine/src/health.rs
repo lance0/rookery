@@ -53,7 +53,10 @@ pub async fn check_health(port: u16, timeout: Duration) -> bool {
 pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::debug!(port, error = %e, "slots check client build failed");
+            return false;
+        }
     };
 
     let resp = match client
@@ -62,12 +65,22 @@ pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
         .await
     {
         Ok(r) if r.status().is_success() => r,
-        _ => return false,
+        Ok(r) => {
+            tracing::debug!(port, status = %r.status(), "slots check returned non-success");
+            return false;
+        }
+        Err(e) => {
+            tracing::debug!(port, error = %e, "slots check request failed");
+            return false;
+        }
     };
 
     let slots: Vec<serde_json::Value> = match resp.json().await {
         Ok(s) => s,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::debug!(port, error = %e, "slots check JSON parse failed");
+            return false;
+        }
     };
 
     // If all slots are processing, server is busy — don't send canary requests

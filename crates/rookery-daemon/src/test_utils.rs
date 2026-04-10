@@ -228,6 +228,8 @@ pub fn build_test_app_state(
     };
 
     let (state_tx, _) = broadcast::channel(16);
+    let (cuda_error_tx, _) =
+        watch::channel::<Option<rookery_engine::backend::BackendErrorEvent>>(None);
 
     // Create a StatePersistence pointing at the tempdir
     let state_persistence = StatePersistence { path: state_path };
@@ -254,6 +256,7 @@ pub fn build_test_app_state(
         state_persistence,
         server_state: RwLock::new(initial_server_state),
         state_tx,
+        cuda_error_tx,
         last_inference_at: AtomicI64::new(0),
         op_lock: Mutex::new(()),
         hf_client: HfClient::new(),

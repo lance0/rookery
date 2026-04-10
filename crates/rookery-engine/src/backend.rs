@@ -51,6 +51,14 @@ pub struct BackendInfo {
     pub exe_path: Option<PathBuf>,
 }
 
+/// Identifies which backend instance emitted a CUDA error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendErrorEvent {
+    pub backend_type: BackendType,
+    pub pid: Option<u32>,
+    pub container_id: Option<String>,
+}
+
 /// The abstraction boundary between daemon orchestration and backend specifics.
 ///
 /// Both `LlamaServerBackend` and `VllmBackend` implement this trait.
@@ -105,8 +113,16 @@ pub struct LlamaServerBackend {
 impl LlamaServerBackend {
     /// Create a new LlamaServerBackend with the given log buffer.
     pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        Self::new_with_error_notifier(log_buffer, None)
+    }
+
+    /// Create a backend that also forwards CUDA errors to a daemon-level watcher.
+    pub fn new_with_error_notifier(
+        log_buffer: Arc<LogBuffer>,
+        daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+    ) -> Self {
         Self {
-            process_manager: ProcessManager::new(log_buffer),
+            process_manager: ProcessManager::new_with_error_notifier(log_buffer, daemon_error_tx),
         }
     }
 
@@ -214,6 +230,8 @@ pub struct VllmBackend {
     draining: AtomicBool,
     /// Watch channel sender for CUDA error detection.
     cuda_error_tx: watch::Sender<bool>,
+    /// Optional daemon-level CUDA error notifier that survives backend swaps.
+    daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
     /// Info about the running backend (profile, port, started_at, etc.).
     info: Mutex<Option<BackendInfo>>,
     /// Handle to the background log capture task (docker compose logs -f).
@@ -226,6 +244,15 @@ impl VllmBackend {
     ///
     /// `compose_file_path` is the path where the generated docker-compose.yml will be written.
     pub fn new(compose_file_path: PathBuf, log_buffer: Arc<LogBuffer>) -> Self {
+        Self::new_with_error_notifier(compose_file_path, log_buffer, None)
+    }
+
+    /// Create a backend that also forwards CUDA errors to a daemon-level watcher.
+    pub fn new_with_error_notifier(
+        compose_file_path: PathBuf,
+        log_buffer: Arc<LogBuffer>,
+        daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+    ) -> Self {
         let (cuda_error_tx, _) = watch::channel(false);
         Self {
             compose_file_path,
@@ -233,6 +260,7 @@ impl VllmBackend {
             log_buffer,
             draining: AtomicBool::new(false),
             cuda_error_tx,
+            daemon_error_tx,
             info: Mutex::new(None),
             log_task: Mutex::new(None),
         }
@@ -323,10 +351,11 @@ impl VllmBackend {
     ///
     /// The task handles the docker compose process ending (container stops)
     /// gracefully without panicking.
-    async fn spawn_log_capture(&self) {
+    async fn spawn_log_capture(&self, container_id: String) {
         let compose_path = self.compose_file_path.clone();
         let log_buffer = self.log_buffer.clone();
         let cuda_error_tx = self.cuda_error_tx.clone();
+        let daemon_error_tx = self.daemon_error_tx.clone();
 
         let handle = tokio::spawn(async move {
             let child_result = tokio::process::Command::new("docker")
@@ -365,6 +394,13 @@ impl VllmBackend {
                         if is_cuda_error(&line) {
                             tracing::error!("CUDA error detected in vLLM logs: {line}");
                             let _ = cuda_error_tx.send(true);
+                            if let Some(tx) = &daemon_error_tx {
+                                let _ = tx.send(Some(BackendErrorEvent {
+                                    backend_type: BackendType::Vllm,
+                                    pid: None,
+                                    container_id: Some(container_id.clone()),
+                                }));
+                            }
                         }
                         log_buffer.push(format!("[vllm] {line}"));
                     }
@@ -448,7 +484,7 @@ impl InferenceBackend for VllmBackend {
             exe_path: None,
         };
 
-        *self.container_id.lock().await = Some(cid);
+        *self.container_id.lock().await = Some(cid.clone());
         *self.info.lock().await = Some(backend_info.clone());
 
         // Poll health endpoint with exponential backoff (same as llama-server)
@@ -469,7 +505,7 @@ impl InferenceBackend for VllmBackend {
         }
 
         // Spawn log capture task after successful start
-        self.spawn_log_capture().await;
+        self.spawn_log_capture(cid).await;
 
         Ok(backend_info)
     }
@@ -513,7 +549,7 @@ impl InferenceBackend for VllmBackend {
     }
 
     async fn adopt(&self, info: BackendInfo) -> Result<()> {
-        let cid = info.container_id.as_ref().ok_or_else(|| {
+        let cid = info.container_id.clone().ok_or_else(|| {
             Error::ConfigValidation("container_id required for VllmBackend adopt".into())
         })?;
 
@@ -552,7 +588,7 @@ impl InferenceBackend for VllmBackend {
         *self.info.lock().await = Some(info);
 
         // Resume log capture for the adopted container
-        self.spawn_log_capture().await;
+        self.spawn_log_capture(cid).await;
 
         Ok(())
     }
@@ -622,11 +658,27 @@ pub fn create_backend(
     profile: &Profile,
     log_buffer: Arc<LogBuffer>,
 ) -> Result<Box<dyn InferenceBackend>> {
+    create_backend_with_error_notifier(profile, log_buffer, None)
+}
+
+/// Create a backend and optionally forward CUDA errors to a daemon-level watcher.
+pub fn create_backend_with_error_notifier(
+    profile: &Profile,
+    log_buffer: Arc<LogBuffer>,
+    daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+) -> Result<Box<dyn InferenceBackend>> {
     match profile.backend_type() {
-        BackendType::LlamaServer => Ok(Box::new(LlamaServerBackend::new(log_buffer))),
+        BackendType::LlamaServer => Ok(Box::new(LlamaServerBackend::new_with_error_notifier(
+            log_buffer,
+            daemon_error_tx,
+        ))),
         BackendType::Vllm => {
             let compose_path = compose::compose_file_path()?;
-            Ok(Box::new(VllmBackend::new(compose_path, log_buffer)))
+            Ok(Box::new(VllmBackend::new_with_error_notifier(
+                compose_path,
+                log_buffer,
+                daemon_error_tx,
+            )))
         }
     }
 }
@@ -2284,7 +2336,7 @@ mod tests {
         assert!(backend.log_task.lock().await.is_none());
 
         // Spawn log capture (will fail to connect since no container, but should set handle)
-        backend.spawn_log_capture().await;
+        backend.spawn_log_capture("test-container".into()).await;
 
         // After spawn, log_task should be Some
         assert!(
@@ -2459,7 +2511,7 @@ mod tests {
         }
 
         // Spawn log capture — this is what start() calls after successful docker compose up
-        backend.spawn_log_capture().await;
+        backend.spawn_log_capture("test-container".into()).await;
 
         // Verify log_task is set (spawn_log_capture was called)
         assert!(

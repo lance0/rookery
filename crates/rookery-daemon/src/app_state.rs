@@ -10,7 +10,7 @@ use rookery_engine::releases::{GitHubClient, ReleaseCache};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 use crate::metrics::RuntimeMetrics;
 
@@ -41,6 +41,7 @@ pub struct AppState {
     pub state_persistence: StatePersistence,
     pub server_state: RwLock<ServerState>,
     pub state_tx: broadcast::Sender<serde_json::Value>,
+    pub cuda_error_tx: watch::Sender<Option<rookery_engine::backend::BackendErrorEvent>>,
     pub last_inference_at: AtomicI64,
     pub op_lock: Mutex<()>,
     pub hf_client: HfClient,

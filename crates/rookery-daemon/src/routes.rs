@@ -376,8 +376,11 @@ pub async fn post_swap(
             .profiles
             .get(&req.profile)
             .ok_or_else(|| rookery_core::error::Error::ProfileNotFound(req.profile.clone()))?;
-        let new_backend =
-            rookery_engine::backend::create_backend(profile, state.log_buffer.clone())?;
+        let new_backend = rookery_engine::backend::create_backend_with_error_notifier(
+            profile,
+            state.log_buffer.clone(),
+            Some(state.cuda_error_tx.clone()),
+        )?;
         let port = profile.port;
 
         // Start the new backend.
