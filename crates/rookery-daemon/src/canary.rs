@@ -34,22 +34,27 @@ pub async fn run_canary_check(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
 ) -> bool {
-    run_canary_check_inner(state, shutdown, false).await
+    run_canary_check_inner(state, shutdown, false, None).await
 }
 
-/// Run canary check with explicit CUDA error flag.
-/// When `cuda_error` is true, skip inference checks and go straight to restart.
+/// Run canary check triggered by a CUDA error.
+/// Skips inference checks and goes straight to restart.
+/// `error_pid` is the PID of the backend that emitted the error — if the
+/// backend PID has changed by the time we acquire the op_lock (e.g. a swap
+/// completed), the error is stale and we skip the restart.
 pub async fn run_canary_check_cuda_error(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
+    error_pid: Option<u32>,
 ) -> bool {
-    run_canary_check_inner(state, shutdown, true).await
+    run_canary_check_inner(state, shutdown, true, error_pid).await
 }
 
 async fn run_canary_check_inner(
     state: &Arc<AppState>,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
     cuda_error: bool,
+    error_pid: Option<u32>,
 ) -> bool {
     let is_shutdown = || {
         shutdown
@@ -131,10 +136,12 @@ async fn run_canary_check_inner(
         return false;
     }
 
-    // Re-read state under lock — a swap may have changed the profile while we waited
+    // Re-read state under lock — a swap may have changed the profile/PID while we waited
     let current = state.current_state().await;
-    let profile = match current {
-        rookery_core::state::ServerState::Running { ref profile, .. } => profile.clone(),
+    let (profile, current_pid) = match current {
+        rookery_core::state::ServerState::Running {
+            ref profile, pid, ..
+        } => (profile.clone(), pid),
         _ => {
             tracing::info!(
                 "server no longer running after acquiring lock, skipping canary restart"
@@ -142,6 +149,20 @@ async fn run_canary_check_inner(
             return false;
         }
     };
+
+    // If this was a CUDA error restart, verify the PID matches the backend that
+    // emitted the error. A swap may have replaced the backend while we waited
+    // for the op_lock — restarting the new healthy backend would be wrong.
+    if let Some(err_pid) = error_pid.filter(|&p| p != current_pid) {
+        tracing::info!(
+            error_pid = err_pid,
+            current_pid,
+            "CUDA error from stale backend (PID changed), skipping restart"
+        );
+        // Clear draining since we're not restarting
+        state.backend.lock().await.set_draining(false);
+        return false;
+    }
 
     {
         let backend = state.backend.lock().await;

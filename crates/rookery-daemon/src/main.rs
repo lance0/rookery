@@ -412,24 +412,31 @@ async fn main() {
             let mut cuda_error_rx = canary_state.backend.lock().await.subscribe_errors();
 
             // Wait for poll interval, CUDA error, or shutdown
-            let is_cuda_error;
+            let cuda_error_pid: Option<u32>;
             tokio::select! {
-                _ = tokio::time::sleep(CANARY_INTERVAL) => { is_cuda_error = false; }
+                _ = tokio::time::sleep(CANARY_INTERVAL) => { cuda_error_pid = None; }
                 _ = canary_agent_mgr.shutdown_notified() => {
                     tracing::info!("inference canary: shutdown, exiting");
                     return;
                 }
                 _ = cuda_error_rx.changed() => {
-                    // Ignore CUDA errors during an active swap — the old process
-                    // shutting down can emit stderr noise that triggers this.
-                    if canary_state.backend.lock().await.is_draining() {
+                    // Hold backend lock across check-and-set to close TOCTOU gap
+                    // with the swap path which also sets draining under this lock.
+                    // Capture current PID so canary can verify it hasn't changed.
+                    let backend = canary_state.backend.lock().await;
+                    if backend.is_draining() {
                         tracing::debug!("CUDA error during swap/drain, ignoring");
-                        is_cuda_error = false;
+                        cuda_error_pid = None;
                     } else {
-                        tracing::warn!("CUDA error detected, draining requests and running immediate canary");
-                        canary_state.backend.lock().await.set_draining(true);
-                        is_cuda_error = true;
+                        let pid = match canary_state.current_state().await {
+                            rookery_core::state::ServerState::Running { pid, .. } => Some(pid),
+                            _ => None,
+                        };
+                        tracing::warn!(?pid, "CUDA error detected, draining requests and running immediate canary");
+                        backend.set_draining(true);
+                        cuda_error_pid = pid;
                     }
+                    drop(backend);
                 }
             }
 
@@ -437,16 +444,17 @@ async fn main() {
                 return;
             }
 
-            if is_cuda_error {
+            if let Some(pid) = cuda_error_pid {
                 canary::run_canary_check_cuda_error(
                     &canary_state,
                     Some(canary_agent_mgr.shutdown_flag()),
+                    Some(pid),
                 )
                 .await;
             } else {
                 canary::run_canary_check(&canary_state, Some(canary_agent_mgr.shutdown_flag()))
                     .await;
-            };
+            }
         }
     });
 
