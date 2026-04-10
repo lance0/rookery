@@ -47,6 +47,38 @@ pub async fn check_health(port: u16, timeout: Duration) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
+/// Check if all server slots are busy processing requests.
+/// Returns true if the server is reachable and all slots are currently processing.
+/// Returns false if the server is unreachable, returns an error, or has idle slots.
+pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let resp = match client
+        .get(format!("http://127.0.0.1:{port}/slots"))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return false,
+    };
+
+    let slots: Vec<serde_json::Value> = match resp.json().await {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // If all slots are processing, server is busy — don't send canary requests
+    !slots.is_empty()
+        && slots.iter().all(|s| {
+            s.get("is_processing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+}
+
 /// Inference canary — sends a minimal completion request to verify the CUDA
 /// inference pipeline is functional, not just that the HTTP server responds.
 /// Returns true if the server generates at least one token within the timeout.

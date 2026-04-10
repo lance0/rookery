@@ -57,6 +57,12 @@ pub async fn run_canary_check(
             _ => return false,
         };
 
+        // Skip canary if all slots are busy — server is healthy but processing
+        if rookery_engine::health::check_slots_busy(port, CANARY_TIMEOUT).await {
+            tracing::debug!(port, "inference canary skipped: all slots busy");
+            return false;
+        }
+
         if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
             tracing::debug!(port, "inference canary passed");
             return false;
