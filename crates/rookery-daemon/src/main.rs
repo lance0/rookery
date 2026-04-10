@@ -420,10 +420,16 @@ async fn main() {
                     return;
                 }
                 _ = cuda_error_rx.changed() => {
-                    tracing::warn!("CUDA error detected, draining requests and running immediate canary");
-                    // Immediately stop forwarding requests to the broken server
-                    canary_state.backend.lock().await.set_draining(true);
-                    is_cuda_error = true;
+                    // Ignore CUDA errors during an active swap — the old process
+                    // shutting down can emit stderr noise that triggers this.
+                    if canary_state.backend.lock().await.is_draining() {
+                        tracing::debug!("CUDA error during swap/drain, ignoring");
+                        is_cuda_error = false;
+                    } else {
+                        tracing::warn!("CUDA error detected, draining requests and running immediate canary");
+                        canary_state.backend.lock().await.set_draining(true);
+                        is_cuda_error = true;
+                    }
                 }
             }
 
