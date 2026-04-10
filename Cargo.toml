@@ -4,7 +4,7 @@ members = ["crates/rookery-core", "crates/rookery-engine", "crates/rookery-daemo
 exclude = ["crates/rookery-dashboard"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

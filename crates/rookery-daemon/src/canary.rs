@@ -18,6 +18,9 @@ pub const CANARY_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Timeout for health check after a canary-triggered restart.
 pub const CANARY_HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Delay after stopping server to allow GPU state cleanup before restart.
+pub const GPU_COOLDOWN_DELAY: Duration = Duration::from_secs(5);
+
 /// Run one iteration of the inference canary check.
 ///
 /// Checks whether the running backend can handle inference requests.
@@ -38,45 +41,63 @@ pub async fn run_canary_check(
     };
     state.metrics.record_canary_check();
 
-    // Only check when server is running and not mid-swap
-    if state.backend.lock().await.is_draining() || is_shutdown() {
+    let cuda_error_draining = state.backend.lock().await.is_draining();
+
+    // If draining due to CUDA error, skip inference checks — go straight to restart
+    if !cuda_error_draining {
+        // Normal path: only check when server is running
+        if is_shutdown() {
+            return false;
+        }
+        let current = state.current_state().await;
+        let (_, port) = match current {
+            rookery_core::state::ServerState::Running {
+                ref profile, port, ..
+            } => (profile.clone(), port),
+            _ => return false,
+        };
+
+        if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
+            tracing::debug!(port, "inference canary passed");
+            return false;
+        }
+
+        // First failure — retry once after 5s to avoid false positives
+        if is_shutdown() {
+            return false;
+        }
+        state.metrics.inc_canary_failure();
+        tracing::warn!(port, "inference canary failed, retrying in 5s");
+        tokio::time::sleep(CANARY_RETRY_DELAY).await;
+        if is_shutdown() {
+            return false;
+        }
+
+        if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
+            tracing::info!(port, "inference canary passed on retry");
+            return false;
+        }
+    }
+
+    // Server is broken (two failures or CUDA error) — restart it
+    if is_shutdown() {
         return false;
     }
+
     let current = state.current_state().await;
-    let (profile, port) = match current {
+    let (profile, _) = match current {
         rookery_core::state::ServerState::Running {
             ref profile, port, ..
         } => (profile.clone(), port),
         _ => return false,
     };
 
-    if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
-        tracing::debug!(port, "inference canary passed");
-        return false;
-    }
-
-    // First failure — retry once after 5s to avoid false positives
-    if is_shutdown() {
-        return false;
-    }
-    state.metrics.inc_canary_failure();
-    tracing::warn!(port, "inference canary failed, retrying in 5s");
-    tokio::time::sleep(CANARY_RETRY_DELAY).await;
-    if is_shutdown() {
-        return false;
-    }
-
-    if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
-        tracing::info!(port, "inference canary passed on retry");
-        return false;
-    }
-
-    // Two consecutive failures — server is broken, restart it
-    if is_shutdown() {
-        return false;
-    }
     state.metrics.inc_canary_restart();
-    tracing::error!(port, profile = %profile, "inference canary failed twice, restarting server");
+    if cuda_error_draining {
+        tracing::error!(profile = %profile, "CUDA error detected, restarting server");
+    } else {
+        tracing::error!(profile = %profile, "inference canary failed twice, restarting server");
+    }
 
     // Acquire op_lock to serialize with manual start/stop/swap
     let _op_guard = state.op_lock.lock().await;
@@ -96,12 +117,28 @@ pub async fn run_canary_check(
         }
     };
 
-    let _ = state.backend.lock().await.stop().await;
+    {
+        let backend = state.backend.lock().await;
+        let _ = backend.stop().await;
+        backend.set_draining(false); // Clear draining before restart
+    }
     let stopped = rookery_core::state::ServerState::Stopped;
     state.set_server_state(stopped).await;
 
     if is_shutdown() {
         tracing::info!("canary: shutdown during restart, aborting");
+        return true;
+    }
+
+    // Wait for GPU state to clean up before starting new server
+    tracing::info!(
+        "canary: waiting {}s for GPU cooldown",
+        GPU_COOLDOWN_DELAY.as_secs()
+    );
+    tokio::time::sleep(GPU_COOLDOWN_DELAY).await;
+
+    if is_shutdown() {
+        tracing::info!("canary: shutdown during GPU cooldown, aborting");
         return true;
     }
 

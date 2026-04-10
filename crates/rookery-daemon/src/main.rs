@@ -419,7 +419,9 @@ async fn main() {
                     return;
                 }
                 _ = cuda_error_rx.changed() => {
-                    tracing::warn!("CUDA error detected, running immediate inference canary");
+                    tracing::warn!("CUDA error detected, draining requests and running immediate canary");
+                    // Immediately stop forwarding requests to the broken server
+                    canary_state.backend.lock().await.set_draining(true);
                 }
             }
 
