@@ -2,7 +2,6 @@ mod client;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use client::DaemonClient;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -980,7 +979,7 @@ async fn cmd_logs(
 
 fn generate_api_key() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::Fill::fill(&mut bytes, &mut rand::rng());
     let suffix = bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
