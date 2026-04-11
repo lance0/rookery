@@ -327,6 +327,24 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 - [ ] Quick diff: what changed since our build (commit count, notable PRs)
 - [ ] Optional: one-click rebuild trigger (for llama.cpp, runs cmake + build)
 
+## vLLM Backend Enhancements (Phase 10)
+### Verified Working (Apr 10 2026)
+- [x] Gemma 4 31B NVFP4 Turbo on RTX 5090 via Docker — 51 tok/s decode, 15K tok/s prefill
+- [x] CUDA 13.0 inside container safe (MMQ bug is llama.cpp-specific, vLLM uses CUTLASS/cuBLAS)
+- [x] Custom Docker image with transformers>=5.5.0 pre-installed
+
+### Needed for Production vLLM Support
+- [ ] Custom environment variables in VllmConfig (`environment: Vec<String>` → compose generation)
+- [ ] Custom Docker image / build context support (`docker_image` accepts local image names, `build_context` for Dockerfile path)
+- [ ] Entrypoint override for pre-serve setup commands (pip install, config patches)
+- [ ] HF_TOKEN passthrough from daemon env to compose (currently hardcoded `${HF_TOKEN}`)
+- [ ] Per-profile env var injection (not just global HF_TOKEN)
+
+### Nice to Have
+- [ ] Backend-specific stats: vLLM batch utilization, KV cache usage from /metrics
+- [ ] vLLM model warmup: pre-download model before swap to minimize downtime
+- [ ] Compose health check passthrough: use vLLM's native healthcheck in compose
+
 ## Future
 - Multi-GPU support with explicit GPU placement per profile (data model ready, engine picks GPU 0)
 - Multi-model concurrent serving (multiple profiles on different ports simultaneously)
