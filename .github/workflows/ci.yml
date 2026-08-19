@@ -78,7 +78,7 @@ jobs:
       - name: Clippy
         run: |
           cargo clippy --manifest-path crates/rookery-dashboard/Cargo.toml \
-            --target wasm32-unknown-unknown --all-targets
+            --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       # Prove the release build works. Deliberately NOT a `git diff --exit-code`
       # against the committed dist/: wasm output is not byte-reproducible across

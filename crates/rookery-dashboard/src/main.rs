@@ -444,7 +444,6 @@ fn App() -> impl IntoView {
 
     // Keyboard shortcuts
     {
-        let set_tab = set_tab;
         let set_toasts_kb = set_toasts;
         let set_profiles_kb = set_profiles;
         let set_agents_kb = set_agents;

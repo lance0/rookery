@@ -979,7 +979,10 @@ async fn cmd_logs(
 
 fn generate_api_key() -> String {
     let mut bytes = [0u8; 16];
-    rand::Fill::fill(&mut bytes, &mut rand::rng());
+    // rand 0.10 renamed Fill::fill to Fill::fill_slice, so `rand::Fill::fill`
+    // no longer resolves. The free function is equivalent and simpler: it fills
+    // from rand::rng(), which is a CSPRNG — required, since this is an API key.
+    rand::fill(&mut bytes);
     let suffix = bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))

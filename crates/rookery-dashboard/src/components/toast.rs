@@ -30,7 +30,6 @@ pub fn show_toast(
     set_toasts.update(|t| t.push(toast));
 
     // Auto-dismiss after 3s
-    let set_toasts = set_toasts;
     wasm_bindgen_futures::spawn_local(async move {
         gloo_timers::future::sleep(std::time::Duration::from_secs(3)).await;
         set_toasts.update(|t| t.retain(|toast| toast.id != id));

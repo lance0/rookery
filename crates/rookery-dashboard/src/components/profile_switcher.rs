@@ -41,9 +41,6 @@ pub fn ProfileSwitcher(
 
                         let click_name = name.clone();
                         let running = is_running();
-                        let set_profiles = set_profiles;
-                        let set_agents = set_agents;
-                        let set_toasts = set_toasts;
                         let on_click = move |_| {
                             let n = click_name.clone();
                             let sp = set_profiles;
