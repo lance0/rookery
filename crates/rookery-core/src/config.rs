@@ -699,9 +699,7 @@ impl Config {
         if path.exists() {
             let _ = std::fs::copy(path, path.with_extension("toml.bak"));
         }
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, content)?;
-        std::fs::rename(&tmp, path)?;
+        crate::atomic::write_atomic(path, content.as_bytes())?;
         Ok(())
     }
 }

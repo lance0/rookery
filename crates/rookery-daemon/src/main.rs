@@ -142,6 +142,19 @@ async fn main() {
 
     // Load and reconcile persisted state
     let state_persistence = StatePersistence::new();
+    // A load failure here is NOT harmless: it yields Stopped, which sets tracked_pid
+    // to None, which makes the orphan reaper below treat a healthy running
+    // llama-server as an orphan and SIGKILL it. Say so loudly rather than falling
+    // through in silence.
+    if let Err(e) = state_persistence.load() {
+        tracing::error!(
+            error = %e,
+            path = %StatePersistence::state_path().display(),
+            "failed to load persisted server state — treating as Stopped. \
+             Any llama-server still running from a previous daemon will be \
+             reaped as an orphan."
+        );
+    }
     let initial_server_state = if let Ok(prev_state) = state_persistence.load() {
         let reconciled = state_persistence.reconcile(prev_state);
         let mut final_state = reconciled.clone();
@@ -299,6 +312,13 @@ async fn main() {
 
     // Reconcile persisted agent state — adopt running agents
     let agent_persistence = AgentPersistence::new();
+    if let Err(e) = agent_persistence.load() {
+        tracing::error!(
+            error = %e,
+            "failed to load persisted agent state — running agents will not be adopted \
+             and may be left unsupervised"
+        );
+    }
     if let Ok(agent_state) = agent_persistence.load() {
         let reconciled = agent_persistence.reconcile(agent_state);
         for (name, entry) in &reconciled.agents {

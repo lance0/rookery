@@ -53,16 +53,12 @@ impl ReleaseCache {
         }
     }
 
-    /// Atomic save: write to .tmp then rename.
+    /// Durable atomic save (write + fsync + rename + dir fsync).
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create cache dir: {e}"))?;
-        }
-        let tmp = path.with_extension("json.tmp");
         let data =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialize cache: {e}"))?;
-        std::fs::write(&tmp, &data).map_err(|e| format!("write cache tmp: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("rename cache: {e}"))?;
+        rookery_core::atomic::write_atomic(path, data.as_bytes())
+            .map_err(|e| format!("write cache: {e}"))?;
         Ok(())
     }
 

@@ -111,13 +111,8 @@ impl StatePersistence {
     }
 
     pub fn save(&self, state: &ServerState) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = serde_json::to_string_pretty(state)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, content)?;
-        std::fs::rename(&tmp, &self.path)?;
+        crate::atomic::write_atomic(&self.path, content.as_bytes())?;
         Ok(())
     }
 
@@ -210,13 +205,8 @@ impl AgentPersistence {
     }
 
     pub fn save(&self, state: &AgentState) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let content = serde_json::to_string_pretty(state)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, content)?;
-        std::fs::rename(&tmp, &self.path)?;
+        crate::atomic::write_atomic(&self.path, content.as_bytes())?;
         Ok(())
     }
 
