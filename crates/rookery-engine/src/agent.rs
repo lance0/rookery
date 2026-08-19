@@ -86,6 +86,34 @@ struct ManagedAgent {
     lifetime_errors: u32,
 }
 
+/// Does `/proc/<pid>/cmdline` reference `command`?
+///
+/// cmdline is NUL-separated; joined with spaces before matching. A substring test
+/// is deliberate: an agent is commonly launched through an interpreter or wrapper,
+/// so the configured command appears as an argument rather than argv[0] (e.g.
+/// `python3 /path/to/agent gateway run`).
+fn pid_cmdline_matches(pid: u32, command: &str) -> bool {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let joined = String::from_utf8_lossy(&raw).replace('\0', " ");
+    if joined.trim().is_empty() {
+        return false;
+    }
+    if joined.contains(command) {
+        return true;
+    }
+    // Fall back to the basename, so a config naming a bare command ("hermes")
+    // still matches a process launched by absolute path, and vice versa.
+    match std::path::Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
+        Some(base) if !base.is_empty() => joined.contains(base),
+        _ => false,
+    }
+}
+
 pub struct AgentManager {
     agents: Mutex<HashMap<String, ManagedAgent>>,
     log_buffer: Arc<LogBuffer>,
@@ -137,7 +165,49 @@ impl AgentManager {
     }
 
     /// Adopt a previously-running agent by PID (used after daemon restart).
-    pub async fn adopt(&self, name: &str, entry: &AgentEntry, config: Option<&AgentConfig>) {
+    ///
+    /// Returns false if the entry was rejected. Adoption is refused unless the PID
+    /// is alive AND `/proc/<pid>/cmdline` still matches the configured command,
+    /// because everything downstream kills this PID directly — `stop()` sends
+    /// SIGTERM then SIGKILL to the bare number. A stale `agents.json` naming a PID
+    /// that has since been recycled would otherwise make the daemon kill an
+    /// unrelated process on the next stop, swap, or shutdown.
+    pub async fn adopt(
+        &self,
+        name: &str,
+        entry: &AgentEntry,
+        config: Option<&AgentConfig>,
+    ) -> bool {
+        let Some(cfg) = config else {
+            tracing::warn!(
+                agent = name,
+                pid = entry.pid,
+                "refusing to adopt agent with no config entry — cannot verify identity, \
+                 and it could not be restarted anyway"
+            );
+            return false;
+        };
+
+        if !is_pid_alive(entry.pid) {
+            tracing::info!(
+                agent = name,
+                pid = entry.pid,
+                "not adopting: process is gone or a zombie"
+            );
+            return false;
+        }
+
+        if !pid_cmdline_matches(entry.pid, &cfg.command) {
+            tracing::warn!(
+                agent = name,
+                pid = entry.pid,
+                expected = %cfg.command,
+                "refusing to adopt: /proc cmdline does not match configured command \
+                 (PID was almost certainly recycled)"
+            );
+            return false;
+        }
+
         tracing::info!(agent = name, pid = entry.pid, "adopting existing agent");
         let version = config
             .and_then(|c| c.version_file.as_ref())
@@ -171,6 +241,7 @@ impl AgentManager {
                 lifetime_errors: 0,
             },
         );
+        true
     }
 
     fn persist_state(&self, agents: &HashMap<String, ManagedAgent>) {
@@ -1037,6 +1108,118 @@ mod tests {
         (dir, Arc::new(mgr))
     }
 
+    #[tokio::test]
+    async fn test_adopt_refuses_mismatched_cmdline() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_d, manager) = test_manager(log_buffer);
+
+        // A live PID that is NOT the configured command — the PID-reuse case.
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let entry = AgentEntry {
+            pid,
+            started_at: Utc::now(),
+        };
+
+        // Wait for exec, so this asserts a genuine mismatch rather than an
+        // as-yet-unpopulated cmdline.
+        wait_for_cmdline(pid).await;
+
+        let cfg = config_for("/usr/bin/definitely-not-sleep");
+        assert!(
+            !manager.adopt("agent", &entry, Some(&cfg)).await,
+            "must refuse to adopt a PID whose cmdline does not match"
+        );
+        assert!(!manager.is_running("agent").await);
+    }
+
+    #[tokio::test]
+    async fn test_adopt_refuses_dead_pid() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_d, manager) = test_manager(log_buffer);
+
+        // Reap a process so the PID is genuinely gone, not a zombie.
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let pid = child.id().unwrap();
+        let _ = child.wait().await;
+
+        let entry = AgentEntry {
+            pid,
+            started_at: Utc::now(),
+        };
+        let cfg = config_for("true");
+        assert!(
+            !manager.adopt("agent", &entry, Some(&cfg)).await,
+            "must refuse to adopt a dead PID"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_refuses_without_config() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_d, manager) = test_manager(log_buffer);
+
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let entry = AgentEntry {
+            pid: child.id().unwrap(),
+            started_at: Utc::now(),
+        };
+
+        assert!(
+            !manager.adopt("agent", &entry, None).await,
+            "no config means identity is unverifiable and restart is impossible"
+        );
+    }
+
+    /// Wait until `/proc/<pid>/cmdline` is populated.
+    ///
+    /// spawn() returns before the child has exec'd, so cmdline is briefly empty and
+    /// adoption correctly refuses to verify it. Real adoption happens after a daemon
+    /// restart, long after the process started, so tests should wait rather than
+    /// racing the exec. Without this, a "refuses mismatched cmdline" test can also
+    /// pass for the wrong reason — refused as unverifiable rather than as a mismatch.
+    async fn wait_for_cmdline(pid: u32) {
+        let ready = poll_until(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(10),
+            || {
+                std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .map(|c| !c.iter().all(|&b| b == 0) && !c.is_empty())
+                    .unwrap_or(false)
+            },
+        )
+        .await;
+        assert!(ready, "child never populated /proc/{pid}/cmdline");
+    }
+
+    /// Minimal config naming `command`. Adoption now verifies identity against
+    /// /proc/<pid>/cmdline, so adopt tests must supply the command they spawned.
+    fn config_for(command: &str) -> AgentConfig {
+        AgentConfig {
+            command: command.to_string(),
+            args: vec![],
+            workdir: None,
+            env: HashMap::new(),
+            auto_start: false,
+            restart_on_swap: false,
+            restart_on_crash: false,
+            depends_on_port: None,
+            stop_timeout_secs: 30,
+            version_file: None,
+            update_command: None,
+            update_workdir: None,
+            restart_on_error_patterns: vec![],
+        }
+    }
+
     #[test]
     fn test_read_version_pyproject() {
         let dir = tempfile::tempdir().unwrap();
@@ -1425,7 +1608,12 @@ name = "test-agent"
         };
 
         // Adopt the PID (no child handle)
-        manager.adopt("adopted-agent", &entry, None).await;
+        wait_for_cmdline(pid).await;
+        let cfg = config_for("sleep");
+        assert!(
+            manager.adopt("adopted-agent", &entry, Some(&cfg)).await,
+            "adoption should succeed when the PID is alive and cmdline matches"
+        );
 
         // Verify it's tracked and running
         assert!(manager.is_running("adopted-agent").await);
@@ -1449,7 +1637,7 @@ name = "test-agent"
         let (_adir, manager) = test_manager(log_buffer);
 
         // Spawn a real process
-        let child = tokio::process::Command::new("sleep")
+        let mut child = tokio::process::Command::new("sleep")
             .arg("60")
             .kill_on_drop(false)
             .spawn()
@@ -1461,23 +1649,31 @@ name = "test-agent"
             started_at: Utc::now(),
         };
 
-        manager.adopt("adopted", &entry, None).await;
+        wait_for_cmdline(pid).await;
+        let cfg = config_for("sleep");
+        assert!(manager.adopt("adopted", &entry, Some(&cfg)).await);
         assert!(manager.is_running("adopted").await);
 
         // Stop the adopted agent (should use kill-by-PID since no child handle)
         manager.stop("adopted").await.unwrap();
 
-        // Poll until the process is dead
-        let died = poll_until(
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_millis(50),
-            || !is_pid_alive(pid),
-        )
-        .await;
-        assert!(died, "process should have died after stop");
+        // Wait via the Child handle, NOT by polling is_pid_alive(pid).
+        //
+        // tokio reaps the children it owns, so once `sleep` dies its PID is freed
+        // and can be handed to any other test spawning concurrently — at which
+        // point is_pid_alive(pid) becomes true again for an unrelated process and
+        // the assertion fails intermittently. try_wait() is bound to this specific
+        // child, so it is immune to PID reuse.
+        let mut exited = false;
+        for _ in 0..100 {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(exited, "process should have exited after stop");
         assert!(!manager.is_running("adopted").await);
-
-        drop(child);
     }
 
     // stop_all() stops multiple running agents
@@ -1757,7 +1953,9 @@ name = "test-agent"
             pid: adopted_pid,
             started_at: Utc::now(),
         };
-        manager.adopt("adopted", &entry, None).await;
+        wait_for_cmdline(adopted_pid).await;
+        let cfg = config_for("sleep");
+        assert!(manager.adopt("adopted", &entry, Some(&cfg)).await);
 
         // Both should be running
         assert!(manager.is_running("owned").await);
