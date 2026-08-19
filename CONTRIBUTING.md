@@ -10,6 +10,16 @@
 - [Trunk](https://trunkrs.dev/) for dashboard: `cargo install trunk`
 - wasm32 target: `rustup target add wasm32-unknown-unknown`
 
+### Enable the git hooks
+
+The pre-commit hook lives in `.githooks/` but git will not use it until you point
+at that directory. This is local config and cannot be committed, so a fresh clone
+has no hooks until you run:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ### Build
 
 ```bash

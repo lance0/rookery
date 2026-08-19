@@ -106,7 +106,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCommands,
     },
-    /// Show upstream release status (llama.cpp, vLLM)
+    /// Show upstream release status (llama.cpp)
     Releases {
         /// Output as JSON
         #[arg(long)]

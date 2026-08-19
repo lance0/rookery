@@ -45,7 +45,12 @@ The daemon holds `Box<dyn InferenceBackend>` — all routes, canary, and swap lo
 
 ### State Persistence
 
-Server state and agent state are persisted to JSON files (`~/.config/rookery/state.json`, `~/.config/rookery/agents.json`). On daemon restart, state is reconciled:
+Server state and agent state are persisted to JSON files under `dirs::state_dir()` —
+on Linux `~/.local/state/rookery/state.json` and `~/.local/state/rookery/agents.json`.
+(Config lives in `~/.config/rookery/`; state does not.) Writes go through
+`rookery_core::atomic::write_atomic`: write, fsync, rename, fsync the parent
+directory, so a power loss cannot leave a truncated file where valid state was.
+On daemon restart, state is reconciled:
 
 1. Check if persisted PIDs/containers are still alive (not zombies — reads `/proc/pid/stat`, or `docker ps`)
 2. Adopt running processes or mark as stopped

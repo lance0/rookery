@@ -32,7 +32,11 @@ When `api_key` is enabled, the SPA shell still loads normally, then prompts for 
 - **Agent updates** — each agent row exposes an Update button backed by the daemon API
 - **GPU gauges** — live VRAM, temperature, utilization, power from NVML
 - **Mobile responsive** — tabs scroll horizontally, cards stack vertically on small screens
-- **SSE auto-reconnect** — dashboard reconnects automatically if the daemon restarts
+- **SSE auto-reconnect** — the browser's native `EventSource` retries transport-level
+  drops, so a daemon restart recovers on its own. It does **not** recover from a
+  non-2xx handshake: the server returns 429 past `MAX_SSE_CONNECTIONS` (16) and 401
+  when auth is required, and after either the browser gives up permanently. The
+  connection dot goes grey and a page reload is needed.
 - **API key prompt** — when auth is enabled, unauthorized API responses trigger an in-app unlock prompt
 - **Settings validation** — range checks on sampling params with error toasts
 

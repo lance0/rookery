@@ -58,7 +58,7 @@ rookery models hardware           # show hardware profile
 ### Releases
 
 ```bash
-rookery releases              # upstream release status (llama.cpp, vLLM)
+rookery releases              # upstream release status (llama.cpp)
 rookery releases --json       # JSON output for scripting
 ```
 

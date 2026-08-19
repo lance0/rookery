@@ -4,6 +4,49 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
+## 0.1.8 — 2026-08-19
+
+Dependency maintenance, a documentation sweep, and one config field that was
+silently doing nothing.
+
+### Fixed
+- **`gpu_index` now actually selects a GPU.** It was parsed, serialized and
+  documented as the multi-GPU knob, but emitted no flag at all — a multi-GPU user
+  who set it silently got GPU 0. Now emits `--main-gpu`. Covered by a test in both
+  directions, since the failure mode was silence.
+- **Migrated to rand 0.10.** `Fill::fill` was renamed to `Fill::fill_slice`, so
+  `rand::Fill::fill(...)` no longer resolved (`E0782`). Now uses the free function
+  `rand::fill`, which still draws from a CSPRNG — this generates API keys.
+
+### Changed
+- **Dashboard clippy runs with `-D warnings`.** It was advisory when the job was
+  added in 0.1.7, which is a gate that gets ignored.
+- 15 dependency updates, including tokio 1.51→1.53, axum 0.8.8→0.8.9,
+  tower-http 0.6.8→0.7.0, prometheus-client 0.24.1→0.25.0, clap 4.6.0→4.6.6.
+
+### Documentation
+Several claims were checked against the code and found wrong:
+- **The release monitor polls llama.cpp only.** README (×2), `docs/api.md`,
+  `docs/cli.md`, `docs/configuration.md` and the CLI `--help` all claimed vLLM was
+  tracked too, and the rate-limit budget was documented as "2 requests per
+  interval (one per tracked repo)" when it is 1. vLLM is deliberately not polled:
+  the comparison parses llama.cpp's `bNNNNN` build numbers, and vLLM's `vX.Y.Z`
+  tags would fail that parse and report "up to date" forever.
+- **State does not live in `~/.config/rookery/`.** `docs/architecture.md` said it
+  did; it is `dirs::state_dir()`, i.e. `~/.local/state/rookery/`.
+- **The default KV cache type is `q8_0`, not `f16`.** The table in
+  `docs/configuration.md` marked the wrong row as default, so anyone omitting
+  `cache_type_*` expecting f16 quality was silently getting q8_0.
+- **SSE auto-reconnect is narrower than advertised.** The browser retries
+  transport-level drops, so a daemon restart recovers — but a non-2xx handshake
+  (429 past 16 connections, or 401) kills the stream permanently.
+- **`/api/config` redacts `api_key` and `github_token` as well as agent env vars.**
+- **`stop_timeout_secs` is documented**, along with a warning about being
+  conservative with `restart_on_error_patterns`.
+- **CONTRIBUTING now tells you to enable the git hooks.** It claimed fmt and
+  clippy were "enforced by pre-commit hooks", but `core.hooksPath` is local config
+  that cannot be committed, so a fresh clone had no hooks at all.
+
 ## 0.1.7 — 2026-08-19
 
 Durability and lifecycle correctness in the daemon, plus the first dashboard

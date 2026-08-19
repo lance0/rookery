@@ -629,6 +629,11 @@ impl Config {
         // GPU
         let ngl = if ls.gpu_layers < 0 { 99 } else { ls.gpu_layers };
         args.extend(["-ngl".into(), ngl.to_string()]);
+        // gpu_index was parsed, serialized and documented as the multi-GPU knob,
+        // but emitted nothing — a multi-GPU user setting it silently got GPU 0.
+        if let Some(idx) = ls.gpu_index {
+            args.extend(["--main-gpu".into(), idx.to_string()]);
+        }
 
         // Extra args passthrough
         args.extend(ls.extra_args.clone());
@@ -1169,6 +1174,39 @@ extra_args = ["--enable-chunked-prefill"]
         assert!(!args.contains(&"-ngl".to_string()));
         assert!(!args.contains(&"-fa".to_string()));
         assert!(!args.contains(&"--jinja".to_string()));
+    }
+
+    // gpu_index emits --main-gpu, and is omitted when unset
+    #[test]
+    fn test_gpu_index_emits_main_gpu() {
+        let base = r#"
+default_profile = "p"
+
+[models.m]
+source = "local"
+path = "/tmp/model.gguf"
+
+[profiles.p]
+model = "m"
+port = 8081
+"#;
+        // Unset (the common single-GPU case) — no flag at all.
+        let config: Config = toml::from_str(base).unwrap();
+        let args = config.resolve_command_line("p").unwrap();
+        assert!(
+            !args.contains(&"--main-gpu".to_string()),
+            "--main-gpu must not appear when gpu_index is unset"
+        );
+
+        // Set — flag present with the right value.
+        let with_index = format!("{base}\n[profiles.p.llama_server]\ngpu_index = 1\n");
+        let config: Config = toml::from_str(&with_index).unwrap();
+        let args = config.resolve_command_line("p").unwrap();
+        let pos = args
+            .iter()
+            .position(|a| a == "--main-gpu")
+            .expect("--main-gpu should be emitted when gpu_index is set");
+        assert_eq!(args[pos + 1], "1");
     }
 
     // vLLM command omits optional params when None

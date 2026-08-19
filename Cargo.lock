@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "rookery-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "clap",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "rookery-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "dirs",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "rookery-daemon"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "rookery-engine"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "axum",

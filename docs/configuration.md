@@ -38,9 +38,11 @@ release_check_interval = 1800             # seconds between upstream release che
 
 `model_dirs` adds custom directories to the model scanner. Rookery always scans the HuggingFace hub cache and llama.cpp cache automatically — use `model_dirs` for models stored outside those standard locations.
 
-`release_check_interval` controls how often the daemon polls GitHub for new llama.cpp and vLLM releases. Default is 1800 seconds (30 minutes). Set to 0 to disable. Uses ETag caching to avoid counting against GitHub's rate limit when nothing has changed.
+`release_check_interval` controls how often the daemon polls GitHub for new llama.cpp releases. Default is 1800 seconds (30 minutes). Set to 0 to disable. Uses ETag caching to avoid counting against GitHub's rate limit when nothing has changed.
 
-`github_token` is optional. Without it, GitHub allows 60 API requests per hour. With a personal access token, the limit is 5000/hr. Polling uses 2 requests per interval (one per tracked repo). The token only needs public repo read access.
+Only `ggml-org/llama.cpp` is polled. vLLM is not tracked: the version comparison parses llama.cpp's `bNNNNN` build-number tags, and vLLM's `vX.Y.Z` tags would fail that parse and silently report "up to date" forever.
+
+`github_token` is optional. Without it, GitHub allows 60 API requests per hour. With a personal access token, the limit is 5000/hr. Polling uses 1 request per interval (one tracked repo). The token only needs public repo read access.
 
 ## Models
 
@@ -110,8 +112,8 @@ extra_args = ["--no-mmap"]      # additional llama-server args (optional)
 
 | Type | Quality | VRAM Usage | Notes |
 |------|---------|------------|-------|
-| `f16` | Best | Highest | Default if not specified |
-| `q8_0` | Near-lossless | ~50% of f16 | Recommended for most models |
+| `f16` | Best | Highest | |
+| `q8_0` | Near-lossless | ~50% of f16 | **Default.** Recommended for most models |
 | `q4_0` | Good | ~25% of f16 | Use when VRAM is tight (e.g., Q6 model weights) |
 
 ### Reasoning Budget
@@ -190,4 +192,17 @@ version_file = "/path/to/pyproject.toml"
 update_command = "/path/to/agent update"
 update_workdir = "/path/to/agent/repo"
 restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
+stop_timeout_secs = 30
 ```
+
+`stop_timeout_secs` is how long the daemon waits after `SIGTERM` before escalating
+to `SIGKILL`. Default is 30 seconds. Raise it for an agent with heavy shutdown
+work — an agent checkpointing a large SQLite WAL that gets hard-killed mid-write
+is how torn pages happen. Taking the SIGKILL path is logged at `error` level and
+should be treated as an incident.
+
+`restart_on_error_patterns` matches stderr lines and restarts immediately on a
+hit. Be conservative here: a transient network condition like a bare `ReadTimeout`
+is not a fatal state, and restarting a whole agent process over one multiplies the
+risk of interrupting a write. Restarts through this path use the same exponential
+backoff as crash restarts.
