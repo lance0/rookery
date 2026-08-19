@@ -1883,15 +1883,20 @@ name = "test-agent"
 
         manager.start("env-test", &config).await.unwrap();
 
-        // Poll until the output file is written
-        // Generous bound: poll_until returns as soon as the condition holds, so a
-        // longer timeout costs nothing on success and only buys tolerance when the
-        // machine is loaded. 5s was tight enough to fail intermittently while the
-        // rest of the suite and a compile were competing for CPU.
+        // Poll for the CONTENT, not for the file's existence.
+        //
+        // `>` creates the file before echo writes into it, so an exists() poll
+        // succeeds against an empty file and the assertion below then reads "".
+        // Failed on CI for exactly this reason; a longer timeout cannot fix it,
+        // because the file appears immediately either way.
         let file_written = poll_until(
             std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(50),
-            || marker_path.exists(),
+            || {
+                std::fs::read_to_string(&marker_path)
+                    .map(|c| c.contains("MY_VAR="))
+                    .unwrap_or(false)
+            },
         )
         .await;
         assert!(file_written, "env output file should have been written");
@@ -1925,15 +1930,17 @@ name = "test-agent"
 
         manager.start("workdir-test", &config).await.unwrap();
 
-        // Poll until the output file is written
-        // Generous bound: poll_until returns as soon as the condition holds, so a
-        // longer timeout costs nothing on success and only buys tolerance when the
-        // machine is loaded. 5s was tight enough to fail intermittently while the
-        // rest of the suite and a compile were competing for CPU.
+        // Poll for the CONTENT, not for the file's existence — `>` creates the
+        // file before pwd writes into it, so exists() succeeds against an empty
+        // file and the assertion below reads "". Same trap as the env-var test.
         let file_written = poll_until(
             std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(50),
-            || output_path.exists(),
+            || {
+                std::fs::read_to_string(&output_path)
+                    .map(|c| !c.trim().is_empty())
+                    .unwrap_or(false)
+            },
         )
         .await;
         assert!(file_written, "workdir output file should have been written");
