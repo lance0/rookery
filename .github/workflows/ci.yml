@@ -54,6 +54,43 @@ jobs:
       - name: Run audit
         run: cargo audit
 
+  dashboard:
+    name: Dashboard (WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/rookery-dashboard
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # The dashboard crate is `exclude`d from the workspace, so every other job
+      # here skips it entirely. Without this job a dashboard change that does not
+      # compile passes CI green.
+      - name: Format
+        run: cargo fmt --manifest-path crates/rookery-dashboard/Cargo.toml --check
+      - name: Clippy
+        run: |
+          cargo clippy --manifest-path crates/rookery-dashboard/Cargo.toml \
+            --target wasm32-unknown-unknown --all-targets
+
+      # Prove the release build works. Deliberately NOT a `git diff --exit-code`
+      # against the committed dist/: wasm output is not byte-reproducible across
+      # toolchain versions, so that check would fail whenever CI's rustc differs
+      # from a contributor's, and a gate that cries wolf gets ignored.
+      #
+      # Freshness of the SHIPPED artifact is guaranteed in release.yml instead,
+      # which rebuilds dist/ before cargo build. This job only has to catch
+      # dashboard code that does not compile.
+      - name: Release build
+        run: cd crates/rookery-dashboard && trunk build --release
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest

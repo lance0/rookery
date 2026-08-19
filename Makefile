@@ -6,6 +6,11 @@ HF_HOME ?= $(HOME)/.cache/huggingface
 
 .PHONY: build install uninstall enable disable restart dashboard clean test chaos-test
 
+# NOTE: `build` does NOT rebuild the dashboard. rookeryd embeds
+# crates/rookery-dashboard/dist via include_dir!, and that crate is excluded from
+# the workspace, so a plain cargo build silently ships whatever dist/ is committed.
+# Use `make dashboard` after changing dashboard source, or `make install` which
+# does it for you.
 build:
 	cargo build --release
 
@@ -15,7 +20,7 @@ dashboard:
 	touch crates/rookery-daemon/src/routes.rs
 	cargo build --release -p rookery-daemon
 
-install: build
+install: dashboard build
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(SYSTEMD_DIR)
 	@# Install via temp + rename: mv(1) within a filesystem is an atomic rename(2),

@@ -49,7 +49,7 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
         let controller = web_sys::AbortController::new().ok();
         set_abort_ctrl.set(controller.clone());
 
-        let set_toasts = set_toasts.clone();
+        let set_toasts = set_toasts;
 
         wasm_bindgen_futures::spawn_local(async move {
             match stream_chat(chat_msgs, set_messages, controller.as_ref()).await {
@@ -60,8 +60,8 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                         show_toast(set_toasts, format!("chat error: {e}"), ToastKind::Error);
                     }
                     set_messages.update(|msgs| {
-                        if let Some(last) = msgs.last() {
-                            if last.role == "assistant" {
+                        if let Some(last) = msgs.last()
+                            && last.role == "assistant" {
                                 if last.content.is_empty() {
                                     // No content received — remove placeholder
                                     msgs.pop();
@@ -70,7 +70,6 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                                     msgs.last_mut().unwrap().content.push_str(" [incomplete]");
                                 }
                             }
-                        }
                     });
                 }
             }
@@ -257,14 +256,13 @@ async fn stream_chat(
             let line = buffer[..pos].trim().to_string();
             buffer = buffer[pos + 1..].to_string();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
                     return Ok(());
                 }
 
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(content) = parsed
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                    && let Some(content) = parsed
                         .get("choices")
                         .and_then(|c| c.as_array())
                         .and_then(|a| a.first())
@@ -274,14 +272,12 @@ async fn stream_chat(
                     {
                         let content = content.to_string();
                         set_messages.update(|msgs| {
-                            if let Some(last) = msgs.last_mut() {
-                                if last.role == "assistant" {
+                            if let Some(last) = msgs.last_mut()
+                                && last.role == "assistant" {
                                     last.content.push_str(&content);
                                 }
-                            }
                         });
                     }
-                }
             }
         }
     }

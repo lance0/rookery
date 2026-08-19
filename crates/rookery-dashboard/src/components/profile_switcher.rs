@@ -41,14 +41,14 @@ pub fn ProfileSwitcher(
 
                         let click_name = name.clone();
                         let running = is_running();
-                        let set_profiles = set_profiles.clone();
-                        let set_agents = set_agents.clone();
-                        let set_toasts = set_toasts.clone();
+                        let set_profiles = set_profiles;
+                        let set_agents = set_agents;
+                        let set_toasts = set_toasts;
                         let on_click = move |_| {
                             let n = click_name.clone();
-                            let sp = set_profiles.clone();
-                            let sa = set_agents.clone();
-                            let st = set_toasts.clone();
+                            let sp = set_profiles;
+                            let sa = set_agents;
+                            let st = set_toasts;
                             wasm_bindgen_futures::spawn_local(async move {
                                 let result = if running {
                                     api::swap_profile(&n).await

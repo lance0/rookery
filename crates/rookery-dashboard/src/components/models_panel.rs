@@ -14,17 +14,16 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let (loading_quants, set_loading_quants) = signal(false);
 
     // Load hardware and cached models on mount
-    let set_hardware_init = set_hardware.clone();
-    let set_cached_init = set_cached.clone();
+    let set_hardware_init = set_hardware;
+    let set_cached_init = set_cached;
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(hw) = api::fetch_hardware().await {
             set_hardware_init.set(Some(hw));
         }
-        if let Ok(c) = api::fetch_cached_models().await {
-            if let Some(models) = c["models"].as_array() {
+        if let Ok(c) = api::fetch_cached_models().await
+            && let Some(models) = c["models"].as_array() {
                 set_cached_init.set(models.clone());
             }
-        }
     });
 
     let do_search = move || {
@@ -36,7 +35,7 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
         set_search_results.set(Vec::new());
         set_selected_repo.set(None);
         set_quants.set(Vec::new());
-        let set_toasts = set_toasts.clone();
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::search_models(&q).await {
                 Ok(resp) => {
@@ -61,7 +60,7 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let select_repo = move |repo: String| {
         set_selected_repo.set(Some(repo.clone()));
         set_loading_quants.set(true);
-        let set_toasts = set_toasts.clone();
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::fetch_quants(&repo).await {
                 Ok(resp) => {
@@ -76,8 +75,8 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     };
 
     let pull_quant = move |repo: String, quant: String| {
-        let set_toasts = set_toasts.clone();
-        let set_cached = set_cached.clone();
+        let set_toasts = set_toasts;
+        let set_cached = set_cached;
         wasm_bindgen_futures::spawn_local(async move {
             match api::pull_model(&repo, Some(&quant)).await {
                 Ok(resp) => {
@@ -91,11 +90,10 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                 Err(e) => show_toast(set_toasts, format!("pull failed: {e}"), ToastKind::Error),
             }
             // Refresh cached list
-            if let Ok(c) = api::fetch_cached_models().await {
-                if let Some(models) = c["models"].as_array() {
+            if let Ok(c) = api::fetch_cached_models().await
+                && let Some(models) = c["models"].as_array() {
                     set_cached.set(models.clone());
                 }
-            }
         });
     };
 

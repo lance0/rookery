@@ -1,6 +1,6 @@
 [package]
 name = "rookery-dashboard"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Leptos WASM dashboard for Rookery"
@@ -40,3 +40,19 @@ web-sys = { version = "0.3", features = [
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 chrono = { version = "0.4", features = ["wasmbind"] }
+
+# This crate is excluded from the parent workspace, so it is its own workspace
+# root and was getting cargo's defaults (opt-level 3, no LTO, 16 codegen units,
+# unwind). The wasm is embedded into every rookeryd binary via include_dir!, so
+# its size is a permanent cost of the daemon, and V8 has to compile it on every
+# dashboard load.
+#
+# panic = "abort" is safe here: console_error_panic_hook still runs its handler
+# before the abort, so panic messages keep reaching the browser console; only the
+# unwind tables are dropped.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

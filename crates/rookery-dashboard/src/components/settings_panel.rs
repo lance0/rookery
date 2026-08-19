@@ -27,14 +27,14 @@ pub fn SettingsPanel(
     // Load config when profile changes
     let load_profile = move || {
         let profile = status.get().profile.clone();
-        if let Some(profile_name) = profile {
-            if profile_name != loaded_profile.get() {
+        if let Some(profile_name) = profile
+            && profile_name != loaded_profile.get() {
                 let pn = profile_name.clone();
                 set_loaded_profile.set(profile_name);
                 wasm_bindgen_futures::spawn_local(async move {
-                    if let Ok(config) = api::fetch_config().await {
-                        if let Some(profiles) = config.get("profiles") {
-                            if let Some(p) = profiles.get(&pn) {
+                    if let Ok(config) = api::fetch_config().await
+                        && let Some(profiles) = config.get("profiles")
+                            && let Some(p) = profiles.get(&pn) {
                                 set_settings.set(ProfileSettings {
                                     temp: p["temp"].as_f64().map(|v| format!("{v}")).unwrap_or_default(),
                                     top_p: p["top_p"].as_f64().map(|v| format!("{v}")).unwrap_or_default(),
@@ -47,11 +47,8 @@ pub fn SettingsPanel(
                                     reasoning_budget: p["reasoning_budget"].as_i64().map(|v| format!("{v}")).unwrap_or_default(),
                                 });
                             }
-                        }
-                    }
                 });
             }
-        }
     };
 
     let on_save = move |_| {
@@ -60,7 +57,7 @@ pub fn SettingsPanel(
         set_saving.set(true);
         let s = settings.get();
         let pn = profile_name.clone();
-        let set_toasts = set_toasts.clone();
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             let mut update = serde_json::Map::new();
             let mut errors: Vec<String> = Vec::new();
@@ -104,7 +101,7 @@ pub fn SettingsPanel(
             else if !s.reasoning_budget.is_empty() { errors.push("reasoning_budget: invalid number".into()); }
 
             if !errors.is_empty() {
-                show_toast(set_toasts.clone(), errors.join(", "), ToastKind::Error);
+                show_toast(set_toasts, errors.join(", "), ToastKind::Error);
                 set_saving.set(false);
                 return;
             }

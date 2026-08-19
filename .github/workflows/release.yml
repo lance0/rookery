@@ -30,6 +30,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # rookeryd embeds crates/rookery-dashboard/dist via include_dir!, and the
+      # dashboard crate is excluded from the workspace, so `cargo build` alone
+      # ships whatever dist/ happens to be committed. That artifact went 4+ months
+      # stale once, which meant dashboard fixes existed in source but not in any
+      # released binary. Always rebuild it here so the shipped asset matches the
+      # tagged source.
+      - name: Install trunk + wasm target
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install trunk --locked
+
+      - name: Build dashboard
+        run: cd crates/rookery-dashboard && trunk build --release
+
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked

@@ -28,7 +28,7 @@ pub fn BenchPanel(
 
     let on_bench = move |_| {
         set_results.update(|r| r.loading = true);
-        let st = set_toasts.clone();
+        let st = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::run_bench().await {
                 Ok(data) => {

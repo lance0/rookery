@@ -5,7 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>rookery</title>
     <link data-trunk rel="css" href="style.css" />
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- -all enables every wasm feature for validation.
+         Current rustc emits bulk-memory (memory.copy) and nontrapping
+         float-to-int (i64.trunc_sat_f64_s); trunk's bundled wasm-opt rejects
+         both by default and the release build fails validation outright.
+         Enabling them individually means chasing each new feature rustc adopts,
+         so take the whole set — the output still contains only what rustc
+         emitted, and the browser targets here support all of it. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" data-wasm-opt-params="-all" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />

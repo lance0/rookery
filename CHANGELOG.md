@@ -4,6 +4,74 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
+## 0.1.7 — 2026-08-19
+
+Durability and lifecycle correctness in the daemon, plus the first dashboard
+release in four months. Findings came from a systematic review of the workspace.
+
+### Security
+- **`Ctrl+S` no longer starts the inference server.** The dashboard's keydown
+  handler read `e.key()` with no modifier or repeat check, and `e.key()` for
+  `Ctrl+S` is plain `"s"` — so the browser's save-page shortcut fired
+  `POST /api/start`, and `Ctrl+X` fired stop. Holding a key also repeated the
+  action at key-repeat rate.
+
+### Fixed
+- **State writes are now durable.** `write` + `rename` is atomic against a process
+  crash but not against power loss: the rename can reach disk before the temp
+  file's contents do, leaving a zero-length file. All four persistence sites
+  (server state, agent state, release cache, config) now go through
+  `write_atomic` — write, fsync, rename, fsync parent directory.
+- **A failed `state.json` load no longer silently kills a healthy server.** The
+  error was discarded, yielding `Stopped`, which set `tracked_pid` to `None`,
+  which made the orphan reaper treat every running llama-server as an orphan and
+  SIGTERM then SIGKILL it — mid-request, with nothing in the log explaining why.
+- **Agent stop grace is configurable** via `stop_timeout_secs`, default raised
+  5s → 30s. Five seconds is thin for an agent checkpointing a large SQLite WAL,
+  and hard-killing mid-checkpoint is how torn pages happen. Taking the SIGKILL
+  path is now logged at error, naming the agent and the risk.
+- **Automated restarts no longer erase crash backoff.** `stop()` unconditionally
+  cleared the crash counter, and the fatal-error restart, dependency-port bounce
+  and profile swap all called it — wiping the exponential backoff the crash path
+  had just built. Split into `stop()` and `stop_automated()`.
+- **The fatal-error restart path has real backoff.** It previously slept a flat 2s
+  with no counter, so an agent matching a pattern on every startup restarted every
+  ~2.3s indefinitely. systemd's `StartLimit` does not cover this, because rookeryd
+  itself never exits.
+- **Agent adoption verifies identity.** `adopt()` stored the persisted PID
+  unchecked, and everything downstream SIGKILLs that bare number. The upstream
+  filter only tested that `/proc/<pid>` exists — true for a zombie and true for a
+  recycled PID. Adoption now requires the PID to be alive and
+  `/proc/<pid>/cmdline` to still reference the configured command.
+- **Zombie-aware liveness in the stop path**, which previously waited out the full
+  grace period before SIGKILLing an already-dead process.
+- **Start button after a failed start.** `can_start` compared the whole status
+  string to `"failed"`, but the daemon reports `"failed: <error>"` — so Start was
+  disabled in exactly the state where it is needed.
+- **Unmatched `/api/*` paths return 404 with a JSON body** instead of 200 with the
+  dashboard HTML, which made a typo'd route look like success to any caller
+  checking `response.ok`. The `index.html` unwrap in the SPA fallback is gone too.
+
+### Changed
+- **Dashboard assets are cacheable.** Content-hashed assets are served
+  `immutable`; `index.html` gets a content ETag with 304 handling. Beyond
+  bandwidth, V8 caches *compiled* wasm keyed on URL, and a fresh `200`
+  invalidates that cache — so every dashboard reload was recompiling ~900 KB.
+- **Dashboard wasm is 39% smaller** — 904 KB → 556 KB, via a release profile
+  (`opt-level="z"`, fat LTO, one codegen unit, `panic="abort"`, strip) that the
+  crate never had, since being excluded from the workspace left it on cargo
+  defaults.
+- **The dashboard is built in CI and in the release pipeline.** It was excluded
+  from the workspace, so fmt/clippy/test/MSRV/audit and `cargo build --release`
+  all skipped it — meaning `dist/` (a committed artifact embedded via
+  `include_dir!`) went four months stale, and dashboard fixes existed in source
+  but in no released binary. `make install` now depends on `make dashboard`.
+
+### Known issues
+- `cargo clippy` on the dashboard still reports 8 warnings (redundant rebindings
+  and one upstream future-incompat note). The CI job builds and lints it but does
+  not yet gate on `-D warnings`.
+
 ## 0.1.6 — 2026-08-19
 
 Correctness pass over the daemon, plus deployment and log-correlation fixes. Findings came

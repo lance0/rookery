@@ -117,12 +117,12 @@ pub fn AgentsTab(
 
                             let click_name = name.clone();
                             let running = is_running;
-                            let set_agents_click = set_agents.clone();
-                            let set_toasts_click = set_toasts.clone();
+                            let set_agents_click = set_agents;
+                            let set_toasts_click = set_toasts;
                             let on_click = move |_| {
                                 let n = click_name.clone();
-                                let sa = set_agents_click.clone();
-                                let st = set_toasts_click.clone();
+                                let sa = set_agents_click;
+                                let st = set_toasts_click;
                                 wasm_bindgen_futures::spawn_local(async move {
                                     let result = if running {
                                         api::stop_agent(&n).await
@@ -143,12 +143,12 @@ pub fn AgentsTab(
                             };
 
                             let update_name = name.clone();
-                            let set_agents_update = set_agents.clone();
-                            let set_toasts_update = set_toasts.clone();
+                            let set_agents_update = set_agents;
+                            let set_toasts_update = set_toasts;
                             let on_update = move |_| {
                                 let n = update_name.clone();
-                                let sa = set_agents_update.clone();
-                                let st = set_toasts_update.clone();
+                                let sa = set_agents_update;
+                                let st = set_toasts_update;
                                 set_updating_agent.set(Some(n.clone()));
                                 wasm_bindgen_futures::spawn_local(async move {
                                     match api::update_agent(&n).await {

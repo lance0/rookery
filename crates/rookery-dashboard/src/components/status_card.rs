@@ -75,9 +75,9 @@ pub fn StatusCard(
     };
 
     let on_start = move |_| {
-        let set_profiles = set_profiles.clone();
-        let set_agents = set_agents.clone();
-        let set_toasts = set_toasts.clone();
+        let set_profiles = set_profiles;
+        let set_agents = set_agents;
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::start_server(None).await {
                 Ok(resp) => {
@@ -92,9 +92,9 @@ pub fn StatusCard(
     };
 
     let on_stop = move |_| {
-        let set_profiles = set_profiles.clone();
-        let set_agents = set_agents.clone();
-        let set_toasts = set_toasts.clone();
+        let set_profiles = set_profiles;
+        let set_agents = set_agents;
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::stop_server().await {
                 Ok(resp) => {
@@ -108,9 +108,9 @@ pub fn StatusCard(
     };
 
     let on_sleep = move |_| {
-        let set_profiles = set_profiles.clone();
-        let set_agents = set_agents.clone();
-        let set_toasts = set_toasts.clone();
+        let set_profiles = set_profiles;
+        let set_agents = set_agents;
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::sleep_server().await {
                 Ok(resp) => {
@@ -129,9 +129,9 @@ pub fn StatusCard(
     };
 
     let on_wake = move |_| {
-        let set_profiles = set_profiles.clone();
-        let set_agents = set_agents.clone();
-        let set_toasts = set_toasts.clone();
+        let set_profiles = set_profiles;
+        let set_agents = set_agents;
+        let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
             match api::wake_server().await {
                 Ok(resp) => {

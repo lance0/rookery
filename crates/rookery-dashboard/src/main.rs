@@ -116,33 +116,29 @@ fn get_storage() -> Option<web_sys::Storage> {
 
 fn init_theme() -> bool {
     // Returns true if light mode
-    if let Some(storage) = get_storage() {
-        if let Ok(Some(theme)) = storage.get_item("rookery-theme") {
+    if let Some(storage) = get_storage()
+        && let Ok(Some(theme)) = storage.get_item("rookery-theme") {
             let is_light = theme == "light";
-            if is_light {
-                if let Some(doc) = get_window().and_then(|w| w.document()) {
-                    if let Some(el) = doc.document_element() {
+            if is_light
+                && let Some(doc) = get_window().and_then(|w| w.document())
+                    && let Some(el) = doc.document_element() {
                         let _ = el.class_list().add_1("light");
                     }
-                }
-            }
             return is_light;
         }
-    }
     false
 }
 
 fn toggle_theme(is_light: bool) -> bool {
     let new_light = !is_light;
-    if let Some(doc) = get_window().and_then(|w| w.document()) {
-        if let Some(el) = doc.document_element() {
+    if let Some(doc) = get_window().and_then(|w| w.document())
+        && let Some(el) = doc.document_element() {
             if new_light {
                 let _ = el.class_list().add_1("light");
             } else {
                 let _ = el.class_list().remove_1("light");
             }
         }
-    }
     if let Some(storage) = get_storage() {
         let _ = storage.set_item("rookery-theme", if new_light { "light" } else { "dark" });
     }
@@ -390,7 +386,7 @@ fn App() -> impl IntoView {
     }
 
     // Periodic agent refresh
-    let set_agents_interval = set_agents.clone();
+    let set_agents_interval = set_agents;
     let auth_required_agents = auth_required;
     wasm_bindgen_futures::spawn_local(async move {
         loop {
@@ -406,7 +402,7 @@ fn App() -> impl IntoView {
 
     // Periodic server stats polling (single loop at App level to avoid accumulation)
     {
-        let status_for_stats = status.clone();
+        let status_for_stats = status;
         let auth_required_stats = auth_required;
         wasm_bindgen_futures::spawn_local(async move {
             loop {
@@ -433,11 +429,10 @@ fn App() -> impl IntoView {
         let auth_required_releases = auth_required;
         wasm_bindgen_futures::spawn_local(async move {
             loop {
-                if !auth_required_releases.get() {
-                    if let Ok(data) = api::fetch_releases().await {
+                if !auth_required_releases.get()
+                    && let Ok(data) = api::fetch_releases().await {
                         set_releases.set(Some(data));
                     }
-                }
                 gloo_timers::future::sleep(std::time::Duration::from_secs(300)).await;
             }
         });
@@ -445,21 +440,20 @@ fn App() -> impl IntoView {
 
     // Keyboard shortcuts
     {
-        let set_tab = set_tab.clone();
-        let set_toasts_kb = set_toasts.clone();
-        let set_profiles_kb = set_profiles.clone();
-        let set_agents_kb = set_agents.clone();
+        let set_tab = set_tab;
+        let set_toasts_kb = set_toasts;
+        let set_profiles_kb = set_profiles;
+        let set_agents_kb = set_agents;
 
         let on_keydown = Closure::<dyn FnMut(_)>::new(move |e: web_sys::KeyboardEvent| {
             // Skip if an input/textarea is focused
-            if let Some(doc) = get_window().and_then(|w| w.document()) {
-                if let Some(active) = doc.active_element() {
+            if let Some(doc) = get_window().and_then(|w| w.document())
+                && let Some(active) = doc.active_element() {
                     let tag = active.tag_name().to_uppercase();
                     if tag == "INPUT" || tag == "TEXTAREA" || tag == "SELECT" {
                         return;
                     }
                 }
-            }
 
             // Ignore modified chords and key-repeat.
             //
@@ -485,9 +479,9 @@ fn App() -> impl IntoView {
                     set_is_light.update(|light| *light = toggle_theme(*light));
                 }
                 "s" => {
-                    let st = set_toasts_kb.clone();
-                    let sp = set_profiles_kb.clone();
-                    let sa = set_agents_kb.clone();
+                    let st = set_toasts_kb;
+                    let sp = set_profiles_kb;
+                    let sa = set_agents_kb;
                     wasm_bindgen_futures::spawn_local(async move {
                         match api::start_server(None).await {
                             Ok(resp) => {
@@ -502,7 +496,7 @@ fn App() -> impl IntoView {
                     });
                 }
                 "x" => {
-                    let st = set_toasts_kb.clone();
+                    let st = set_toasts_kb;
                     wasm_bindgen_futures::spawn_local(async move {
                         match api::stop_server().await {
                             Ok(resp) => {
