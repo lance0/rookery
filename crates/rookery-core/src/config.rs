@@ -693,6 +693,12 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Serializing from the struct discards comments and key ordering. These
+        // configs are hand-maintained, so keep the previous file recoverable
+        // rather than silently destroying it.
+        if path.exists() {
+            let _ = std::fs::copy(path, path.with_extension("toml.bak"));
+        }
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, content)?;
         std::fs::rename(&tmp, path)?;

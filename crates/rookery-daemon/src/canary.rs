@@ -121,7 +121,15 @@ async fn run_canary_check_inner(
         rookery_core::state::ServerState::Running {
             ref profile, port, ..
         } => (profile.clone(), port),
-        _ => return false,
+        _ => {
+            // The CUDA-error path had draining set by the caller before dispatch.
+            // Nothing below will restart, so clear it here or post_chat returns
+            // 503 forever — the flag survives stop() and start().
+            if cuda_error {
+                state.backend.lock().await.set_draining(false);
+            }
+            return false;
+        }
     };
 
     state.metrics.inc_canary_restart();
@@ -151,6 +159,9 @@ async fn run_canary_check_inner(
             tracing::info!(
                 "server no longer running after acquiring lock, skipping canary restart"
             );
+            if cuda_error {
+                state.backend.lock().await.set_draining(false);
+            }
             return false;
         }
     };

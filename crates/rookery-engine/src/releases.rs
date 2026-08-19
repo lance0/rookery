@@ -220,27 +220,31 @@ pub fn compare_llama_versions(current: &VersionInfo, latest_tag: &str) -> (bool,
     }
 }
 
-/// Detect llama-server version by running `--version` and parsing stdout.
+/// Detect llama-server version by running `--version`.
+///
+/// llama-server writes its build banner to **stderr**, not stdout — stdout comes
+/// back empty. Scan both so this keeps working if that ever changes upstream.
 pub async fn detect_llama_version(binary_path: &Path) -> Result<VersionInfo, String> {
     let output = tokio::process::Command::new(binary_path)
         .arg("--version")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
         .await
         .map_err(|e| format!("spawn llama-server --version: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Find the "version: NNNN (HASH)" line
-    for line in stdout.lines() {
+    for line in stdout.lines().chain(stderr.lines()) {
         if line.starts_with("version:") {
             return Ok(parse_llama_build_info(line));
         }
     }
 
     Err(format!(
-        "could not parse version from llama-server output: {stdout}"
+        "could not parse version from llama-server output: {stdout}{stderr}"
     ))
 }
 

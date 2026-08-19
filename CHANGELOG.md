@@ -4,11 +4,50 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
-## 0.1.6 — unreleased
+## 0.1.6 — 2026-08-19
 
-Deployment and log-correlation fixes. No behavioural change to inference or agent management.
+Correctness pass over the daemon, plus deployment and log-correlation fixes. Findings came
+from a systematic review of the whole workspace; three independent reviews converged on the
+drain-flag leak, which is the most severe item here.
+
+### Security
+- **`github_token` is now redacted by `GET /api/config`** — it was returned in cleartext.
+  The handler redacted `api_key` and agent env vars but not this one, and the endpoint is
+  unauthenticated unless `api_key` is set.
+- **`api_key` no longer reports `"[redacted]"` when no key is configured.** It was
+  unconditionally overwritten, so the one endpoint an operator would use to check whether a
+  daemon is authenticated answered "yes" when the answer was no.
+- **Bumped `rustls-webpki` 0.103.10 → 0.103.14 and `quinn-proto` 0.11.14 → 0.11.17**,
+  clearing RUSTSEC-2026-0104 (reachable panic in CRL parsing), -0098 and -0099 (name-constraint
+  bypasses), and -0185. Lockfile-only; the repo's own `cargo audit` CI gate was failing.
 
 ### Fixed
+- **Drain flag leaked on two CUDA-error canary exit paths**, leaving `POST /api/chat`
+  returning 503 for every request indefinitely and disabling all subsequent canary checks.
+  The flag is an `AtomicBool` that survives `stop()` and `start()`, so nothing short of a
+  swap or a daemon restart cleared it. Reachable whenever llama-server emits a CUDA line
+  while the server is not in `Running` — teardown during a normal `rookery stop`, for one.
+- **Watchdog restarted an agent twice per fatal-error burst**, SIGTERMing the replacement
+  microseconds after spawning it. The notification is consumed before a ~2.2s
+  stop/sleep/start, so any send arriving in that window — one traceback matches the patterns
+  on several lines, and lines drain off the dying process's pipe too — re-armed `changed()`
+  and fired again immediately. Observed 32 times in production journals since April, on an
+  agent that opens a 385 MB SQLite database at startup.
+- **`PUT /api/config/profile/{name}` was a silent no-op for any profile using a
+  `[profiles.X.llama_server]` sub-table** — i.e. every non-legacy profile. It wrote the
+  legacy flat fields, which `resolve_llama_server_command_line` ignores whenever the
+  sub-table exists, and still returned `success: true`. Now writes through to the sub-table,
+  normalizing legacy profiles onto it, and returns 409 for vLLM profiles instead of
+  reporting success. 404 now carries a body explaining that config is read at daemon start.
+- **`Config::save_to` now keeps a `.toml.bak`** before rewriting. It serializes from the
+  struct, so it discards all comments and key ordering in a hand-maintained config; the
+  previous contents are at least recoverable now.
+- **`detect_llama_version` parsed stdout, but llama-server writes its build banner to
+  stderr** — which was piped to `/dev/null`. The function always failed, so with the server
+  stopped `rookery releases` reported "up to date" regardless of the installed build. Now
+  scans both streams.
+- **`sleep_server` leaked `dependency_bounce_suppressed`** when `stop()` failed, silently
+  disabling dependency-port agent bouncing until the next start/stop/swap.
 - **Log in local time** — journald prefixes each line in local time while tracing's default
   timer emitted UTC, so every `rookeryd` line carried two clocks four hours apart, and across
   midnight the *dates* disagreed. Adds a `LocalTimer` `FormatTime` impl backed by `chrono::Local`.

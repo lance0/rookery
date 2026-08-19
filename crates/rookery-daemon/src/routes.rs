@@ -510,8 +510,17 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::
     let config = state.config.read().await;
     let mut val = serde_json::to_value(&*config).unwrap_or_default();
 
-    if let Some(api_key) = val.get_mut("api_key") {
+    // Only redact when a value is actually set — reporting "[redacted]" for an
+    // absent api_key tells an operator the daemon is authenticated when it is not.
+    if let Some(api_key) = val.get_mut("api_key")
+        && !api_key.is_null()
+    {
         *api_key = serde_json::json!("[redacted]");
+    }
+    if let Some(token) = val.get_mut("github_token")
+        && !token.is_null()
+    {
+        *token = serde_json::json!("[redacted]");
     }
 
     // Redact sensitive fields from agent configs
@@ -561,57 +570,74 @@ pub async fn put_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(update): Json<ProfileUpdate>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut config = state.config.write().await;
 
-    let profile = config
-        .profiles
-        .get_mut(&name)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let profile = config.profiles.get_mut(&name).ok_or((
+        StatusCode::NOT_FOUND,
+        format!(
+            "no such profile: {name} (config is read at daemon start — restart rookeryd if you just added it)"
+        ),
+    ))?;
+
+    // Write through to the [llama_server] sub-table, not the legacy flat fields.
+    // resolve_llama_server_command_line consumes ONLY the sub-table when it is
+    // present, so writing the flat fields there is a silent no-op. Profiles
+    // still on the legacy form get normalized onto the sub-table here —
+    // llama_server_config() already knows how to build one from them.
+    let mut ls = profile.llama_server_config().ok_or((
+        StatusCode::CONFLICT,
+        format!("profile '{name}' is a vLLM profile; these fields are llama-server only"),
+    ))?;
 
     if let Some(v) = update.temp {
-        profile.temp = v;
+        ls.temp = v;
     }
     if let Some(v) = update.top_p {
-        profile.top_p = v;
+        ls.top_p = v;
     }
     if let Some(v) = update.top_k {
-        profile.top_k = v;
+        ls.top_k = v;
     }
     if let Some(v) = update.min_p {
-        profile.min_p = v;
+        ls.min_p = v;
     }
     if let Some(v) = update.ctx_size {
-        profile.ctx_size = v;
+        ls.ctx_size = v;
     }
     if let Some(v) = update.threads {
-        profile.threads = v;
+        ls.threads = v;
     }
     if let Some(v) = update.threads_batch {
-        profile.threads_batch = v;
+        ls.threads_batch = v;
     }
     if let Some(v) = update.batch_size {
-        profile.batch_size = v;
+        ls.batch_size = v;
     }
     if let Some(v) = update.ubatch_size {
-        profile.ubatch_size = v;
+        ls.ubatch_size = v;
     }
     if let Some(v) = update.reasoning_budget {
-        profile.reasoning_budget = v;
+        ls.reasoning_budget = v;
     }
     if let Some(v) = update.flash_attention {
-        profile.flash_attention = v;
+        ls.flash_attention = v;
     }
     if let Some(v) = update.cache_type_k {
-        profile.cache_type_k = v;
+        ls.cache_type_k = v;
     }
     if let Some(v) = update.cache_type_v {
-        profile.cache_type_v = v;
+        ls.cache_type_v = v;
     }
+
+    profile.llama_server = Some(ls);
 
     if let Err(e) = config.save_to(&state.config_path) {
         tracing::error!(error = %e, "failed to save config");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to save config: {e}"),
+        ));
     }
 
     tracing::info!(profile = %name, "profile updated and saved to disk");
@@ -4016,23 +4042,29 @@ mod tests {
                 "message should confirm profile updated, got: {msg}"
             );
 
-            // Verify the config was actually updated
+            // Assert through llama_server_config() — the same accessor
+            // resolve_llama_server_command_line uses. Asserting the legacy flat
+            // fields instead is what let this endpoint be a silent no-op for
+            // every sub-table profile while this test stayed green.
             let config = state.config.read().await;
             let profile = config
                 .profiles
                 .get("test")
                 .expect("test profile should exist");
+            let ls = profile
+                .llama_server_config()
+                .expect("test profile is a llama-server profile");
             assert!(
-                (profile.temp - 0.9).abs() < f32::EPSILON,
+                (ls.temp - 0.9).abs() < f32::EPSILON,
                 "temp should be 0.9, got: {}",
-                profile.temp
+                ls.temp
             );
             assert!(
-                (profile.top_p - 0.95).abs() < f32::EPSILON,
+                (ls.top_p - 0.95).abs() < f32::EPSILON,
                 "top_p should be 0.95, got: {}",
-                profile.top_p
+                ls.top_p
             );
-            assert_eq!(profile.top_k, 40, "top_k should be 40");
+            assert_eq!(ls.top_k, 40, "top_k should be 40");
         }
 
         // --- 25. PUT /api/config/profile/:nonexistent → 404 ---

@@ -143,12 +143,13 @@ impl AppState {
         };
 
         self.agent_manager.set_dependency_bounce_suppressed(true);
-        self.backend
-            .lock()
-            .await
-            .stop()
-            .await
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = self.backend.lock().await.stop().await {
+            // The server is still Running, so un-suppress — otherwise the watchdog
+            // silently stops bouncing agents on dependency-port transitions until
+            // the next start/stop/swap happens to clear it.
+            self.agent_manager.set_dependency_bounce_suppressed(false);
+            return Err(e.to_string());
+        }
 
         let sleeping = ServerState::Sleeping {
             profile,

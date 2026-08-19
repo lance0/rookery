@@ -657,6 +657,13 @@ impl AgentManager {
                                 }
                             }
                         }
+                        // Drain anything that arrived during the ~2.2s stop/sleep/start
+                        // above. One traceback matches the patterns on several lines, and
+                        // lines drained off the dying process's pipe land here too — without
+                        // this, changed() is already Ready on re-entry and we immediately
+                        // SIGTERM the replacement we just spawned, microseconds old and
+                        // mid-SQLite-open. Observed 32 times in production since April.
+                        fatal_rx.borrow_and_update();
                         continue;
                     }
                 }
