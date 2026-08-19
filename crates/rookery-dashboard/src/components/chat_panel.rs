@@ -1,7 +1,7 @@
-use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use leptos::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -26,7 +26,9 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
 
         // Build messages payload BEFORE adding the empty assistant placeholder
         // Filter out any incomplete messages from previous errors
-        let mut chat_msgs: Vec<serde_json::Value> = messages.get().iter()
+        let mut chat_msgs: Vec<serde_json::Value> = messages
+            .get()
+            .iter()
             .filter(|m| !m.content.ends_with(" [incomplete]"))
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect();
@@ -61,15 +63,16 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                     }
                     set_messages.update(|msgs| {
                         if let Some(last) = msgs.last()
-                            && last.role == "assistant" {
-                                if last.content.is_empty() {
-                                    // No content received — remove placeholder
-                                    msgs.pop();
-                                } else {
-                                    // Partial content — mark as incomplete
-                                    msgs.last_mut().unwrap().content.push_str(" [incomplete]");
-                                }
+                            && last.role == "assistant"
+                        {
+                            if last.content.is_empty() {
+                                // No content received — remove placeholder
+                                msgs.pop();
+                            } else {
+                                // Partial content — mark as incomplete
+                                msgs.last_mut().unwrap().content.push_str(" [incomplete]");
                             }
+                        }
                     });
                 }
             }
@@ -197,8 +200,8 @@ async fn stream_chat(
         opts.set_signal(Some(&ctrl.signal()));
     }
 
-    let request =
-        web_sys::Request::new_with_str_and_init("/api/chat", &opts).map_err(|e| format!("{e:?}"))?;
+    let request = web_sys::Request::new_with_str_and_init("/api/chat", &opts)
+        .map_err(|e| format!("{e:?}"))?;
 
     let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -269,15 +272,16 @@ async fn stream_chat(
                         .and_then(|c| c.get("delta"))
                         .and_then(|d| d.get("content"))
                         .and_then(|c| c.as_str())
-                    {
-                        let content = content.to_string();
-                        set_messages.update(|msgs| {
-                            if let Some(last) = msgs.last_mut()
-                                && last.role == "assistant" {
-                                    last.content.push_str(&content);
-                                }
-                        });
-                    }
+                {
+                    let content = content.to_string();
+                    set_messages.update(|msgs| {
+                        if let Some(last) = msgs.last_mut()
+                            && last.role == "assistant"
+                        {
+                            last.content.push_str(&content);
+                        }
+                    });
+                }
             }
         }
     }

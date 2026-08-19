@@ -1,6 +1,6 @@
-use leptos::prelude::*;
-use crate::{ServerStatus, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use crate::{ServerStatus, api};
+use leptos::prelude::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProfileSettings {
@@ -28,32 +28,63 @@ pub fn SettingsPanel(
     let load_profile = move || {
         let profile = status.get().profile.clone();
         if let Some(profile_name) = profile
-            && profile_name != loaded_profile.get() {
-                let pn = profile_name.clone();
-                set_loaded_profile.set(profile_name);
-                wasm_bindgen_futures::spawn_local(async move {
-                    if let Ok(config) = api::fetch_config().await
-                        && let Some(profiles) = config.get("profiles")
-                            && let Some(p) = profiles.get(&pn) {
-                                set_settings.set(ProfileSettings {
-                                    temp: p["temp"].as_f64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    top_p: p["top_p"].as_f64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    top_k: p["top_k"].as_u64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    min_p: p["min_p"].as_f64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    ctx_size: p["ctx_size"].as_u64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    threads: p["threads"].as_u64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    threads_batch: p["threads_batch"].as_u64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    batch_size: p["batch_size"].as_u64().map(|v| format!("{v}")).unwrap_or_default(),
-                                    reasoning_budget: p["reasoning_budget"].as_i64().map(|v| format!("{v}")).unwrap_or_default(),
-                                });
-                            }
-                });
-            }
+            && profile_name != loaded_profile.get()
+        {
+            let pn = profile_name.clone();
+            set_loaded_profile.set(profile_name);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(config) = api::fetch_config().await
+                    && let Some(profiles) = config.get("profiles")
+                    && let Some(p) = profiles.get(&pn)
+                {
+                    set_settings.set(ProfileSettings {
+                        temp: p["temp"]
+                            .as_f64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        top_p: p["top_p"]
+                            .as_f64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        top_k: p["top_k"]
+                            .as_u64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        min_p: p["min_p"]
+                            .as_f64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        ctx_size: p["ctx_size"]
+                            .as_u64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        threads: p["threads"]
+                            .as_u64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        threads_batch: p["threads_batch"]
+                            .as_u64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        batch_size: p["batch_size"]
+                            .as_u64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                        reasoning_budget: p["reasoning_budget"]
+                            .as_i64()
+                            .map(|v| format!("{v}"))
+                            .unwrap_or_default(),
+                    });
+                }
+            });
+        }
     };
 
     let on_save = move |_| {
         let profile_name = loaded_profile.get();
-        if profile_name.is_empty() { return; }
+        if profile_name.is_empty() {
+            return;
+        }
         set_saving.set(true);
         let s = settings.get();
         let pn = profile_name.clone();
@@ -64,41 +95,64 @@ pub fn SettingsPanel(
 
             // Sampling params: validate ranges
             match s.temp.parse::<f64>() {
-                Ok(v) if (0.0..=2.0).contains(&v) => { update.insert("temp".into(), serde_json::json!(v)); }
+                Ok(v) if (0.0..=2.0).contains(&v) => {
+                    update.insert("temp".into(), serde_json::json!(v));
+                }
                 Ok(v) => errors.push(format!("temp {v} out of range (0.0-2.0)")),
                 Err(_) if !s.temp.is_empty() => errors.push("temp: invalid number".into()),
                 _ => {}
             }
             match s.top_p.parse::<f64>() {
-                Ok(v) if (0.0..=1.0).contains(&v) => { update.insert("top_p".into(), serde_json::json!(v)); }
+                Ok(v) if (0.0..=1.0).contains(&v) => {
+                    update.insert("top_p".into(), serde_json::json!(v));
+                }
                 Ok(v) => errors.push(format!("top_p {v} out of range (0.0-1.0)")),
                 Err(_) if !s.top_p.is_empty() => errors.push("top_p: invalid number".into()),
                 _ => {}
             }
             match s.top_k.parse::<u64>() {
-                Ok(v) if v <= 1000 => { update.insert("top_k".into(), serde_json::json!(v)); }
+                Ok(v) if v <= 1000 => {
+                    update.insert("top_k".into(), serde_json::json!(v));
+                }
                 Ok(v) => errors.push(format!("top_k {v} out of range (0-1000)")),
                 Err(_) if !s.top_k.is_empty() => errors.push("top_k: invalid number".into()),
                 _ => {}
             }
             match s.min_p.parse::<f64>() {
-                Ok(v) if (0.0..=1.0).contains(&v) => { update.insert("min_p".into(), serde_json::json!(v)); }
+                Ok(v) if (0.0..=1.0).contains(&v) => {
+                    update.insert("min_p".into(), serde_json::json!(v));
+                }
                 Ok(v) => errors.push(format!("min_p {v} out of range (0.0-1.0)")),
                 Err(_) if !s.min_p.is_empty() => errors.push("min_p: invalid number".into()),
                 _ => {}
             }
 
             // Resource params
-            if let Ok(v) = s.ctx_size.parse::<u64>() { update.insert("ctx_size".into(), serde_json::json!(v)); }
-            else if !s.ctx_size.is_empty() { errors.push("ctx_size: invalid number".into()); }
-            if let Ok(v) = s.threads.parse::<u64>() { update.insert("threads".into(), serde_json::json!(v)); }
-            else if !s.threads.is_empty() { errors.push("threads: invalid number".into()); }
-            if let Ok(v) = s.threads_batch.parse::<u64>() { update.insert("threads_batch".into(), serde_json::json!(v)); }
-            else if !s.threads_batch.is_empty() { errors.push("threads_batch: invalid number".into()); }
-            if let Ok(v) = s.batch_size.parse::<u64>() { update.insert("batch_size".into(), serde_json::json!(v)); }
-            else if !s.batch_size.is_empty() { errors.push("batch_size: invalid number".into()); }
-            if let Ok(v) = s.reasoning_budget.parse::<i64>() { update.insert("reasoning_budget".into(), serde_json::json!(v)); }
-            else if !s.reasoning_budget.is_empty() { errors.push("reasoning_budget: invalid number".into()); }
+            if let Ok(v) = s.ctx_size.parse::<u64>() {
+                update.insert("ctx_size".into(), serde_json::json!(v));
+            } else if !s.ctx_size.is_empty() {
+                errors.push("ctx_size: invalid number".into());
+            }
+            if let Ok(v) = s.threads.parse::<u64>() {
+                update.insert("threads".into(), serde_json::json!(v));
+            } else if !s.threads.is_empty() {
+                errors.push("threads: invalid number".into());
+            }
+            if let Ok(v) = s.threads_batch.parse::<u64>() {
+                update.insert("threads_batch".into(), serde_json::json!(v));
+            } else if !s.threads_batch.is_empty() {
+                errors.push("threads_batch: invalid number".into());
+            }
+            if let Ok(v) = s.batch_size.parse::<u64>() {
+                update.insert("batch_size".into(), serde_json::json!(v));
+            } else if !s.batch_size.is_empty() {
+                errors.push("batch_size: invalid number".into());
+            }
+            if let Ok(v) = s.reasoning_budget.parse::<i64>() {
+                update.insert("reasoning_budget".into(), serde_json::json!(v));
+            } else if !s.reasoning_budget.is_empty() {
+                errors.push("reasoning_budget: invalid number".into());
+            }
 
             if !errors.is_empty() {
                 show_toast(set_toasts, errors.join(", "), ToastKind::Error);

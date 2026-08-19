@@ -9,8 +9,7 @@ pub fn LogViewer(logs: ReadSignal<Vec<String>>) -> impl IntoView {
         let _lines = logs.get();
         if let Some(el) = log_ref.get() {
             let el: &web_sys::HtmlElement = &el;
-            let at_bottom =
-                el.scroll_top() + el.client_height() >= el.scroll_height() - 50;
+            let at_bottom = el.scroll_top() + el.client_height() >= el.scroll_height() - 50;
             if at_bottom {
                 el.set_scroll_top(el.scroll_height());
             }

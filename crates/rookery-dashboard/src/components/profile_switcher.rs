@@ -1,6 +1,6 @@
-use leptos::prelude::*;
-use crate::{ProfileInfo, ServerStatus, AgentsData, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use crate::{AgentsData, ProfileInfo, ServerStatus, api};
+use leptos::prelude::*;
 
 #[component]
 pub fn ProfileSwitcher(

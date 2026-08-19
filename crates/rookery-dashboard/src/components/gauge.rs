@@ -17,9 +17,7 @@ pub fn Gauge(
         }
     };
 
-    let display = move || {
-        format!("{:.0}{unit} / {:.0}{unit}", value.get(), max.get())
-    };
+    let display = move || format!("{:.0}{unit} / {:.0}{unit}", value.get(), max.get());
 
     let bar_style = move || format!("width: {:.1}%", pct());
 

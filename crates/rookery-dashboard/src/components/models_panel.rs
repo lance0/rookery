@@ -1,6 +1,6 @@
-use leptos::prelude::*;
 use crate::api;
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use leptos::prelude::*;
 
 #[component]
 pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
@@ -21,9 +21,10 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
             set_hardware_init.set(Some(hw));
         }
         if let Ok(c) = api::fetch_cached_models().await
-            && let Some(models) = c["models"].as_array() {
-                set_cached_init.set(models.clone());
-            }
+            && let Some(models) = c["models"].as_array()
+        {
+            set_cached_init.set(models.clone());
+        }
     });
 
     let do_search = move || {
@@ -68,7 +69,11 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                         set_quants.set(q.clone());
                     }
                 }
-                Err(e) => show_toast(set_toasts, format!("failed to load quants: {e}"), ToastKind::Error),
+                Err(e) => show_toast(
+                    set_toasts,
+                    format!("failed to load quants: {e}"),
+                    ToastKind::Error,
+                ),
             }
             set_loading_quants.set(false);
         });
@@ -81,7 +86,11 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
             match api::pull_model(&repo, Some(&quant)).await {
                 Ok(resp) => {
                     if resp["started"].as_bool().unwrap_or(false) {
-                        show_toast(set_toasts, format!("downloading {quant}..."), ToastKind::Success);
+                        show_toast(
+                            set_toasts,
+                            format!("downloading {quant}..."),
+                            ToastKind::Success,
+                        );
                     } else {
                         let msg = resp["message"].as_str().unwrap_or("pull failed");
                         show_toast(set_toasts, msg.to_string(), ToastKind::Error);
@@ -91,9 +100,10 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
             }
             // Refresh cached list
             if let Ok(c) = api::fetch_cached_models().await
-                && let Some(models) = c["models"].as_array() {
-                    set_cached.set(models.clone());
-                }
+                && let Some(models) = c["models"].as_array()
+            {
+                set_cached.set(models.clone());
+            }
         });
     };
 

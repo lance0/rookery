@@ -1,18 +1,15 @@
-use leptos::prelude::*;
 use crate::ModelInfoData;
+use leptos::prelude::*;
 
 #[component]
 pub fn ModelInfo(model_info: ReadSignal<ModelInfoData>) -> impl IntoView {
-    let model_id = move || {
-        model_info.get().model_id.unwrap_or_else(|| "—".into())
-    };
-    let owned_by = move || {
-        model_info.get().owned_by.unwrap_or_else(|| "—".into())
-    };
+    let model_id = move || model_info.get().model_id.unwrap_or_else(|| "—".into());
+    let owned_by = move || model_info.get().owned_by.unwrap_or_else(|| "—".into());
 
     let ctx_size = move || {
         let info = model_info.get();
-        info.props.as_ref()
+        info.props
+            .as_ref()
             .and_then(|p| p.get("default_generation_settings"))
             .and_then(|s| s.get("n_ctx"))
             .and_then(|v| v.as_u64())
@@ -22,7 +19,9 @@ pub fn ModelInfo(model_info: ReadSignal<ModelInfoData>) -> impl IntoView {
 
     let chat_template = move || {
         let info = model_info.get();
-        let has_template = info.props.as_ref()
+        let has_template = info
+            .props
+            .as_ref()
             .and_then(|p| p.get("chat_template"))
             .is_some();
         if has_template { "loaded" } else { "—" }
@@ -30,7 +29,8 @@ pub fn ModelInfo(model_info: ReadSignal<ModelInfoData>) -> impl IntoView {
 
     let total_size = move || {
         let info = model_info.get();
-        info.props.as_ref()
+        info.props
+            .as_ref()
             .and_then(|p| p.get("total_size"))
             .and_then(|v| v.as_u64())
             .map(|bytes| {

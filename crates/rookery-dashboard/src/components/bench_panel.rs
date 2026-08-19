@@ -1,6 +1,6 @@
-use leptos::prelude::*;
-use crate::{ServerStatus, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use crate::{ServerStatus, api};
+use leptos::prelude::*;
 
 #[derive(Debug, Clone, Default)]
 struct BenchResults {
@@ -34,7 +34,10 @@ pub fn BenchPanel(
                 Ok(data) => {
                     let tests: Vec<BenchTest> =
                         serde_json::from_value(data["tests"].clone()).unwrap_or_default();
-                    set_results.set(BenchResults { tests, loading: false });
+                    set_results.set(BenchResults {
+                        tests,
+                        loading: false,
+                    });
                 }
                 Err(e) => {
                     set_results.update(|r| r.loading = false);

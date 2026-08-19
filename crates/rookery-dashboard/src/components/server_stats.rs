@@ -1,5 +1,5 @@
-use leptos::prelude::*;
 use crate::ServerStatus;
+use leptos::prelude::*;
 
 #[component]
 pub fn ServerStats(
@@ -37,18 +37,24 @@ pub fn ServerStats(
                                 <div class="stat-value mono">"N/A"</div>
                             </div>
                         </div>
-                    }.into_any();
+                    }
+                    .into_any();
                 }
                 return view! {
                     <div class="card">
                         <h2>"Server Stats"</h2>
                         <div class="empty">"server not running"</div>
                     </div>
-                }.into_any();
+                }
+                .into_any();
             }
         };
 
-        let slots = s.get("slots").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let slots = s
+            .get("slots")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let slot = slots.first().cloned();
 
         // If server is running but slots data is null (e.g., vLLM backend), show N/A
@@ -73,32 +79,38 @@ pub fn ServerStats(
                         <div class="stat-value mono">"N/A"</div>
                     </div>
                 </div>
-            }.into_any();
+            }
+            .into_any();
         }
 
-        let n_ctx = slot.as_ref()
-            .and_then(|s| s["n_ctx"].as_u64())
-            .unwrap_or(0);
+        let n_ctx = slot.as_ref().and_then(|s| s["n_ctx"].as_u64()).unwrap_or(0);
 
         // Processing status
-        let is_processing = slot.as_ref()
+        let is_processing = slot
+            .as_ref()
             .and_then(|s| s["is_processing"].as_bool())
             .unwrap_or(false);
 
         // Task count (monotonic, proxy for total requests)
-        let id_task = slot.as_ref()
+        let id_task = slot
+            .as_ref()
             .and_then(|s| s["id_task"].as_u64())
             .unwrap_or(0);
 
         // Last generation stats
-        let n_decoded = slot.as_ref()
+        let n_decoded = slot
+            .as_ref()
             .and_then(|s| s["next_token"].as_array())
             .and_then(|a| a.first())
             .and_then(|t| t["n_decoded"].as_u64())
             .unwrap_or(0);
 
         let status_text = if is_processing { "processing" } else { "idle" };
-        let status_class = if is_processing { "badge running" } else { "badge stopped" };
+        let status_class = if is_processing {
+            "badge running"
+        } else {
+            "badge stopped"
+        };
 
         let ctx_display = if n_ctx >= 1024 {
             format!("{}K", n_ctx / 1024)
@@ -126,7 +138,8 @@ pub fn ServerStats(
                     <div class="stat-value mono">{ctx_display}</div>
                 </div>
             </div>
-        }.into_any()
+        }
+        .into_any()
     };
 
     view! { <div>{content}</div> }

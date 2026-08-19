@@ -1,6 +1,6 @@
-use leptos::prelude::*;
-use crate::{AgentsData, AgentInfo, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use crate::{AgentInfo, AgentsData, api};
+use leptos::prelude::*;
 
 fn format_uptime(secs: i64) -> String {
     if secs < 60 {
@@ -22,12 +22,15 @@ pub fn AgentsTab(
     set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     let (updating_agent, set_updating_agent) = signal(Option::<String>::None);
-    let (health_details, set_health_details) = signal(std::collections::HashMap::<String, serde_json::Value>::new());
+    let (health_details, set_health_details) =
+        signal(std::collections::HashMap::<String, serde_json::Value>::new());
 
     // Fetch health details for all running agents whenever agents signal changes
     Effect::new(move |_| {
         let data = agents.get();
-        let running_names: Vec<String> = data.agents.iter()
+        let running_names: Vec<String> = data
+            .agents
+            .iter()
             .filter(|a| a.status == serde_json::json!("running"))
             .map(|a| a.name.clone())
             .collect();

@@ -162,7 +162,10 @@ pub async fn swap_profile(profile: &str) -> Result<serde_json::Value, String> {
 }
 
 pub async fn fetch_agent_health(name: &str) -> Result<serde_json::Value, String> {
-    let resp = send(auth_request(Request::get(&format!("/api/agents/{name}/health")))).await?;
+    let resp = send(auth_request(Request::get(&format!(
+        "/api/agents/{name}/health"
+    ))))
+    .await?;
     resp.json().await.map_err(|e| e.to_string())
 }
 
@@ -217,12 +220,18 @@ pub async fn fetch_hardware() -> Result<serde_json::Value, String> {
 }
 
 pub async fn search_models(query: &str) -> Result<serde_json::Value, String> {
-    let resp = send(auth_request(Request::get(&format!("/api/models/search?q={query}")))).await?;
+    let resp = send(auth_request(Request::get(&format!(
+        "/api/models/search?q={query}"
+    ))))
+    .await?;
     resp.json().await.map_err(|e| e.to_string())
 }
 
 pub async fn fetch_quants(repo: &str) -> Result<serde_json::Value, String> {
-    let resp = send(auth_request(Request::get(&format!("/api/models/quants?repo={repo}")))).await?;
+    let resp = send(auth_request(Request::get(&format!(
+        "/api/models/quants?repo={repo}"
+    ))))
+    .await?;
     resp.json().await.map_err(|e| e.to_string())
 }
 

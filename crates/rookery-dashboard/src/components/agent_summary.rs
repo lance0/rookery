@@ -1,11 +1,8 @@
-use leptos::prelude::*;
 use crate::{AgentsData, Tab};
+use leptos::prelude::*;
 
 #[component]
-pub fn AgentSummary(
-    agents: ReadSignal<AgentsData>,
-    set_tab: WriteSignal<Tab>,
-) -> impl IntoView {
+pub fn AgentSummary(agents: ReadSignal<AgentsData>, set_tab: WriteSignal<Tab>) -> impl IntoView {
     view! {
         <div class="card agent-summary" on:click=move |_| set_tab.set(Tab::Agents) style="cursor:pointer">
             <h2>"Agents" <span class="agent-summary-link">"details \u{2192}"</span></h2>

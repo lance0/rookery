@@ -1,6 +1,6 @@
-use leptos::prelude::*;
-use crate::{ServerStatus, ProfileInfo, AgentsData, api};
 use crate::components::toast::{Toast, ToastKind, show_toast};
+use crate::{AgentsData, ProfileInfo, ServerStatus, api};
+use leptos::prelude::*;
 
 fn spawn_refresh_lists(
     set_profiles: WriteSignal<Vec<ProfileInfo>>,
@@ -25,7 +25,13 @@ pub fn StatusCard(
 ) -> impl IntoView {
     let state_class = move || {
         let s = status.get();
-        let base = s.state.split(':').next().unwrap_or("stopped").trim().to_string();
+        let base = s
+            .state
+            .split(':')
+            .next()
+            .unwrap_or("stopped")
+            .trim()
+            .to_string();
         format!("badge {base}")
     };
 
@@ -66,12 +72,16 @@ pub fn StatusCard(
         }
     };
     let uptime = move || {
-        status.get().uptime_secs.map(|secs| {
-            let h = secs / 3600;
-            let m = (secs % 3600) / 60;
-            let s = secs % 60;
-            format!("{h}h {m}m {s}s")
-        }).unwrap_or_else(|| "—".into())
+        status
+            .get()
+            .uptime_secs
+            .map(|secs| {
+                let h = secs / 3600;
+                let m = (secs % 3600) / 60;
+                let s = secs % 60;
+                format!("{h}h {m}m {s}s")
+            })
+            .unwrap_or_else(|| "—".into())
     };
 
     let on_start = move |_| {
@@ -83,7 +93,15 @@ pub fn StatusCard(
                 Ok(resp) => {
                     let msg = resp["message"].as_str().unwrap_or("started").to_string();
                     let success = resp["success"].as_bool().unwrap_or(false);
-                    show_toast(set_toasts, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                    show_toast(
+                        set_toasts,
+                        msg,
+                        if success {
+                            ToastKind::Success
+                        } else {
+                            ToastKind::Error
+                        },
+                    );
                 }
                 Err(e) => show_toast(set_toasts, format!("start failed: {e}"), ToastKind::Error),
             }
@@ -114,12 +132,19 @@ pub fn StatusCard(
         wasm_bindgen_futures::spawn_local(async move {
             match api::sleep_server().await {
                 Ok(resp) => {
-                    let msg = resp["message"].as_str().unwrap_or("server sleeping").to_string();
+                    let msg = resp["message"]
+                        .as_str()
+                        .unwrap_or("server sleeping")
+                        .to_string();
                     let success = resp["success"].as_bool().unwrap_or(false);
                     show_toast(
                         set_toasts,
                         msg,
-                        if success { ToastKind::Success } else { ToastKind::Error },
+                        if success {
+                            ToastKind::Success
+                        } else {
+                            ToastKind::Error
+                        },
                     );
                 }
                 Err(e) => show_toast(set_toasts, format!("sleep failed: {e}"), ToastKind::Error),
@@ -135,12 +160,19 @@ pub fn StatusCard(
         wasm_bindgen_futures::spawn_local(async move {
             match api::wake_server().await {
                 Ok(resp) => {
-                    let msg = resp["message"].as_str().unwrap_or("server woke").to_string();
+                    let msg = resp["message"]
+                        .as_str()
+                        .unwrap_or("server woke")
+                        .to_string();
                     let success = resp["success"].as_bool().unwrap_or(false);
                     show_toast(
                         set_toasts,
                         msg,
-                        if success { ToastKind::Success } else { ToastKind::Error },
+                        if success {
+                            ToastKind::Success
+                        } else {
+                            ToastKind::Error
+                        },
                     );
                 }
                 Err(e) => show_toast(set_toasts, format!("wake failed: {e}"), ToastKind::Error),

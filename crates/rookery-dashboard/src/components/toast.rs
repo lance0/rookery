@@ -16,7 +16,11 @@ pub struct Toast {
     pub kind: ToastKind,
 }
 
-pub fn show_toast(set_toasts: WriteSignal<Vec<Toast>>, message: impl Into<String>, kind: ToastKind) {
+pub fn show_toast(
+    set_toasts: WriteSignal<Vec<Toast>>,
+    message: impl Into<String>,
+    kind: ToastKind,
+) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let toast = Toast {
         id,

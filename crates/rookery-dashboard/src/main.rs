@@ -1,12 +1,12 @@
 mod api;
 mod components;
 
-use components::*;
 use components::toast::{Toast, ToastKind, show_toast};
+use components::*;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerStatus {
@@ -117,28 +117,31 @@ fn get_storage() -> Option<web_sys::Storage> {
 fn init_theme() -> bool {
     // Returns true if light mode
     if let Some(storage) = get_storage()
-        && let Ok(Some(theme)) = storage.get_item("rookery-theme") {
-            let is_light = theme == "light";
-            if is_light
-                && let Some(doc) = get_window().and_then(|w| w.document())
-                    && let Some(el) = doc.document_element() {
-                        let _ = el.class_list().add_1("light");
-                    }
-            return is_light;
+        && let Ok(Some(theme)) = storage.get_item("rookery-theme")
+    {
+        let is_light = theme == "light";
+        if is_light
+            && let Some(doc) = get_window().and_then(|w| w.document())
+            && let Some(el) = doc.document_element()
+        {
+            let _ = el.class_list().add_1("light");
         }
+        return is_light;
+    }
     false
 }
 
 fn toggle_theme(is_light: bool) -> bool {
     let new_light = !is_light;
     if let Some(doc) = get_window().and_then(|w| w.document())
-        && let Some(el) = doc.document_element() {
-            if new_light {
-                let _ = el.class_list().add_1("light");
-            } else {
-                let _ = el.class_list().remove_1("light");
-            }
+        && let Some(el) = doc.document_element()
+    {
+        if new_light {
+            let _ = el.class_list().add_1("light");
+        } else {
+            let _ = el.class_list().remove_1("light");
         }
+    }
     if let Some(storage) = get_storage() {
         let _ = storage.set_item("rookery-theme", if new_light { "light" } else { "dark" });
     }
@@ -430,9 +433,10 @@ fn App() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             loop {
                 if !auth_required_releases.get()
-                    && let Ok(data) = api::fetch_releases().await {
-                        set_releases.set(Some(data));
-                    }
+                    && let Ok(data) = api::fetch_releases().await
+                {
+                    set_releases.set(Some(data));
+                }
                 gloo_timers::future::sleep(std::time::Duration::from_secs(300)).await;
             }
         });
@@ -448,12 +452,13 @@ fn App() -> impl IntoView {
         let on_keydown = Closure::<dyn FnMut(_)>::new(move |e: web_sys::KeyboardEvent| {
             // Skip if an input/textarea is focused
             if let Some(doc) = get_window().and_then(|w| w.document())
-                && let Some(active) = doc.active_element() {
-                    let tag = active.tag_name().to_uppercase();
-                    if tag == "INPUT" || tag == "TEXTAREA" || tag == "SELECT" {
-                        return;
-                    }
+                && let Some(active) = doc.active_element()
+            {
+                let tag = active.tag_name().to_uppercase();
+                if tag == "INPUT" || tag == "TEXTAREA" || tag == "SELECT" {
+                    return;
                 }
+            }
 
             // Ignore modified chords and key-repeat.
             //
@@ -487,12 +492,26 @@ fn App() -> impl IntoView {
                             Ok(resp) => {
                                 let msg = resp["message"].as_str().unwrap_or("started").to_string();
                                 let success = resp["success"].as_bool().unwrap_or(false);
-                                show_toast(st, msg, if success { ToastKind::Success } else { ToastKind::Error });
+                                show_toast(
+                                    st,
+                                    msg,
+                                    if success {
+                                        ToastKind::Success
+                                    } else {
+                                        ToastKind::Error
+                                    },
+                                );
                             }
-                            Err(e) => show_toast(st, format!("start failed: {e}"), ToastKind::Error),
+                            Err(e) => {
+                                show_toast(st, format!("start failed: {e}"), ToastKind::Error)
+                            }
                         }
-                        if let Ok(p) = api::fetch_profiles().await { sp.set(p); }
-                        if let Ok(a) = api::fetch_agents().await { sa.set(a); }
+                        if let Ok(p) = api::fetch_profiles().await {
+                            sp.set(p);
+                        }
+                        if let Ok(a) = api::fetch_agents().await {
+                            sa.set(a);
+                        }
                     });
                 }
                 "x" => {
@@ -512,7 +531,8 @@ fn App() -> impl IntoView {
         });
 
         if let Some(doc) = get_window().and_then(|w| w.document()) {
-            let _ = doc.add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref());
+            let _ = doc
+                .add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref());
             on_keydown.forget();
         }
     }

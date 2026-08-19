@@ -1,23 +1,69 @@
-use leptos::prelude::*;
-use crate::GpuData;
 use super::Gauge;
+use crate::GpuData;
+use leptos::prelude::*;
 
 #[component]
 pub fn GpuPanel(gpu: ReadSignal<GpuData>) -> impl IntoView {
     let gpu_name = move || {
-        gpu.get().gpus.first().map(|g| g.name.clone()).unwrap_or_else(|| "—".into())
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| "—".into())
     };
 
-    let vram_used = Signal::derive(move || gpu.get().gpus.first().map(|g| g.vram_used_mb as f64).unwrap_or(0.0));
-    let vram_total = Signal::derive(move || gpu.get().gpus.first().map(|g| g.vram_total_mb as f64).unwrap_or(1.0));
-    let temp = Signal::derive(move || gpu.get().gpus.first().map(|g| g.temperature_c as f64).unwrap_or(0.0));
+    let vram_used = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.vram_used_mb as f64)
+            .unwrap_or(0.0)
+    });
+    let vram_total = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.vram_total_mb as f64)
+            .unwrap_or(1.0)
+    });
+    let temp = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.temperature_c as f64)
+            .unwrap_or(0.0)
+    });
     let temp_max = Signal::derive(move || 90.0);
-    let util = Signal::derive(move || gpu.get().gpus.first().map(|g| g.utilization_pct as f64).unwrap_or(0.0));
+    let util = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.utilization_pct as f64)
+            .unwrap_or(0.0)
+    });
     let util_max = Signal::derive(move || 100.0);
-    let power = Signal::derive(move || gpu.get().gpus.first().map(|g| g.power_watts as f64).unwrap_or(0.0));
-    let power_max = Signal::derive(move || gpu.get().gpus.first().map(|g| g.power_limit_watts as f64).unwrap_or(1.0));
+    let power = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.power_watts as f64)
+            .unwrap_or(0.0)
+    });
+    let power_max = Signal::derive(move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.power_limit_watts as f64)
+            .unwrap_or(1.0)
+    });
 
-    let processes = move || gpu.get().gpus.first().map(|g| g.processes.clone()).unwrap_or_default();
+    let processes = move || {
+        gpu.get()
+            .gpus
+            .first()
+            .map(|g| g.processes.clone())
+            .unwrap_or_default()
+    };
 
     view! {
         <div class="card">
