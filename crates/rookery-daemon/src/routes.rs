@@ -882,36 +882,111 @@ use include_dir::{Dir, include_dir};
 
 static DASHBOARD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../rookery-dashboard/dist");
 
-pub async fn get_dashboard(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() || path.starts_with("api/") {
-        "index.html"
-    } else {
-        path
-    };
+pub async fn get_dashboard(
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> impl axum::response::IntoResponse {
+    let raw = uri.path().trim_start_matches('/');
+
+    // An unmatched /api/* path is a client error, not a request for the SPA.
+    // Serving index.html with 200 meant a typo'd or renamed route came back as
+    // HTML with a success status, so callers checking response.ok proceeded and
+    // then failed on "<!doctype html>" instead of seeing "no such route".
+    if raw.starts_with("api/") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            )],
+            axum::body::Body::from(format!("{{\"error\":\"no such API route: /{raw}\"}}")),
+        )
+            .into_response();
+    }
+
+    let path = if raw.is_empty() { "index.html" } else { raw };
 
     match DASHBOARD_DIR.get_file(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
+
+            // Trunk stamps a content hash into asset filenames, so any hashed asset
+            // is immutable for the life of this URL and can skip revalidation
+            // entirely. That matters beyond bandwidth: V8 caches *compiled* wasm
+            // keyed on the URL, but a fresh 200 invalidates that cache while a 304
+            // (or a no-revalidation hit) preserves it. Without this, every dashboard
+            // reload recompiled ~900 KB of wasm from scratch.
+            let hashed = path != "index.html";
+            let cache_control = if hashed {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+
+            // index.html is not content-hashed, so give it a validator instead.
+            let etag = content_etag(file.contents());
+            if let Some(inm) = headers.get(axum::http::header::IF_NONE_MATCH)
+                && inm.to_str().map(|v| v.contains(&etag)).unwrap_or(false)
+            {
+                return (
+                    axum::http::StatusCode::NOT_MODIFIED,
+                    [
+                        (axum::http::header::ETAG, etag),
+                        (axum::http::header::CACHE_CONTROL, cache_control.to_string()),
+                    ],
+                )
+                    .into_response();
+            }
+
             (
                 axum::http::StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                [
+                    (axum::http::header::CONTENT_TYPE, mime.as_ref().to_string()),
+                    (axum::http::header::CACHE_CONTROL, cache_control.to_string()),
+                    (axum::http::header::ETAG, etag),
+                ],
                 file.contents(),
             )
                 .into_response()
         }
         None => {
-            // SPA fallback — serve index.html
-            let file = DASHBOARD_DIR.get_file("index.html").unwrap();
+            // SPA fallback — serve index.html.
+            //
+            // Not unwrap(): include_dir! compiles fine against a dist/ built without
+            // an index.html, which would turn every 404 into a panic in a request
+            // handler.
+            let Some(file) = DASHBOARD_DIR.get_file("index.html") else {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "dashboard assets not built into this binary",
+                )
+                    .into_response();
+            };
             let mime = mime_guess::from_path("index.html").first_or_octet_stream();
             (
                 axum::http::StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                [
+                    (axum::http::header::CONTENT_TYPE, mime.as_ref().to_string()),
+                    (axum::http::header::CACHE_CONTROL, "no-cache".to_string()),
+                ],
                 file.contents(),
             )
                 .into_response()
         }
     }
+}
+
+/// Strong ETag over the asset bytes.
+///
+/// Assets are embedded at compile time and never change for the life of the
+/// process, so this is stable per binary. Hashing is cheap relative to the
+/// response it saves, and only runs on the served path.
+fn content_etag(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.len().hash(&mut h);
+    bytes.hash(&mut h);
+    format!("\"{:016x}\"", h.finish())
 }
 
 use axum::response::IntoResponse;

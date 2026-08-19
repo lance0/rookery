@@ -461,6 +461,17 @@ fn App() -> impl IntoView {
                 }
             }
 
+            // Ignore modified chords and key-repeat.
+            //
+            // e.key() for Ctrl+S is plain "s", so without this the browser's
+            // save-page shortcut fired POST /api/start — and Ctrl+X stopped the
+            // server. Holding a key also repeated the action at key-repeat rate;
+            // each request serializes on the daemon's op_lock, so leaning on "x"
+            // queued a stack of stops.
+            if e.ctrl_key() || e.meta_key() || e.alt_key() || e.repeat() {
+                return;
+            }
+
             let key = e.key();
             match key.as_str() {
                 "1" => set_tab.set(Tab::Overview),

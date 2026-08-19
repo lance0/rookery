@@ -31,7 +31,15 @@ pub fn StatusCard(
 
     let state_text = move || status.get().state.clone();
     let profile_text = move || status.get().profile.clone().unwrap_or_else(|| "—".into());
-    let can_start = move || matches!(status.get().state.as_str(), "stopped" | "failed");
+    // Split on ':' the same way state_class does above. The daemon reports a
+    // failure as "failed: <error>", not a bare "failed", so matching the whole
+    // string left Start disabled in exactly the state where it is most needed.
+    let can_start = move || {
+        matches!(
+            status.get().state.split(':').next().unwrap_or("").trim(),
+            "stopped" | "failed"
+        )
+    };
     let can_stop = move || status.get().state != "stopped";
     let can_sleep = move || status.get().state == "running";
     let can_wake = move || status.get().state == "sleeping";

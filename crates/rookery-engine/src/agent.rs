@@ -1127,7 +1127,7 @@ mod tests {
 
         // Wait for exec, so this asserts a genuine mismatch rather than an
         // as-yet-unpopulated cmdline.
-        wait_for_cmdline(pid).await;
+        wait_for_cmdline(pid, "sleep").await;
 
         let cfg = config_for("/usr/bin/definitely-not-sleep");
         assert!(
@@ -1179,25 +1179,25 @@ mod tests {
         );
     }
 
-    /// Wait until `/proc/<pid>/cmdline` is populated.
+    /// Wait until `/proc/<pid>/cmdline` reports `expect`.
     ///
-    /// spawn() returns before the child has exec'd, so cmdline is briefly empty and
-    /// adoption correctly refuses to verify it. Real adoption happens after a daemon
-    /// restart, long after the process started, so tests should wait rather than
-    /// racing the exec. Without this, a "refuses mismatched cmdline" test can also
-    /// pass for the wrong reason — refused as unverifiable rather than as a mismatch.
-    async fn wait_for_cmdline(pid: u32) {
+    /// spawn() returns before the child has exec'd, and a forked-but-not-yet-exec'd
+    /// child still shows the PARENT's cmdline — here, the test binary's path. So
+    /// "wait until non-empty" is not enough: it is satisfied immediately by the
+    /// pre-exec parent cmdline, and adoption then correctly refuses because that
+    /// cmdline does not name the expected command. Poll for the actual match.
+    ///
+    /// Real adoption happens after a daemon restart, long after the agent exec'd,
+    /// so waiting here reflects production rather than papering over a race. It also
+    /// stops the "refuses mismatched cmdline" test passing for the wrong reason.
+    async fn wait_for_cmdline(pid: u32, expect: &str) {
         let ready = poll_until(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(10),
-            || {
-                std::fs::read(format!("/proc/{pid}/cmdline"))
-                    .map(|c| !c.iter().all(|&b| b == 0) && !c.is_empty())
-                    .unwrap_or(false)
-            },
+            || pid_cmdline_matches(pid, expect),
         )
         .await;
-        assert!(ready, "child never populated /proc/{pid}/cmdline");
+        assert!(ready, "child never exec'd into {expect:?} (pid {pid})");
     }
 
     /// Minimal config naming `command`. Adoption now verifies identity against
@@ -1608,7 +1608,7 @@ name = "test-agent"
         };
 
         // Adopt the PID (no child handle)
-        wait_for_cmdline(pid).await;
+        wait_for_cmdline(pid, "sleep").await;
         let cfg = config_for("sleep");
         assert!(
             manager.adopt("adopted-agent", &entry, Some(&cfg)).await,
@@ -1649,7 +1649,7 @@ name = "test-agent"
             started_at: Utc::now(),
         };
 
-        wait_for_cmdline(pid).await;
+        wait_for_cmdline(pid, "sleep").await;
         let cfg = config_for("sleep");
         assert!(manager.adopt("adopted", &entry, Some(&cfg)).await);
         assert!(manager.is_running("adopted").await);
@@ -1697,9 +1697,15 @@ name = "test-agent"
         assert!(!manager.is_running("agent-2").await);
         assert!(!manager.is_running("agent-3").await);
 
-        // Poll until all processes are dead
+        // Poll until all processes are dead.
+        //
+        // Checks raw PIDs because stop_all consumed the Child handles. That leaves a
+        // narrow PID-reuse window — tokio reaps the children it owns, so a freed PID
+        // could in principle be reissued to another test and read as alive. The
+        // window is small enough not to have been observed; if this ever goes flaky,
+        // the fix is to assert on manager state rather than on PID liveness.
         let all_dead = poll_until(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(50),
             || !is_pid_alive(info1.pid) && !is_pid_alive(info2.pid) && !is_pid_alive(info3.pid),
         )
@@ -1878,8 +1884,12 @@ name = "test-agent"
         manager.start("env-test", &config).await.unwrap();
 
         // Poll until the output file is written
+        // Generous bound: poll_until returns as soon as the condition holds, so a
+        // longer timeout costs nothing on success and only buys tolerance when the
+        // machine is loaded. 5s was tight enough to fail intermittently while the
+        // rest of the suite and a compile were competing for CPU.
         let file_written = poll_until(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(50),
             || marker_path.exists(),
         )
@@ -1916,8 +1926,12 @@ name = "test-agent"
         manager.start("workdir-test", &config).await.unwrap();
 
         // Poll until the output file is written
+        // Generous bound: poll_until returns as soon as the condition holds, so a
+        // longer timeout costs nothing on success and only buys tolerance when the
+        // machine is loaded. 5s was tight enough to fail intermittently while the
+        // rest of the suite and a compile were competing for CPU.
         let file_written = poll_until(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(50),
             || output_path.exists(),
         )
@@ -1953,7 +1967,7 @@ name = "test-agent"
             pid: adopted_pid,
             started_at: Utc::now(),
         };
-        wait_for_cmdline(adopted_pid).await;
+        wait_for_cmdline(adopted_pid, "sleep").await;
         let cfg = config_for("sleep");
         assert!(manager.adopt("adopted", &entry, Some(&cfg)).await);
 
