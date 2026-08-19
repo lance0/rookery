@@ -435,7 +435,7 @@ pub async fn post_swap(
                         let prev_errors =
                             health.as_ref().and_then(|h| h.lifetime_errors).unwrap_or(0);
                         tracing::info!(agent = %name, "restarting agent after swap");
-                        let _ = state.agent_manager.stop(name).await;
+                        let _ = state.agent_manager.stop_automated(name).await;
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         if let Err(e) = state.agent_manager.start(name, agent_config).await {
                             tracing::warn!(agent = %name, error = %e, "agent restart failed after swap, retrying");
@@ -2767,6 +2767,7 @@ mod tests {
                         restart_on_crash: false,
                         auto_start: false,
                         depends_on_port: None,
+                        stop_timeout_secs: 30,
                         version_file: None,
                         update_command: None,
                         update_workdir: None,
@@ -3695,6 +3696,7 @@ mod tests {
                         restart_on_crash: false,
                         auto_start: false,
                         depends_on_port: None,
+                        stop_timeout_secs: 30,
                         version_file: None,
                         update_command: None,
                         update_workdir: None,
@@ -3746,6 +3748,7 @@ mod tests {
                         restart_on_crash: false,
                         auto_start: false,
                         depends_on_port: None,
+                        stop_timeout_secs: 30,
                         version_file: None,
                         update_command: None,
                         update_workdir: None,
@@ -3821,6 +3824,7 @@ mod tests {
                 restart_on_crash: false,
                 auto_start: false,
                 depends_on_port: None,
+                stop_timeout_secs: 30,
                 version_file: Some(version_path.clone()),
                 update_command: Some(
                     "printf '[project]\\nname = \"hermes\"\\nversion = \"0.5.0\"\\n' > pyproject.toml && echo updated".into(),
@@ -3891,6 +3895,7 @@ mod tests {
                 restart_on_crash: false,
                 auto_start: false,
                 depends_on_port: None,
+                stop_timeout_secs: 30,
                 version_file: Some(version_path.clone()),
                 update_command: Some("echo boom >&2; exit 7".into()),
                 update_workdir: Some(agent_dir.path().to_path_buf()),
@@ -3956,6 +3961,7 @@ mod tests {
                         restart_on_crash: false,
                         auto_start: false,
                         depends_on_port: None,
+                        stop_timeout_secs: 30,
                         version_file: None,
                         update_command: None,
                         update_workdir: None,

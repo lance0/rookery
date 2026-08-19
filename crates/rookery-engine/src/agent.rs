@@ -73,6 +73,9 @@ struct ManagedAgent {
     info: AgentInfo,
     /// Whether this agent was intentionally stopped (not a crash).
     intentional_stop: bool,
+    /// Seconds to wait after SIGTERM before SIGKILL, captured from config at
+    /// start/adopt time so stop() doesn't need a config lookup.
+    stop_timeout_secs: u64,
     // Observability metrics
     total_restarts: u32,
     last_restart_reason: Option<String>,
@@ -158,6 +161,9 @@ impl AgentManager {
                 child: None,
                 info,
                 intentional_stop: false,
+                stop_timeout_secs: config
+                    .map(|c| c.stop_timeout_secs)
+                    .unwrap_or_else(rookery_core::config::default_stop_timeout_secs),
                 total_restarts: 0,
                 last_restart_reason: None,
                 last_restart_at: None,
@@ -304,6 +310,7 @@ impl AgentManager {
                 child: Some(child),
                 info: info.clone(),
                 intentional_stop: false,
+                stop_timeout_secs: config.stop_timeout_secs,
                 total_restarts: 0,
                 last_restart_reason: None,
                 last_restart_at: None,
@@ -318,7 +325,24 @@ impl AgentManager {
         Ok(info)
     }
 
+    /// Stop an agent at a user's request. Resets the crash-backoff counter,
+    /// because a human intervening is a fresh start.
     pub async fn stop(&self, name: &str) -> Result<(), AgentError> {
+        self.stop_inner(name, true).await
+    }
+
+    /// Stop an agent as part of an automated flow (fatal-error restart, port
+    /// bounce, profile swap).
+    ///
+    /// Identical to `stop` except it PRESERVES the crash-backoff counter. Using
+    /// `stop` here silently erased the exponential backoff every time an
+    /// automated path ran, so a agent failing on every startup attempt would
+    /// restart forever at a fixed interval instead of backing off.
+    pub async fn stop_automated(&self, name: &str) -> Result<(), AgentError> {
+        self.stop_inner(name, false).await
+    }
+
+    async fn stop_inner(&self, name: &str, reset_crash_count: bool) -> Result<(), AgentError> {
         let mut agents = self.agents.lock().await;
 
         let agent = agents
@@ -329,7 +353,13 @@ impl AgentManager {
         agent.intentional_stop = true;
 
         let pid = agent.info.pid;
-        tracing::info!(agent = name, pid, "stopping agent");
+        let stop_timeout = std::time::Duration::from_secs(agent.stop_timeout_secs);
+        tracing::info!(
+            agent = name,
+            pid,
+            timeout_secs = agent.stop_timeout_secs,
+            "stopping agent"
+        );
 
         if let Some(ref mut child) = agent.child {
             // Owned child — SIGTERM then wait
@@ -340,15 +370,28 @@ impl AgentManager {
                 );
             }
 
-            let wait_result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+            let wait_result = tokio::time::timeout(stop_timeout, child.wait()).await;
 
             match wait_result {
                 Ok(Ok(status)) => {
                     tracing::info!(agent = name, ?status, "agent exited");
                 }
-                _ => {
-                    tracing::warn!(agent = name, "agent did not exit in time, killing");
+                // Split so a genuine wait() failure isn't reported as a hang.
+                Ok(Err(e)) => {
+                    tracing::error!(agent = name, error = %e, "wait() on agent failed, killing");
+                    let _ = child.kill().await;
+                }
+                Err(_) => {
+                    // Treat as an incident, not routine. An agent hard-killed
+                    // mid-checkpoint is how a large SQLite WAL gets torn pages.
+                    tracing::error!(
+                        agent = name,
+                        pid,
+                        timeout_secs = agent.stop_timeout_secs,
+                        "AGENT DID NOT EXIT WITHIN GRACE PERIOD — sending SIGKILL. \
+                         If this agent writes a database, data loss is possible; \
+                         raise stop_timeout_secs for it."
+                    );
                     let _ = child.kill().await;
                 }
             }
@@ -360,18 +403,27 @@ impl AgentManager {
                 nix::sys::signal::Signal::SIGTERM,
             );
 
-            for _ in 0..10 {
+            // Poll at 500ms up to the configured grace period.
+            //
+            // Uses is_pid_alive, not /proc/<pid> existence: a process that has exited
+            // but not yet been reaped is a zombie, and /proc/<pid> still exists for it.
+            // Testing existence therefore waited out the whole grace period and then
+            // SIGKILLed a process that was already dead.
+            for _ in 0..(agent.stop_timeout_secs * 2) {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                if !is_pid_alive(pid) {
                     break;
                 }
             }
 
-            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-                tracing::warn!(
+            if is_pid_alive(pid) {
+                tracing::error!(
                     agent = name,
                     pid,
-                    "adopted agent didn't exit, sending SIGKILL"
+                    timeout_secs = agent.stop_timeout_secs,
+                    "ADOPTED AGENT DID NOT EXIT WITHIN GRACE PERIOD — sending SIGKILL. \
+                     If this agent writes a database, data loss is possible; \
+                     raise stop_timeout_secs for it."
                 );
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
@@ -383,8 +435,11 @@ impl AgentManager {
         agents.remove(name);
         self.persist_state(&agents);
 
-        // Reset crash count on intentional stop
-        self.crash_counts.lock().await.remove(name);
+        // Only a user-initiated stop clears the backoff. Automated paths must not,
+        // or an agent that fails on every start restarts forever at a fixed rate.
+        if reset_crash_count {
+            self.crash_counts.lock().await.remove(name);
+        }
 
         Ok(())
     }
@@ -644,9 +699,23 @@ impl AgentManager {
                                     let agents = manager.agents.lock().await;
                                     agents.get(&agent_name).map(|a| (a.total_restarts, a.lifetime_errors + a.error_count.load(Ordering::Relaxed))).unwrap_or((0, 0))
                                 };
-                                let _ = manager.stop(&agent_name).await;
+                                let _ = manager.stop_automated(&agent_name).await;
                                 if manager.is_shutting_down() { return; }
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                // Share the crash path's exponential backoff. Previously this
+                                // slept a flat 2s with no counter, so an agent emitting a
+                                // matching pattern on every startup (a wedged network, say)
+                                // restarted every ~2.3s indefinitely — a full agent boot and
+                                // a large SQLite open each time. systemd's StartLimit does not
+                                // cover this, because rookeryd itself never exits.
+                                let crash_count = {
+                                    let mut counts = manager.crash_counts.lock().await;
+                                    let c = counts.entry(agent_name.clone()).or_insert(0);
+                                    *c += 1;
+                                    *c
+                                };
+                                let backoff = (1u64 << (crash_count - 1).min(6)).min(MAX_BACKOFF_SECS);
+                                tracing::info!(agent = %agent_name, crash_count, backoff_secs = backoff, "backing off before pattern restart");
+                                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                                 if manager.is_shutting_down() { return; }
                                 match manager.start(&agent_name, cfg).await {
                                     Ok(info) => {
@@ -737,7 +806,7 @@ impl AgentManager {
                                     agent = %name,
                                     "bouncing agent after dependency port recovered"
                                 );
-                                let _ = manager.stop(&name).await;
+                                let _ = manager.stop_automated(&name).await;
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 if manager.is_shutting_down() {
                                     return;
@@ -1051,6 +1120,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1082,6 +1152,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1109,6 +1180,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1145,6 +1217,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1182,6 +1255,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1216,6 +1290,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1254,6 +1329,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,
@@ -1321,6 +1397,7 @@ name = "test-agent"
             restart_on_swap: false,
             restart_on_crash: false,
             depends_on_port: None,
+            stop_timeout_secs: 30,
             version_file: None,
             update_command: None,
             update_workdir: None,

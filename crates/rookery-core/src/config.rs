@@ -398,6 +398,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub depends_on_port: Option<u16>,
 
+    /// Seconds to wait after SIGTERM before escalating to SIGKILL.
+    ///
+    /// The default is deliberately generous: agents commonly checkpoint a large
+    /// SQLite WAL on shutdown, and hard-killing mid-checkpoint is how torn pages
+    /// happen. Raise it further for an agent with heavy teardown.
+    #[serde(default = "default_stop_timeout_secs")]
+    pub stop_timeout_secs: u64,
+
     /// Path to a pyproject.toml or Cargo.toml to extract the agent's version.
     #[serde(default)]
     pub version_file: Option<PathBuf>,
@@ -444,6 +452,9 @@ fn default_cache_type() -> String {
 }
 fn default_true() -> bool {
     true
+}
+pub fn default_stop_timeout_secs() -> u64 {
+    30
 }
 fn default_temp() -> f32 {
     0.7
