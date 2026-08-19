@@ -444,7 +444,7 @@ impl AgentManager {
         // Check each agent's actual status but do NOT remove dead agents —
         // the watchdog is responsible for detecting dead agents and restarting them.
         // Removing them here races with the watchdog and prevents crash recovery.
-        for (_name, agent) in agents.iter_mut() {
+        for agent in agents.values_mut() {
             let alive = match &mut agent.child {
                 Some(child) => matches!(child.try_wait(), Ok(None)),
                 None => is_pid_alive(agent.info.pid),

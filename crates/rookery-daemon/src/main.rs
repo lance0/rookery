@@ -34,6 +34,29 @@ async fn reconciled_backend_alive(
     }
 }
 
+/// Log timestamps in local time so they line up with journald's own prefix.
+///
+/// journald stamps each line in local time while tracing's default timer emits
+/// UTC, so every rookeryd log line carried two clocks four hours apart -- and
+/// across midnight the dates disagreed too, which made correlating an incident
+/// needlessly painful.
+///
+/// Uses chrono rather than tracing_subscriber::fmt::time::LocalTime: that one is
+/// backed by the `time` crate, which refuses to read the local UTC offset from a
+/// multithreaded process (soundness), and #[tokio::main] has already started the
+/// runtime by the time this initializes. chrono has no such restriction.
+struct LocalTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f%:z")
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Handle --version / -V before initializing anything
@@ -48,6 +71,7 @@ async fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "rookery=info".parse().unwrap()),
         )
+        .with_timer(LocalTimer)
         .init();
 
     let config = match Config::load() {

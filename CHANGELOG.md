@@ -1,5 +1,53 @@
 # Changelog
 
+> Version numbering note: releases ran 0.1.0 → 0.4.0 in March 2026, then renumbered to
+> the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
+> predate that change and are left as originally published.
+
+## 0.1.6 — unreleased
+
+Deployment and log-correlation fixes. No behavioural change to inference or agent management.
+
+### Fixed
+- **Log in local time** — journald prefixes each line in local time while tracing's default
+  timer emitted UTC, so every `rookeryd` line carried two clocks four hours apart, and across
+  midnight the *dates* disagreed. Adds a `LocalTimer` `FormatTime` impl backed by `chrono::Local`.
+  chrono deliberately, not `tracing_subscriber::fmt::time::LocalTime`: the latter is backed by
+  the `time` crate, which refuses to read the local UTC offset from a multithreaded process, and
+  `#[tokio::main]` has already started the runtime by the time the subscriber initializes.
+- **`make install` no longer writes over a live binary in place** — installs to a `.new`
+  temp and `mv -f`s it into place. `mv` within a filesystem is an atomic `rename(2)`, so the
+  path is never absent or partial and a running daemon keeps its old inode. The previous
+  in-place `install` would fail with `ETXTBSY` against a running daemon.
+
+### Changed
+- **`rookery.service` caps restart thrashing** — `StartLimitIntervalSec=300` /
+  `StartLimitBurst=5`. Previously inherited systemd's defaults (10s/5). Every restart cycle
+  churns managed agents, so a unit that stops loudly beats one that loops.
+
+## 0.1.5 — 2026-08-11
+
+Dependency maintenance.
+
+### Changed
+- Bumped the `rust-deps` group (6 updates)
+- Migrated to the rand 0.9 API — `rand::Fill` replaces `RngCore`
+
+## 0.1.4 — 2026-08-04
+
+CUDA crash-loop recovery. A CUDA fault used to leave the daemon restarting a backend into the
+same broken GPU state; this release makes it drain, cool down, and verify identity first.
+
+### Fixed
+- **CUDA crash loop** — drain on error and enforce a GPU cooldown before restart
+- **Canary draining** — distinguish a genuine CUDA error from an in-progress swap drain, and
+  skip the canary inference check entirely while server slots are busy
+- **CUDA error races** — PID verification before acting on an error signal, and an atomic
+  drain check; error signals raised during an active swap or drain are ignored
+
+### Changed
+- CUDA error channel is now daemon-scoped, with structured backend identity checks
+
 ## 0.1.3 — 2026-04-03
 
 Upstream release monitoring.

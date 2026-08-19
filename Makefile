@@ -18,8 +18,13 @@ dashboard:
 install: build
 	install -d $(DESTDIR)$(BINDIR)
 	install -d $(DESTDIR)$(SYSTEMD_DIR)
-	install -m 755 target/release/rookeryd $(DESTDIR)$(BINDIR)/rookeryd
-	install -m 755 target/release/rookery $(DESTDIR)$(BINDIR)/rookery
+	@# Install via temp + rename: mv(1) within a filesystem is an atomic rename(2),
+	@# so the path is never absent or partial and a running daemon keeps its old
+	@# inode. Writing over the live binary in place would fail with ETXTBSY.
+	install -m 755 target/release/rookeryd $(DESTDIR)$(BINDIR)/rookeryd.new
+	mv -f $(DESTDIR)$(BINDIR)/rookeryd.new $(DESTDIR)$(BINDIR)/rookeryd
+	install -m 755 target/release/rookery $(DESTDIR)$(BINDIR)/rookery.new
+	mv -f $(DESTDIR)$(BINDIR)/rookery.new $(DESTDIR)$(BINDIR)/rookery
 	@echo "Installed rookeryd and rookery to $(BINDIR)"
 	@# Generate systemd unit from template
 	@sed \

@@ -1,6 +1,10 @@
 [Unit]
 Description=Rookery Inference Daemon
 After=network.target nvidia-persistenced.service
+# Stop rather than loop forever if the daemon can't start. Every restart cycle
+# churns managed agents, so an unbounded loop is worse than a failed unit.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
