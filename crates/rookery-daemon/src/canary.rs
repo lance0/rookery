@@ -105,8 +105,27 @@ async fn run_canary_check_inner(
             return false;
         }
 
+        // A user request can land in the gap after the /slots poll above, and
+        // with `--parallel 1` it holds the only slot for the whole generation.
+        // Re-check before the retry and again before the restart, so a request
+        // that arrived during the canary's own timeout window is not killed.
+        // `check_slots_busy` returns false when /slots is unreachable or errors,
+        // so a wedged server still falls through and restarts.
+        if rookery_engine::health::check_slots_busy(port, CANARY_TIMEOUT).await {
+            tracing::debug!(port, "inference canary retry skipped: all slots busy");
+            return false;
+        }
+
         if rookery_engine::health::check_inference(port, CANARY_TIMEOUT).await {
             tracing::info!(port, "inference canary passed on retry");
+            return false;
+        }
+
+        if rookery_engine::health::check_slots_busy(port, CANARY_TIMEOUT).await {
+            tracing::warn!(
+                port,
+                "inference canary failed twice but all slots busy, skipping restart"
+            );
             return false;
         }
     }
@@ -270,6 +289,34 @@ mod tests {
                             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
                         }))
                     }),
+                );
+
+            Self::start_with_router(app).await
+        }
+
+        /// Start a mock server whose inference endpoint always fails and whose
+        /// `/slots` reports the single slot idle for the first `busy_after`
+        /// polls, then busy — i.e. a user request lands mid-canary.
+        async fn slots_busy_after(busy_after: u32) -> Self {
+            let polls = Arc::new(AtomicU32::new(0));
+            let app = axum::Router::new()
+                .route(
+                    "/health",
+                    get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+                )
+                .route(
+                    "/slots",
+                    get(move || {
+                        let polls = polls.clone();
+                        async move {
+                            let busy = polls.fetch_add(1, Ordering::SeqCst) >= busy_after;
+                            axum::Json(serde_json::json!([{"id": 0, "is_processing": busy}]))
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/chat/completions",
+                    post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
                 );
 
             Self::start_with_router(app).await
@@ -828,6 +875,30 @@ mod tests {
         // run_canary_check operates through AppState's boxed InferenceBackend.
         let restarted = run_canary_check(&state, None).await;
         assert!(!restarted, "healthy backend via trait should not restart");
+
+        server.shutdown().await;
+    }
+
+    // === Test 12: Two inference failures do NOT restart if the slot went busy
+    // A user request lands after the pre-check poll and holds the only slot
+    // (`--parallel 1`), so both canary requests queue behind it and "fail".
+    // Idle for polls 0 and 1 (pre-check, pre-retry), busy on poll 2 — the
+    // guard before the restart decision must catch it.
+    #[tokio::test]
+    async fn test_canary_skips_restart_when_slots_busy() {
+        let server = MockHttpServer::slots_busy_after(2).await;
+        let port = server.port();
+
+        let (_dir, state) =
+            build_canary_state(Box::new(CanaryMockBackend::new(port)), test_config(port)).await;
+
+        let restarted = run_canary_check(&state, None).await;
+
+        assert!(
+            !restarted,
+            "busy slot must not be SIGTERMed mid-generation by the canary"
+        );
+        assert!(state.current_state().await.is_running());
 
         server.shutdown().await;
     }
