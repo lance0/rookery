@@ -193,7 +193,14 @@ update_command = "/path/to/agent update"
 update_workdir = "/path/to/agent/repo"
 restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 stop_timeout_secs = 30
+data_dir = "/path/to/agent/data"
 ```
+
+`data_dir` points at the agent's SQLite databases. It is scanned one level deep
+for `*.db` and checked nightly with a read-only `PRAGMA quick_check`; findings
+are logged and exported as `rookery_agent_db_corrupt`, and never restart the
+agent. It is separate from `workdir` because `workdir` also sets the agent
+process's cwd. Falls back to `workdir`; omit both to disable the check.
 
 `stop_timeout_secs` is how long the daemon waits after `SIGTERM` before escalating
 to `SIGKILL`. Default is 30 seconds. Raise it for an agent with heavy shutdown

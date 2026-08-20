@@ -2881,6 +2881,7 @@ mod tests {
                         update_command: None,
                         update_workdir: None,
                         restart_on_error_patterns: vec![],
+                        data_dir: None,
                     },
                 );
             }
@@ -3938,6 +3939,7 @@ mod tests {
                         update_command: None,
                         update_workdir: None,
                         restart_on_error_patterns: vec![],
+                        data_dir: None,
                     },
                 );
             }
@@ -3990,6 +3992,7 @@ mod tests {
                         update_command: None,
                         update_workdir: None,
                         restart_on_error_patterns: vec![],
+                        data_dir: None,
                     },
                 );
             }
@@ -4068,6 +4071,7 @@ mod tests {
                 ),
                 update_workdir: Some(agent_dir.path().to_path_buf()),
                 restart_on_error_patterns: vec![],
+                data_dir: None,
             };
 
             {
@@ -4137,6 +4141,7 @@ mod tests {
                 update_command: Some("echo boom >&2; exit 7".into()),
                 update_workdir: Some(agent_dir.path().to_path_buf()),
                 restart_on_error_patterns: vec![],
+                data_dir: None,
             };
 
             {
@@ -4203,6 +4208,7 @@ mod tests {
                         update_command: None,
                         update_workdir: None,
                         restart_on_error_patterns: vec![],
+                        data_dir: None,
                     },
                 );
             }

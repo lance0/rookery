@@ -19,6 +19,7 @@ restart_on_error_patterns = [        # immediate restart on these stderr pattern
     "ConnectionError",
     "ReadTimeout"
 ]
+data_dir = "/path/to/agent/data"     # SQLite databases to integrity-check nightly
 ```
 
 ## Agent Lifecycle
@@ -131,6 +132,46 @@ When the daemon restarts and finds adopted agents from a previous session, it bo
 
 A background task sends a minimal completion request to the inference server every 60 seconds. If the server fails to respond (CUDA zombie state), it auto-restarts. This is separate from agent management but keeps the server healthy for agents to use.
 
+### Database Integrity (data_dir)
+
+Agents that keep state in SQLite can have it silently corrupted and carry on
+serving for weeks, because the damage only surfaces when a write happens to
+traverse a bad page. Set `data_dir` and the watchdog runs a read-only
+`PRAGMA quick_check` over that agent's databases once a day, shortly after 04:00
+local time.
+
+```toml
+data_dir = "/home/lance/.hermes"
+```
+
+The directory and its immediate subdirectories are scanned for `*.db`, which
+picks up both `state.db` and a nested `cron/executions.db` while leaving deeper
+backup trees alone. `-wal`/`-shm` sidecars are covered by checking the database
+they belong to. If `data_dir` is unset it falls back to `workdir`; with neither
+set the agent is not checked.
+
+The check is deliberately conservative:
+
+- **Read-only.** The database is opened `SQLITE_OPEN_READONLY`, in a `sqlite3`
+  subprocess. It cannot write, and it cannot lock out the agent — WAL readers do
+  not block the writer. Opening read-write would checkpoint the WAL into the main
+  file and delete the sidecars out from under a live agent, which is exactly the
+  write this must never perform.
+- **Reports, never acts.** A corrupt database does *not* stop or restart the
+  agent. Restarting is the worst possible response: the first thing a restart
+  does is reopen and write to the damaged file. Findings go to `tracing` at
+  `error` level and to the log buffer under the agent's own `[agent:name]`
+  prefix, so they appear in `rookery logs` alongside a crash.
+- **Degrades loudly.** If `sqlite3` is not installed, or a file cannot be read,
+  that is reported as *unchecked* — never as healthy, and never as corrupt.
+
+`quick_check` rather than a cheaper query, because **no ordinary query is an
+integrity signal**. On a real corrupted `state.db`, `count(*)` returned 25,654
+rows while `max(id)` failed outright — the count came out of an index without
+ever touching the damaged leaf pages. The reverse happens just as easily. Only a
+full page traversal is evidence. `quick_check` skips `integrity_check`'s
+index-versus-table cross-checks and measures ~2s on a 392 MB database.
+
 ## Observability
 
 ### Metrics
@@ -140,6 +181,13 @@ Each agent tracks:
 - **lifetime_errors** — accumulated errors across all restarts
 - **total_restarts** — number of times the agent has been restarted
 - **last_restart_reason** — "crash", "swap", "port_recovery", "daemon_restart", "error_pattern"
+
+Exported per agent on `/metrics`:
+- **rookery_agent_db_corrupt** — databases found corrupt by `quick_check`
+- **rookery_agent_db_unchecked** — databases the check could not read
+- **rookery_agent_db_last_check_timestamp** — when the sweep last completed.
+  Alert on staleness as well as on failures: a check that stopped running looks
+  exactly like a clean bill of health.
 
 ### Dashboard
 

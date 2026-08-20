@@ -422,6 +422,17 @@ pub struct AgentConfig {
     /// Example: ["telegram.error.TimedOut", "ReadTimeout", "CLOSE_WAIT"]
     #[serde(default)]
     pub restart_on_error_patterns: Vec<String>,
+
+    /// Directory holding this agent's SQLite databases. Scanned (one level deep)
+    /// for `*.db` by the nightly `PRAGMA quick_check`. Falls back to `workdir`;
+    /// when neither is set the agent is simply not checked.
+    ///
+    /// Separate from `workdir` because `workdir` also sets the agent process's
+    /// cwd — an agent that stores its databases somewhere other than where it
+    /// runs (Hermes runs from anywhere and writes to `~/.hermes`) should not
+    /// have to be relocated to get checked.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────

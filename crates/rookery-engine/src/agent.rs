@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use rookery_core::config::AgentConfig;
 use rookery_core::state::{AgentEntry, AgentPersistence, AgentState};
 use serde::Serialize;
@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use crate::integrity::{self, SQLITE3};
 use crate::logs::LogBuffer;
 use crate::process::is_pid_alive;
 use std::sync::Arc;
@@ -149,6 +150,23 @@ pub struct AgentManager {
     dependency_bounce_suppressed: AtomicBool,
     /// Dependency port liveness, shared between watchdog and health queries.
     port_status: Mutex<HashMap<u16, bool>>,
+    /// Nightly SQLite integrity results per agent, read by the metrics endpoint.
+    db_integrity: Mutex<HashMap<String, DbIntegrity>>,
+}
+
+/// What the metrics endpoint needs to know about an agent's database health.
+///
+/// `last_check_ts` matters as much as `failures`: a check that quietly stopped
+/// running looks identical to a clean bill of health, which is the exact failure
+/// mode that let the 2026-08-15 corruption sit undetected for weeks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DbIntegrity {
+    /// Cumulative databases found corrupt across all sweeps.
+    pub failures: u64,
+    /// Cumulative databases that could not be checked at all.
+    pub unchecked: u64,
+    /// Unix timestamp of the last completed sweep, 0 if never.
+    pub last_check_ts: i64,
 }
 
 impl AgentManager {
@@ -169,7 +187,35 @@ impl AgentManager {
             dependency_bounce_suppressed: AtomicBool::new(false),
             crash_counts: Mutex::new(HashMap::new()),
             port_status: Mutex::new(HashMap::new()),
+            db_integrity: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Run `PRAGMA quick_check` over every database belonging to `name`.
+    ///
+    /// Read-only, in a subprocess, and purely advisory — see
+    /// [`crate::integrity`]. Returns the number of corrupt databases found.
+    pub async fn check_agent_databases(&self, name: &str, config: &AgentConfig) -> usize {
+        let Some(root) = config.data_dir.as_ref().or(config.workdir.as_ref()) else {
+            tracing::debug!(
+                agent = name,
+                "no data_dir or workdir configured — skipping sqlite integrity check"
+            );
+            return 0;
+        };
+
+        let result = integrity::sweep(&self.log_buffer, name, root, SQLITE3).await;
+
+        let mut all = self.db_integrity.lock().await;
+        let entry = all.entry(name.to_string()).or_default();
+        entry.failures += result.corrupt as u64;
+        entry.unchecked += result.unchecked as u64;
+        entry.last_check_ts = Utc::now().timestamp();
+        result.corrupt
+    }
+
+    pub async fn db_integrity(&self, name: &str) -> Option<DbIntegrity> {
+        self.db_integrity.lock().await.get(name).copied()
     }
 
     pub fn set_dependency_bounce_suppressed(&self, suppressed: bool) {
@@ -734,8 +780,16 @@ impl AgentManager {
             const MAX_BACKOFF_SECS: u64 = 60;
             const HEALTHY_RESET_SECS: u64 = 300; // reset backoff after 5min uptime
             const BOUNCE_MIN_UPTIME_SECS: i64 = 60; // skip freshly-started agents
+            const INTEGRITY_HOUR: u32 = 4; // local-time hour for the nightly sqlite sweep
 
             let mut fatal_rx = manager.fatal_error_rx.clone();
+
+            // Date of the last sqlite integrity sweep, so it runs once per local
+            // day. Starts as None, so a daemon that comes up after INTEGRITY_HOUR
+            // sweeps on its first poll rather than skipping a day — the sweep is
+            // read-only and measured at ~2s for a 392 MB file, so an extra one
+            // after a restart is cheaper than a missed one.
+            let mut last_integrity_sweep: Option<chrono::NaiveDate> = None;
 
             // Track dependency port liveness for down→up transition detection.
             // Initialized to true so a cold start doesn't trigger a false bounce.
@@ -815,6 +869,31 @@ impl AgentManager {
                         // mid-SQLite-open. Observed 32 times in production since April.
                         fatal_rx.borrow_and_update();
                         continue;
+                    }
+                }
+
+                // Nightly SQLite integrity sweep, once per local day at INTEGRITY_HOUR.
+                //
+                // Spawned rather than awaited inline: a sweep is bounded but not
+                // instant, and the watchdog is the only thing noticing crashes —
+                // it must not go deaf for the duration. Results still reach
+                // tracing and the agent log buffer from inside the task, so
+                // nothing dies silently in the background.
+                {
+                    let now = chrono::Local::now();
+                    let today = now.date_naive();
+                    if now.hour() >= INTEGRITY_HOUR && last_integrity_sweep != Some(today) {
+                        last_integrity_sweep = Some(today);
+                        let manager = Arc::clone(&manager);
+                        let configs = Arc::clone(&configs);
+                        tokio::spawn(async move {
+                            for (name, cfg) in configs.iter() {
+                                if manager.is_shutting_down() {
+                                    return;
+                                }
+                                manager.check_agent_databases(name, cfg).await;
+                            }
+                        });
                     }
                 }
 
@@ -1222,6 +1301,7 @@ mod tests {
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         }
     }
 
@@ -1313,6 +1393,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         };
 
         // Start
@@ -1345,6 +1426,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         };
 
         manager.start("test", &config).await.unwrap();
@@ -1373,6 +1455,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         };
 
         manager.start("test", &config).await.unwrap();
@@ -1454,6 +1537,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         };
 
         let info = manager.start("test", &config).await.unwrap();
@@ -1492,6 +1576,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         };
 
         manager.start("test", &config).await.unwrap();
@@ -1527,6 +1612,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
+            data_dir: None,
         };
 
         manager.start("test", &config).await.unwrap();
@@ -1566,6 +1652,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec!["telegram.error.TimedOut".to_string()],
+            data_dir: None,
         };
 
         manager.start("test", &config).await.unwrap();
@@ -1634,6 +1721,7 @@ name = "test-agent"
             update_command: None,
             update_workdir: None,
             restart_on_error_patterns: vec![],
+            data_dir: None,
         }
     }
 
