@@ -313,8 +313,26 @@ pub struct SwapRequest {
 pub async fn post_swap(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwapRequest>,
-) -> Result<Json<ActionResponse>, StatusCode> {
+) -> Result<Json<ActionResponse>, (StatusCode, Json<serde_json::Value>)> {
     let _op_guard = state.op_lock.lock().await;
+
+    // Validate the target profile BEFORE any teardown. A typo'd name used to
+    // drain and stop the running server first and only fail at the lookup
+    // below, taking the model down for nothing.
+    {
+        let config = state.config.read().await;
+        if !config.profiles.contains_key(&req.profile) {
+            let mut known: Vec<&String> = config.profiles.keys().collect();
+            known.sort();
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("no such profile: {}", req.profile),
+                    "profiles": known,
+                })),
+            ));
+        }
+    }
 
     let old_profile = state
         .current_state()
@@ -470,7 +488,10 @@ pub async fn post_swap(
         }
         Err(e) => {
             tracing::error!(error = %e, "swap failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            ))
         }
     }
 }
@@ -3411,6 +3432,55 @@ mod tests {
             // so post_chat doesn't permanently return 503
             let is_draining = state.backend.lock().await.is_draining();
             assert!(!is_draining, "drain flag must be cleared after failed swap");
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 12b. POST /api/swap with an unknown profile → 404, server untouched ---
+        //
+        // Regression test for the ordering bug: the profile lookup used to run
+        // AFTER the drain/stop, so a typo'd name tore down a live server and
+        // then reported 500. Validation now happens before any teardown.
+        #[tokio::test]
+        async fn test_route_swap_unknown_profile_leaves_server_running() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
+
+            let app = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/swap")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"tset"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "unknown profile should be 404, not 500"
+            );
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                json["error"].as_str().unwrap_or_default().contains("tset"),
+                "404 body should name the unknown profile, got: {json}"
+            );
+
+            // The whole point: a typo must not take the model down.
+            assert!(
+                state.backend.lock().await.is_running().await,
+                "running server must survive a swap to an unknown profile"
+            );
+            assert!(
+                !state.backend.lock().await.is_draining(),
+                "rejected swap must not leave the backend draining"
+            );
 
             let _ = shutdown_tx.send(());
         }

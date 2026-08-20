@@ -26,7 +26,9 @@ impl DaemonClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ClientError::Status(resp.status().as_u16()));
+            let status = resp.status().as_u16();
+            let body = resp.text().await.ok();
+            return Err(ClientError::Status { status, body });
         }
 
         resp.json()
@@ -48,7 +50,9 @@ impl DaemonClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ClientError::Status(resp.status().as_u16()));
+            let status = resp.status().as_u16();
+            let body = resp.text().await.ok();
+            return Err(ClientError::Status { status, body });
         }
 
         resp.json()
@@ -86,8 +90,8 @@ pub enum ClientError {
     #[error("connection failed: {0} (is rookeryd running?)")]
     Connection(String),
 
-    #[error("server returned status {0}")]
-    Status(u16),
+    #[error("server returned status {status}{}", body.as_deref().map(str::trim).filter(|b| !b.is_empty()).map_or(String::new(), |b| format!(": {b}")))]
+    Status { status: u16, body: Option<String> },
 
     #[error("response parse error: {0}")]
     Parse(String),
