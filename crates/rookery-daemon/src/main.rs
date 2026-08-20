@@ -83,6 +83,15 @@ async fn main() {
         }
     };
 
+    // Refuse to boot on a config the CLI would reject. Without this a bogus
+    // default_profile silently started whichever profile HashMap iteration
+    // happened to yield first.
+    if let Err(e) = config.validate() {
+        eprintln!("invalid config: {e}");
+        eprintln!("config path: {}", Config::config_path().display());
+        std::process::exit(1);
+    }
+
     let listen = config.listen;
 
     // Init GPU monitor (non-fatal if NVML unavailable)

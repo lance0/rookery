@@ -507,12 +507,54 @@ impl Config {
             }
         }
 
+        // Structural checks on each model. resolve_llama_server_command_line()
+        // matches on `source` and silently emits no model argument at all when it
+        // doesn't recognise it (or when repo/file/path are missing), so a typo like
+        // source = "HF" used to validate clean and then fail inside llama.cpp with
+        // an opaque error. Fields only — no path.exists(), because an HF cache
+        // populates on first start and model dirs can be lazily mounted.
+        for (name, model) in &self.models {
+            match model.source.as_str() {
+                "local" => {
+                    if model.path.is_none() {
+                        return Err(Error::ConfigValidation(format!(
+                            "model '{name}': source = \"local\" requires `path`"
+                        )));
+                    }
+                }
+                "hf" => {
+                    if model.repo.is_none() {
+                        return Err(Error::ConfigValidation(format!(
+                            "model '{name}': source = \"hf\" requires `repo`"
+                        )));
+                    }
+                }
+                other => {
+                    return Err(Error::ConfigValidation(format!(
+                        "model '{name}': unknown source '{other}' — must be \"hf\" or \"local\""
+                    )));
+                }
+            }
+        }
+
         for (name, profile) in &self.profiles {
-            if !self.models.contains_key(&profile.model) {
+            let Some(model) = self.models.get(&profile.model) else {
                 return Err(Error::InvalidModelRef {
                     profile: name.clone(),
                     model: profile.model.clone(),
                 });
+            };
+
+            // llama-server needs `-hf <repo>:<file>`; vLLM takes the bare repo and
+            // has no file, so `file` is only required on the llama-server side.
+            if profile.backend_type() == BackendType::LlamaServer
+                && model.source == "hf"
+                && model.file.is_none()
+            {
+                return Err(Error::ConfigValidation(format!(
+                    "profile '{name}': model '{}' has source = \"hf\" but no `file` — llama-server needs `-hf <repo>:<file>`",
+                    profile.model
+                )));
             }
 
             // Reject profiles with both sub-tables
@@ -979,6 +1021,130 @@ docker_image = "vllm/vllm-openai:latest"
 
         // Should validate without error
         config.validate().unwrap();
+    }
+
+    // A llama-server config whose only defect is the model stanza. The binary
+    // check runs first, so tests need a llama_server path that really exists.
+    fn llama_config_with_model(bin: &std::path::Path, model_stanza: &str) -> Config {
+        toml::from_str(&format!(
+            r#"
+llama_server = "{}"
+default_profile = "fast"
+
+{model_stanza}
+
+[profiles.fast]
+model = "m"
+port = 8081
+ctx_size = 4096
+"#,
+            bin.display()
+        ))
+        .unwrap()
+    }
+
+    // A `source` typo used to validate clean and then produce a llama-server
+    // command line with no model argument at all.
+    #[test]
+    fn test_config_validate_rejects_unknown_model_source() {
+        let bin = tempfile::NamedTempFile::new().unwrap();
+        let config = llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "HF"
+repo = "test/model"
+file = "Q4_K_M.gguf"
+"#,
+        );
+        let msg = config.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("model 'm'") && msg.contains("unknown source 'HF'"),
+            "should name the model and the bad source: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_local_model_without_path() {
+        let bin = tempfile::NamedTempFile::new().unwrap();
+        let config = llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "local"
+"#,
+        );
+        let msg = config.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("model 'm'") && msg.contains("`path`"),
+            "should name the model and the missing field: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_hf_model_without_repo() {
+        let bin = tempfile::NamedTempFile::new().unwrap();
+        let config = llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "hf"
+file = "Q4_K_M.gguf"
+"#,
+        );
+        let msg = config.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("model 'm'") && msg.contains("`repo`"),
+            "should name the model and the missing field: {msg}"
+        );
+    }
+
+    // `file` is required only where it is actually used: `-hf <repo>:<file>`.
+    // The vLLM counterpart is test_config_vllm_model_hf_repo_no_file above.
+    #[test]
+    fn test_config_validate_rejects_hf_model_without_file_for_llama_profile() {
+        let bin = tempfile::NamedTempFile::new().unwrap();
+        let config = llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "hf"
+repo = "test/model"
+"#,
+        );
+        let msg = config.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("profile 'fast'") && msg.contains("`file`"),
+            "should name the profile and the missing field: {msg}"
+        );
+    }
+
+    // Guard against over-rejection: the shapes the live config actually uses.
+    #[test]
+    fn test_config_validate_accepts_local_path_and_hf_repo_file() {
+        let bin = tempfile::NamedTempFile::new().unwrap();
+        llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "local"
+path = "/models/does-not-need-to-exist.gguf"
+"#,
+        )
+        .validate()
+        .unwrap();
+
+        llama_config_with_model(
+            bin.path(),
+            r#"
+[models.m]
+source = "hf"
+repo = "unsloth/Qwen3.5-35B-A3B-GGUF"
+file = "UD-Q4_K_XL"
+"#,
+        )
+        .validate()
+        .unwrap();
     }
 
     // Validation rejects profile with both backend sub-tables
