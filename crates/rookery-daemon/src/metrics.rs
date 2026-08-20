@@ -187,6 +187,9 @@ pub async fn encode_metrics(state: &AppState) -> String {
     let agent_restarts = Family::<AgentLabels, Counter<u64, AtomicU64>>::default();
     let agent_errors = Family::<AgentLabels, Counter<u64, AtomicU64>>::default();
     let agent_lifetime_errors = Family::<AgentLabels, Counter<u64, AtomicU64>>::default();
+    let agent_db_corrupt = Family::<AgentLabels, Counter<u64, AtomicU64>>::default();
+    let agent_db_unchecked = Family::<AgentLabels, Counter<u64, AtomicU64>>::default();
+    let agent_db_last_check_timestamp = Family::<AgentLabels, Gauge<u64, AtomicU64>>::default();
 
     let chat_requests = Counter::<u64, AtomicU64>::default();
     let chat_errors = Counter::<u64, AtomicU64>::default();
@@ -306,6 +309,16 @@ pub async fn encode_metrics(state: &AppState) -> String {
         } else {
             agent_up.get_or_create(&labels).set(0);
         }
+
+        if let Some(db) = state.agent_manager.db_integrity(&name).await {
+            agent_db_corrupt.get_or_create(&labels).inc_by(db.failures);
+            agent_db_unchecked
+                .get_or_create(&labels)
+                .inc_by(db.unchecked);
+            agent_db_last_check_timestamp
+                .get_or_create(&labels)
+                .set(db.last_check_ts.max(0) as u64);
+        }
     }
 
     registry.register(
@@ -388,6 +401,22 @@ pub async fn encode_metrics(state: &AppState) -> String {
         "rookery_agent_lifetime_errors",
         "Total lifetime agent errors.",
         agent_lifetime_errors,
+    );
+    registry.register(
+        "rookery_agent_db_corrupt",
+        "Agent SQLite databases found corrupt by PRAGMA quick_check.",
+        agent_db_corrupt,
+    );
+    registry.register(
+        "rookery_agent_db_unchecked",
+        "Agent SQLite databases the integrity check could not read. Not a clean bill of health.",
+        agent_db_unchecked,
+    );
+    registry.register(
+        "rookery_agent_db_last_check_timestamp",
+        "Unix timestamp of the last SQLite integrity sweep for an agent. Staleness here means \
+         the check stopped running, which looks identical to healthy.",
+        agent_db_last_check_timestamp,
     );
     registry.register(
         "rookery_chat_requests",

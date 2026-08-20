@@ -136,3 +136,9 @@ version_file = "/path/to/agent/pyproject.toml"
 update_command = "/path/to/agent update"
 update_workdir = "/path/to/agent/repo"
 restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
+
+# Where this agent keeps its SQLite databases. Scanned one level deep for *.db
+# and checked nightly with a read-only PRAGMA quick_check; findings are logged
+# and exported as rookery_agent_db_corrupt, and never restart the agent.
+# Falls back to `workdir`; omit both to disable the check for this agent.
+data_dir = "/path/to/agent/data"
