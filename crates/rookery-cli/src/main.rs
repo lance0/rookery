@@ -284,7 +284,15 @@ struct AgentActionResponse {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let loaded_config = rookery_core::config::Config::load().ok();
+    // A missing config file is the normal pre-install state and stays quiet; a
+    // config that exists but fails to parse must not be swallowed, or the
+    // silent fallback below makes "daemon is down" indistinguishable from
+    // "I read the wrong URL".
+    let (loaded_config, config_error) = match rookery_core::config::Config::load() {
+        Ok(config) => (Some(config), None),
+        Err(rookery_core::error::Error::ConfigNotFound(_)) => (None, None),
+        Err(e) => (None, Some(e)),
+    };
     let daemon_url = cli.daemon.unwrap_or_else(|| {
         let addr = loaded_config
             .as_ref()
@@ -297,6 +305,12 @@ async fn main() {
         };
         format!("http://{}:{}", ip, addr.port())
     });
+    if let Some(e) = config_error {
+        eprintln!(
+            "warning: {}: {e} — using {daemon_url}",
+            rookery_core::config::Config::config_path().display()
+        );
+    }
     let api_key = loaded_config
         .as_ref()
         .and_then(|config| config.api_key.clone())
@@ -356,14 +370,27 @@ async fn main() {
     }
 }
 
+/// Every command probes the daemon first. One guard, and it names the URL that
+/// was actually probed — otherwise "rookeryd is not running" is
+/// indistinguishable from "I read the wrong config file".
+async fn require_daemon(client: &DaemonClient) -> Result<(), Box<dyn std::error::Error>> {
+    if client.health().await {
+        Ok(())
+    } else {
+        Err(format!(
+            "rookeryd is not running at {} (start it with `rookeryd`)",
+            client.base_url()
+        )
+        .into())
+    }
+}
+
 async fn cmd_start(
     client: &DaemonClient,
     profile: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running (start it with `rookeryd`)".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         let label = profile.as_deref().unwrap_or("default");
@@ -386,7 +413,10 @@ async fn cmd_start(
                 println!("  API:  http://localhost:{port}/v1");
             }
         } else {
+            // The daemon reports genuine failures as HTTP 200 + success:false,
+            // so the exit code has to come from the body, not the status line.
             eprintln!("{message}");
+            std::process::exit(1);
         }
     }
 
@@ -394,9 +424,7 @@ async fn cmd_start(
 }
 
 async fn cmd_stop(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("stopping server...");
@@ -411,9 +439,7 @@ async fn cmd_stop(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
 }
 
 async fn cmd_sleep(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("sleeping server...");
@@ -428,9 +454,7 @@ async fn cmd_sleep(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
 }
 
 async fn cmd_wake(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("waking server...");
@@ -447,11 +471,20 @@ async fn cmd_wake(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
 async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         if json {
-            println!(r#"{{"state":"daemon_offline"}}"#);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "state": "daemon_offline",
+                    "daemon_url": client.base_url(),
+                }))?
+            );
         } else {
-            println!("rookeryd: offline");
+            println!("rookeryd: offline ({})", client.base_url());
         }
-        return Ok(());
+        // Behaviour change: status used to exit 0 here, so `rookery status
+        // --json || alert` could never fire. The body is still printed, so
+        // piping into jq keeps working.
+        std::process::exit(1);
     }
 
     let resp: StatusResponse = client.get("/api/status").await?;
@@ -503,9 +536,7 @@ fn format_status_lines(resp: &StatusResponse) -> Vec<String> {
 }
 
 async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: GpuResponse = client.get("/api/gpu").await?;
 
@@ -562,12 +593,16 @@ async fn cmd_config_validate(json: bool) -> Result<(), Box<dyn std::error::Error
         match config.validate() {
             Ok(()) => println!(
                 "{}",
-                serde_json::json!({"valid": true, "path": rookery_core::config::Config::config_path().display().to_string()})
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"valid": true, "path": rookery_core::config::Config::config_path().display().to_string()})
+                )?
             ),
             Err(e) => {
                 println!(
                     "{}",
-                    serde_json::json!({"valid": false, "error": e.to_string()})
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"valid": false, "error": e.to_string()})
+                    )?
                 );
                 std::process::exit(1);
             }
@@ -620,9 +655,7 @@ async fn cmd_agent_start(
     client: &DaemonClient,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     println!("starting agent '{name}'...");
     let resp: AgentActionResponse = client
@@ -638,6 +671,7 @@ async fn cmd_agent_start(
         println!("{}", resp.message);
     } else {
         eprintln!("{}", resp.message);
+        std::process::exit(1);
     }
 
     Ok(())
@@ -647,9 +681,7 @@ async fn cmd_agent_stop(
     client: &DaemonClient,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     println!("stopping agent '{name}'...");
     let resp: AgentActionResponse = client
@@ -665,6 +697,7 @@ async fn cmd_agent_stop(
         println!("{}", resp.message);
     } else {
         eprintln!("{}", resp.message);
+        std::process::exit(1);
     }
 
     Ok(())
@@ -674,9 +707,7 @@ async fn cmd_agent_status(
     client: &DaemonClient,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if json {
         let resp: serde_json::Value = client.get("/api/agents").await?;
@@ -721,9 +752,7 @@ async fn cmd_agent_describe(
     name: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get(&format!("/api/agents/{name}/health")).await?;
 
@@ -800,9 +829,7 @@ async fn cmd_agent_update(
     name: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("updating agent '{name}'...");
@@ -827,6 +854,10 @@ async fn cmd_agent_update(
     if let Some(version) = resp["version"].as_str() {
         println!("version: {version}");
     }
+    // Exit after the version line so a failing update still reports it.
+    if !success {
+        std::process::exit(1);
+    }
 
     Ok(())
 }
@@ -836,9 +867,7 @@ async fn cmd_swap(
     profile: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("swapping to '{profile}'...");
@@ -862,6 +891,7 @@ async fn cmd_swap(
             }
         } else {
             eprintln!("{message}");
+            std::process::exit(1);
         }
     }
 
@@ -869,9 +899,7 @@ async fn cmd_swap(
 }
 
 async fn cmd_profiles(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get("/api/profiles").await?;
 
@@ -918,9 +946,7 @@ async fn cmd_logs(
     follow: bool,
     n: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !follow {
         // Fetch last N lines
@@ -937,10 +963,16 @@ async fn cmd_logs(
     println!("following logs (Ctrl+C to stop)...\n");
 
     let url = format!("{}/api/events", client.base_url());
+    // connect_timeout only — a total request timeout would kill the long-lived
+    // SSE stream mid-follow.
+    let sse_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let request = if let Some(api_key) = client.api_key() {
-        reqwest::Client::new().get(&url).bearer_auth(api_key)
+        sse_client.get(&url).bearer_auth(api_key)
     } else {
-        reqwest::Client::new().get(&url)
+        sse_client.get(&url)
     };
     let response = request
         .send()
@@ -991,9 +1023,7 @@ fn generate_api_key() -> String {
 }
 
 async fn cmd_releases(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get("/api/releases").await?;
 
@@ -1056,9 +1086,7 @@ async fn cmd_auth_generate() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn cmd_hardware(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get("/api/hardware").await?;
 
@@ -1113,9 +1141,7 @@ async fn cmd_models_search(
     query: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get(&format!("/api/models/search?q={query}")).await?;
 
@@ -1151,9 +1177,7 @@ async fn cmd_models_quants(
     repo: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client
         .get(&format!("/api/models/quants?repo={repo}"))
@@ -1207,9 +1231,7 @@ async fn cmd_models_recommend(
     repo: &str,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client
         .get(&format!("/api/models/recommend?repo={repo}"))
@@ -1256,9 +1278,7 @@ async fn cmd_models_list(
     client: &DaemonClient,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let resp: serde_json::Value = client.get("/api/models/cached").await?;
 
@@ -1292,16 +1312,14 @@ async fn cmd_models_pull(
     repo: &str,
     quant: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     let body = serde_json::json!({ "repo": repo, "quant": quant });
     let resp: serde_json::Value = client.post("/api/models/pull", &body).await?;
 
     if !resp["started"].as_bool().unwrap_or(false) {
         println!("{}", resp["message"].as_str().unwrap_or("pull failed"));
-        return Ok(());
+        std::process::exit(1);
     }
 
     let resolved_repo = resp["repo"].as_str().unwrap_or(repo);
@@ -1325,9 +1343,7 @@ fn format_count(n: u64) -> String {
 }
 
 async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !client.health().await {
-        return Err("rookeryd is not running".into());
-    }
+    require_daemon(client).await?;
 
     if !json {
         println!("running benchmark...\n");
