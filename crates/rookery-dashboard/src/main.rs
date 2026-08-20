@@ -546,6 +546,27 @@ fn App() -> impl IntoView {
         }
     };
 
+    // All seven panels are rendered once and shown/hidden with `display`.
+    //
+    // The tab body used to be a single reactive closure doing `match tab.get()`
+    // with a differently-typed `AnyView` per arm, so switching tabs unmounted
+    // the previous subtree and disposed its reactive owner — taking the
+    // component-local signals with it: ChatPanel's conversation, BenchPanel's
+    // results (a bench costs real GPU time to reproduce) and ModelsPanel's
+    // HuggingFace search. Because that closure also read `loading`, any
+    // `load_dashboard_data` call wiped all three as well.
+    //
+    // Hiding instead of destroying keeps every panel's owner alive, so `tab`
+    // and `loading` only flip a CSS property now. Every panel root is a plain
+    // block-level div, hence "block" rather than clearing the property.
+    let panel_display = move |t: Tab| {
+        if !loading.get() && tab.get() == t {
+            "block"
+        } else {
+            "none"
+        }
+    };
+
     let on_theme_toggle = move |_| {
         set_is_light.update(|light| *light = toggle_theme(*light));
     };
@@ -711,64 +732,51 @@ fn App() -> impl IntoView {
                         </div>
 
                         <div class="tab-content">
-                            {move || {
-                                if loading.get() {
-                                    return view! { <div class="loading">"loading..."</div> }.into_any();
-                                }
-                                match tab.get() {
-                                    Tab::Overview => view! {
-                                        <div>
-                                            <div class="grid">
-                                                <StatusCard status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
-                                                <GpuPanel gpu=gpu />
-                                            </div>
-                                            <div class="grid">
-                                                <ModelInfo model_info=model_info />
-                                                <ServerStats stats=server_stats status=status />
-                                            </div>
-                                            <div class="grid">
-                                                <AgentSummary agents=agents set_tab=set_tab />
-                                                <UpdateBanner releases=releases />
-                                            </div>
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Settings => view! {
-                                        <div>
-                                            <div class="section">
-                                                <ProfileSwitcher profiles=profiles status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
-                                            </div>
-                                            <div class="section">
-                                                <SettingsPanel status=status set_toasts=set_toasts />
-                                            </div>
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Agents => view! {
-                                        <div class="section">
-                                            <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Chat => view! {
-                                        <div class="section">
-                                            <ChatPanel set_toasts=set_toasts />
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Bench => view! {
-                                        <div class="section">
-                                            <BenchPanel status=status set_toasts=set_toasts />
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Logs => view! {
-                                        <div class="section">
-                                            <LogViewer logs=logs />
-                                        </div>
-                                    }.into_any(),
-                                    Tab::Models => view! {
-                                        <div class="section">
-                                            <ModelsPanel set_toasts=set_toasts />
-                                        </div>
-                                    }.into_any(),
-                                }.into_any()
-                            }}
+                            {move || loading.get().then(|| view! { <div class="loading">"loading..."</div> })}
+
+                            <div style:display=move || panel_display(Tab::Overview)>
+                                <div class="grid">
+                                    <StatusCard status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
+                                    <GpuPanel gpu=gpu />
+                                </div>
+                                <div class="grid">
+                                    <ModelInfo model_info=model_info />
+                                    <ServerStats stats=server_stats status=status />
+                                </div>
+                                <div class="grid">
+                                    <AgentSummary agents=agents set_tab=set_tab />
+                                    <UpdateBanner releases=releases />
+                                </div>
+                            </div>
+
+                            <div style:display=move || panel_display(Tab::Settings)>
+                                <div class="section">
+                                    <ProfileSwitcher profiles=profiles status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
+                                </div>
+                                <div class="section">
+                                    <SettingsPanel status=status set_toasts=set_toasts />
+                                </div>
+                            </div>
+
+                            <div class="section" style:display=move || panel_display(Tab::Agents)>
+                                <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
+                            </div>
+
+                            <div class="section" style:display=move || panel_display(Tab::Chat)>
+                                <ChatPanel set_toasts=set_toasts />
+                            </div>
+
+                            <div class="section" style:display=move || panel_display(Tab::Bench)>
+                                <BenchPanel status=status set_toasts=set_toasts />
+                            </div>
+
+                            <div class="section" style:display=move || panel_display(Tab::Logs)>
+                                <LogViewer logs=logs />
+                            </div>
+
+                            <div class="section" style:display=move || panel_display(Tab::Models)>
+                                <ModelsPanel set_toasts=set_toasts />
+                            </div>
                         </div>
                     </>
                 }.into_any()
