@@ -86,6 +86,23 @@ struct ManagedAgent {
     lifetime_errors: u32,
 }
 
+/// Is the tracked process actually alive right now?
+///
+/// `try_wait()` for children we spawned, `/proc` for adopted PIDs. Every read
+/// path must go through this rather than trusting `info.status`: that field is
+/// set to `Running` at start/adopt and never mutated, so reading it reports a
+/// long-dead agent as Running forever.
+///
+/// `try_wait()` reaps an exited child, but tokio caches the exit status and
+/// returns it from every later `try_wait()`/`wait()`, so repeated calls from
+/// several read paths are safe.
+fn agent_is_alive(agent: &mut ManagedAgent) -> bool {
+    match &mut agent.child {
+        Some(child) => matches!(child.try_wait(), Ok(None)),
+        None => is_pid_alive(agent.info.pid),
+    }
+}
+
 /// Does `/proc/<pid>/cmdline` reference `command`?
 ///
 /// cmdline is NUL-separated; joined with spaces before matching. A substring test
@@ -269,11 +286,7 @@ impl AgentManager {
 
         // Check if already running
         if let Some(agent) = agents.get_mut(name) {
-            let alive = match &mut agent.child {
-                Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => is_pid_alive(agent.info.pid),
-            };
-            if alive {
+            if agent_is_alive(agent) {
                 return Err(AgentError::AlreadyRunning(name.to_string()));
             }
             // Exited, clean up
@@ -571,12 +584,7 @@ impl AgentManager {
         // the watchdog is responsible for detecting dead agents and restarting them.
         // Removing them here races with the watchdog and prevents crash recovery.
         for agent in agents.values_mut() {
-            let alive = match &mut agent.child {
-                Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => is_pid_alive(agent.info.pid),
-            };
-
-            if alive {
+            if agent_is_alive(agent) {
                 result.push(agent.info.clone());
             } else {
                 let mut info = agent.info.clone();
@@ -590,24 +598,30 @@ impl AgentManager {
 
     /// Get health/metrics for a specific agent.
     pub async fn get_health(&self, name: &str) -> Option<AgentInfo> {
-        let agents = self.agents.lock().await;
-        let agent = agents.get(name)?;
+        let mut agents = self.agents.lock().await;
+        let agent = agents.get_mut(name)?;
 
-        let uptime_secs = if agent.info.status == AgentStatus::Running {
-            Some(
-                Utc::now()
-                    .signed_duration_since(agent.info.started_at)
-                    .num_seconds(),
-            )
+        // Ask the OS, don't trust `info.status` — it is stuck on Running for the
+        // lifetime of the entry, and the watchdog only evicts dead agents that have
+        // restart_on_crash set. Reading the field made rookery_agent_up a constant 1.
+        let alive = agent_is_alive(agent);
+        let status = if alive {
+            AgentStatus::Running
         } else {
-            None
+            AgentStatus::Stopped
         };
+
+        let uptime_secs = alive.then(|| {
+            Utc::now()
+                .signed_duration_since(agent.info.started_at)
+                .num_seconds()
+        });
 
         Some(AgentInfo {
             name: agent.info.name.clone(),
             pid: agent.info.pid,
             started_at: agent.info.started_at,
-            status: agent.info.status.clone(),
+            status,
             version: agent.info.version.clone(),
             uptime_secs,
             total_restarts: Some(agent.total_restarts),
@@ -696,13 +710,9 @@ impl AgentManager {
 
     pub async fn is_running(&self, name: &str) -> bool {
         let mut agents = self.agents.lock().await;
-        if let Some(agent) = agents.get_mut(name) {
-            match &mut agent.child {
-                Some(child) => matches!(child.try_wait(), Ok(None)),
-                None => is_pid_alive(agent.info.pid),
-            }
-        } else {
-            false
+        match agents.get_mut(name) {
+            Some(agent) => agent_is_alive(agent),
+            None => false,
         }
     }
 
@@ -917,12 +927,7 @@ impl AgentManager {
                     let mut dead_entries = Vec::new();
 
                     for (name, agent) in agents.iter_mut() {
-                        let alive = match &mut agent.child {
-                            Some(child) => matches!(child.try_wait(), Ok(None)),
-                            None => is_pid_alive(agent.info.pid),
-                        };
-
-                        if !alive
+                        if !agent_is_alive(agent)
                             && !agent.intentional_stop
                             && !manager
                                 .shutting_down
@@ -1384,6 +1389,50 @@ name = "test-agent"
         assert!(manager.get_health("nope").await.is_none());
 
         manager.stop("test").await.unwrap();
+    }
+
+    /// get_health must consult the OS, not the never-mutated `info.status`.
+    /// Before the fix this reported Running with a growing uptime forever, which
+    /// pinned the rookery_agent_up gauge at 1 for a dead process.
+    #[tokio::test]
+    async fn test_agent_get_health_reports_dead_agent_as_stopped() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_adir, manager) = test_manager(log_buffer);
+
+        // restart_on_crash is false, so the watchdog would never evict this entry.
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            ..test_agent_config()
+        };
+        manager.start("crasher", &config).await.unwrap();
+
+        // Poll the real condition — the process being gone, as reported by
+        // try_wait — not a proxy like a log line or a file appearing.
+        let exited = poll_until_async(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            || async { !manager.is_running("crasher").await },
+        )
+        .await;
+        assert!(exited, "crasher agent should have exited");
+
+        // is_running above already reaped the child; get_health must still see it
+        // as dead rather than being confused by the cached exit status.
+        let health = manager.get_health("crasher").await.unwrap();
+        assert_eq!(
+            health.status,
+            AgentStatus::Stopped,
+            "get_health must report a dead process as Stopped"
+        );
+        assert_eq!(health.uptime_secs, None, "a dead agent has no uptime");
+
+        // get_health_detail inherits the fix, so it cannot report phantom health.
+        let detail = manager
+            .get_health_detail("crasher", Some(&config))
+            .await
+            .unwrap();
+        assert_eq!(detail.info.status, AgentStatus::Stopped);
     }
 
     #[tokio::test]
