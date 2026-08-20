@@ -816,6 +816,19 @@ pub async fn post_chat(
             StatusCode::BAD_GATEWAY
         })?;
 
+    // `.send()` only errors on transport failure — a non-2xx upstream response
+    // arrives as Ok and would otherwise be streamed out under a hardcoded 200.
+    // ponytail: always 502, never the upstream status. Even an upstream 400 can
+    // be our fault (the hardcoded "model" above 404s on vLLM), so forwarding it
+    // would blame the caller for a proxy-side bug.
+    if !resp.status().is_success() {
+        state.metrics.inc_chat_error();
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        tracing::error!(status = %status, detail = %detail, "chat upstream returned error");
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
     // Wrap the stream with a per-chunk timeout — if llama-server hangs
     // mid-generation with no data for 60s, terminate the stream.
     use tokio_stream::StreamExt as _;
@@ -3666,6 +3679,85 @@ mod tests {
             let text = String::from_utf8(body.to_vec()).unwrap();
             assert!(text.contains("rookery_chat_requests_total 1"));
             assert!(text.contains("rookery_chat_errors_total 1"));
+        }
+
+        // --- 15b. Non-2xx from upstream must not be laundered into a 200 SSE stream ---
+        //
+        // `.send()` returns Ok for an HTTP 400, so before LAN-1075 the error
+        // body was streamed straight through as `200 text/event-stream` and
+        // rookery_chat_errors_total stayed at 0.
+        #[tokio::test]
+        async fn test_route_chat_upstream_error_is_not_streamed_as_success() {
+            let mock_app = Router::new().route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::response::Json(serde_json::json!({
+                            "error": {
+                                "code": 400,
+                                "message": "All non-assistant messages must contain 'content'"
+                            }
+                        })),
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mock_port = listener.local_addr().unwrap().port();
+            let (shutdown_tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                axum::serve(listener, mock_app)
+                    .with_graceful_shutdown(async {
+                        let _ = rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+
+            let (_dir, state) =
+                build_test_app_state(Some(Box::new(mock_backend_on_port(mock_port))));
+            sync_state_from_backend(&state).await;
+            let app = test_router_full(state);
+
+            let chat_req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"messages":[{"role":"user"}]}"#))
+                .unwrap();
+            let chat_resp = app.clone().oneshot(chat_req).await.unwrap();
+
+            assert_eq!(
+                chat_resp.status(),
+                StatusCode::BAD_GATEWAY,
+                "upstream non-2xx must surface as 502, not a 200 SSE stream"
+            );
+            assert!(
+                chat_resp
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_none_or(|ct| !ct.contains("text/event-stream")),
+                "error response must not be framed as an SSE stream"
+            );
+
+            let metrics_resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/metrics")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = metrics_resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(
+                text.contains("rookery_chat_errors_total 1"),
+                "upstream error must increment the chat error counter, got:\n{text}"
+            );
+
+            let _ = shutdown_tx.send(());
         }
 
         // --- 16. GET /api/bench → returns timing data from mock server ---
