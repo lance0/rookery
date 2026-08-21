@@ -50,9 +50,11 @@ pub fn StatusCard(
     // before the first `state` event lands — or forever, if the stream was
     // never established. That is "we don't know", not "running", so it must
     // not light up Stop on a panel that is receiving nothing.
+    // "swapping" is excluded because post_stop queues behind the swap on
+    // op_lock: the click is harmless but does nothing visible for a minute.
     let can_stop = move || {
         let state = status.get().state;
-        !state.is_empty() && state != "stopped"
+        !state.is_empty() && state != "stopped" && state != "swapping"
     };
     let can_sleep = move || status.get().state == "running";
     let can_wake = move || status.get().state == "sleeping";
