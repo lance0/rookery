@@ -324,6 +324,11 @@ async fn main() {
         .filter(|key| !key.is_empty());
     let client = DaemonClient::new(&daemon_url, api_key);
 
+    // Read before the match consumes `cli.command`: the top-level error handler
+    // is the only place a client error can be turned into a JSON envelope, and
+    // only the subcommand carries the flag.
+    let json = wants_json(&cli.command);
+
     let result = match cli.command {
         Commands::Start { profile, json } => cmd_start(&client, profile, json).await,
         Commands::Stop { json } => cmd_stop(&client, json).await,
@@ -372,9 +377,87 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("error: {e}");
+        // `--json` used to print nothing here, so `rookery gpu --json | jq .`
+        // handed jq an empty stdin whenever the daemon was down. Every error
+        // path in JSON mode now emits the same envelope on stdout — same
+        // `error` key `status --json` and `config --json` already use — and
+        // still exits 1.
+        if json {
+            print_error_envelope(&e.to_string(), client.base_url());
+        } else {
+            eprintln!("error: {e}");
+        }
         std::process::exit(1);
     }
+}
+
+/// The `--json` error envelope: one shape for every command, so a script can
+/// read `.error` without knowing which command produced it. `daemon_url` names
+/// the daemon the CLI resolved, which is what distinguishes "daemon is down"
+/// from "I read the wrong config file".
+fn print_error_envelope(error: &str, daemon_url: &str) {
+    let body = serde_json::json!({ "error": error, "daemon_url": daemon_url });
+    // Fall back to compact rather than to nothing: an empty stdout here is the
+    // exact bug this envelope exists to fix.
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+    );
+}
+
+/// The top-level error handler needs the caller's `--json` choice, and clap
+/// hangs that flag off each subcommand. Exhaustive on purpose: a new subcommand
+/// with a `--json` flag will not compile until it is listed here.
+fn wants_json(command: &Commands) -> bool {
+    match command {
+        Commands::Start { json, .. }
+        | Commands::Stop { json }
+        | Commands::Sleep { json }
+        | Commands::Wake { json }
+        | Commands::Status { json }
+        | Commands::Gpu { json }
+        | Commands::Swap { json, .. }
+        | Commands::Profiles { json }
+        | Commands::Bench { json }
+        | Commands::Reload { json }
+        | Commands::ConfigValidate { json }
+        | Commands::Releases { json } => *json,
+        Commands::Agent { cmd } => match cmd {
+            AgentCommands::Status { json }
+            | AgentCommands::Describe { json, .. }
+            | AgentCommands::Update { json, .. } => *json,
+            // These two have no --json flag at all.
+            AgentCommands::Start { .. } | AgentCommands::Stop { .. } => false,
+        },
+        Commands::Models { cmd } => match cmd {
+            ModelCommands::Search { json, .. }
+            | ModelCommands::Quants { json, .. }
+            | ModelCommands::Recommend { json, .. }
+            | ModelCommands::List { json }
+            | ModelCommands::Hardware { json } => *json,
+            ModelCommands::Pull { .. } => false,
+        },
+        Commands::Logs { .. } | Commands::Auth { .. } | Commands::Completions { .. } => false,
+    }
+}
+
+/// `--json` prints the daemon's body verbatim, so the failure detail already
+/// reached stdout — but the verdict still has to reach the exit code, or the
+/// one machine-readable mode is the only one that lies. Deliberately the same
+/// `resp["success"]` expression the plain path uses, so the two cannot drift.
+fn exit_if_daemon_reported_failure(resp: &serde_json::Value) {
+    if !resp["success"].as_bool().unwrap_or(false) {
+        std::process::exit(1);
+    }
+}
+
+/// One wording for "the daemon isn't answering", shared by `require_daemon` and
+/// `status`'s offline output so the two can't drift apart.
+fn daemon_offline_message(client: &DaemonClient) -> String {
+    format!(
+        "rookeryd is not running at {} (start it with `rookeryd`)",
+        client.base_url()
+    )
 }
 
 /// Every command probes the daemon first. One guard, and it names the URL that
@@ -384,11 +467,7 @@ async fn require_daemon(client: &DaemonClient) -> Result<(), Box<dyn std::error:
     if client.health().await {
         Ok(())
     } else {
-        Err(format!(
-            "rookeryd is not running at {} (start it with `rookeryd`)",
-            client.base_url()
-        )
-        .into())
+        Err(daemon_offline_message(client).into())
     }
 }
 
@@ -408,6 +487,7 @@ async fn cmd_start(
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
+        exit_if_daemon_reported_failure(&resp);
     } else {
         let success = resp["success"].as_bool().unwrap_or(false);
         let message = resp["message"].as_str().unwrap_or("");
@@ -478,10 +558,15 @@ async fn cmd_wake(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
 async fn cmd_status(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if !client.health().await {
         if json {
+            // A superset of the shared error envelope, not a second shape:
+            // `error` + `daemon_url` are the keys every other command emits, so
+            // a generic `jq -e .error` works here too. `state` predates them and
+            // stays, because scripts already read it.
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "state": "daemon_offline",
+                    "error": daemon_offline_message(client),
                     "daemon_url": client.base_url(),
                 }))?
             );
@@ -870,6 +955,7 @@ async fn cmd_agent_update(
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
+        exit_if_daemon_reported_failure(&resp);
         return Ok(());
     }
 
@@ -907,6 +993,7 @@ async fn cmd_swap(
 
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
+        exit_if_daemon_reported_failure(&resp);
     } else {
         let success = resp["success"].as_bool().unwrap_or(false);
         let message = resp["message"].as_str().unwrap_or("");
@@ -1349,7 +1436,9 @@ async fn cmd_models_pull(
     let resp: serde_json::Value = client.post("/api/models/pull", &body).await?;
 
     if !resp["started"].as_bool().unwrap_or(false) {
-        println!("{}", resp["message"].as_str().unwrap_or("pull failed"));
+        // stderr, like the other five failure paths — a failure on stdout ends
+        // up in whatever file the caller was capturing the download report to.
+        eprintln!("{}", resp["message"].as_str().unwrap_or("pull failed"));
         std::process::exit(1);
     }
 

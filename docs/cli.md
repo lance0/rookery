@@ -92,3 +92,50 @@ rookery status --json | jq '.state'
 rookery agent status --json | jq '.agents[0].uptime_secs'
 rookery gpu --json | jq '.gpus[0].vram_used_mb'
 ```
+
+### Errors in `--json` mode
+
+Every `--json` error path prints a JSON object to **stdout** and exits non-zero, so a pipe into `jq` never sees empty input:
+
+```json
+{
+  "error": "rookeryd is not running at http://127.0.0.1:3000 (start it with `rookeryd`)",
+  "daemon_url": "http://127.0.0.1:3000"
+}
+```
+
+- **`.error`** is a string on every JSON error body, whatever the command produced it. Test for it with `jq -e .error`.
+- **`.daemon_url`** is the daemon address the CLI resolved — from `--daemon`, else `listen` in the config file, else the default. This is what tells a stopped daemon apart from a config pointing at the wrong address.
+- `status --json` adds `"state": "daemon_offline"` to that same object rather than using a shape of its own.
+- `config --json` reports an invalid config file as `{"valid": false, "error": "..."}` — same `.error` key.
+
+When the *daemon* is the one reporting the failure, stdout is the daemon's own response body printed verbatim, and the exit code comes from its `success` field:
+
+```console
+$ rookery start fast --json; echo "exit=$?"
+{
+  "success": false,
+  "message": "profile 'fast' not found"
+}
+exit=1
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | The command did what it reported. |
+| `1` | Runtime failure — the daemon was unreachable, or the daemon reported the operation failed. |
+| `2` | Usage error — unknown subcommand, missing or invalid argument. Emitted by the argument parser before anything runs. |
+
+`--json` follows exactly the same exit codes as plain output.
+
+**Daemon-reported failures exit `1`.** The daemon returns HTTP 200 with `success: false` for a genuine failure, so the body carries the verdict rather than the status line. These commands read it: `start`, `swap`, `agent start`, `agent stop`, `agent update`, `models pull`.
+
+```bash
+rookery start && rookery agent start hermes   # the agent is not started against a dead server
+```
+
+**An unreachable daemon exits `1`** on every command that contacts one — which is all of them except `config`, `auth generate` and `completions`, which work purely locally. `config` exits `1` when the config file is missing or fails validation.
+
+`1` deliberately covers both "the daemon is down" and "the daemon says it failed". A script needing to tell the two apart should read the error body, which distinguishes them in more detail than an integer can: `2` is already taken by usage errors, and "I typed the command wrong" is the distinction actually worth an exit code.
