@@ -37,6 +37,13 @@ pub enum ServerState {
     Stopping {
         since: DateTime<Utc>,
     },
+    /// Tearing down `from` and bringing up `to`. Held for the whole 30s+ swap
+    /// so clients stop reporting the old profile as `running` while it isn't.
+    Swapping {
+        from: Option<String>,
+        to: String,
+        since: DateTime<Utc>,
+    },
     Failed {
         last_error: String,
         profile: String,
@@ -59,6 +66,8 @@ impl ServerState {
             | ServerState::Running { profile, .. }
             | ServerState::Sleeping { profile, .. }
             | ServerState::Failed { profile, .. } => Some(profile),
+            // The target, not the outgoing one: `to` is what will be serving.
+            ServerState::Swapping { to, .. } => Some(to),
             _ => None,
         }
     }
@@ -147,7 +156,9 @@ impl StatePersistence {
                     ServerState::Stopped
                 }
             }
-            ServerState::Starting { .. } | ServerState::Stopping { .. } => {
+            ServerState::Starting { .. }
+            | ServerState::Stopping { .. }
+            | ServerState::Swapping { .. } => {
                 // Transient states on daemon restart mean something went wrong
                 ServerState::Stopped
             }
@@ -592,6 +603,30 @@ mod tests {
             since: Utc::now(),
         };
         assert_eq!(failed.profile_name(), Some("broken"));
+    }
+
+    // LAN-1081: Swapping is transient. It must name the target profile, must
+    // not count as running, and must reconcile away on daemon restart —
+    // otherwise a daemon killed mid-swap comes back permanently "swapping"
+    // and every client that gates on that state stays wedged.
+    #[test]
+    fn test_swapping_state() {
+        let swapping = ServerState::Swapping {
+            from: Some("qwen_dense".into()),
+            to: "qwen38".into(),
+            since: Utc::now(),
+        };
+        assert_eq!(swapping.profile_name(), Some("qwen38"));
+        assert!(!swapping.is_running());
+        assert_eq!(swapping.pid(), None);
+
+        let json = serde_json::to_string(&swapping).unwrap();
+        assert!(json.contains("\"Swapping\""), "got {json}");
+        let restored: ServerState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.profile_name(), Some("qwen38"));
+
+        let reconciled = StatePersistence::new().reconcile(swapping);
+        assert!(matches!(reconciled, ServerState::Stopped));
     }
 
     #[test]

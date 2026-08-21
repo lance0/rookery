@@ -13,6 +13,14 @@ pub fn ProfileSwitcher(
     let active_profile = move || status.get().profile.clone();
     let is_running = move || status.get().state == "running";
 
+    // Local pending flag on top of the server's `swapping` state. Not optimistic
+    // UI — it claims nothing about the model, it only closes the window between
+    // the click and the SSE `state` event, which is exactly where the triple-click
+    // pile-up used to happen (post_swap serialises on op_lock, so each extra
+    // click bought another full 30s+ model load).
+    let (pending, set_pending) = signal(false);
+    let busy = move || pending.get() || status.get().state == "swapping";
+
     view! {
         <div class="card">
             <h2>"Profiles"</h2>
@@ -42,10 +50,14 @@ pub fn ProfileSwitcher(
                         let click_name = name.clone();
                         let running = is_running();
                         let on_click = move |_| {
+                            if busy() {
+                                return;
+                            }
                             let n = click_name.clone();
                             let sp = set_profiles;
                             let sa = set_agents;
                             let st = set_toasts;
+                            set_pending.set(true);
                             wasm_bindgen_futures::spawn_local(async move {
                                 let result = if running {
                                     api::swap_profile(&n).await
@@ -62,11 +74,12 @@ pub fn ProfileSwitcher(
                                 }
                                 if let Ok(p) = api::fetch_profiles().await { sp.set(p); }
                                 if let Ok(a) = api::fetch_agents().await { sa.set(a); }
+                                set_pending.set(false);
                             });
                         };
 
                         view! {
-                            <button class=card_class on:click=on_click>
+                            <button class=card_class on:click=on_click disabled=busy>
                                 <div class="profile-name">{name}{default_marker}</div>
                                 <div class="profile-meta">{meta}</div>
                             </button>
