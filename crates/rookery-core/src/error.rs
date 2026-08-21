@@ -34,6 +34,10 @@ pub enum Error {
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// An operation was aborted because the daemon is shutting down.
+    #[error("daemon is shutting down")]
+    Shutdown,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

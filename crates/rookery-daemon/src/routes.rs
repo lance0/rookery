@@ -217,6 +217,29 @@ pub async fn post_stop(
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to stop server");
+            // LAN-1123: must land a terminal state. `Stopping` was broadcast
+            // above and nothing else resets it, so returning here used to wedge
+            // the dashboard badge, CLI status and `rookery_server_up` on a
+            // transient state until the daemon restarted (`reconcile()` folds
+            // Stopping → Stopped, but only across a restart). Same bug LAN-1081
+            // fixed in post_swap.
+            //
+            // Prefer the truth over a blanket `Failed`: a failed stop often
+            // means the process is still alive — VllmBackend deliberately keeps
+            // its container_id when `docker compose down` fails — and reporting
+            // `Failed` while it serves would let a later post_start launch a
+            // second server on the same port.
+            let after = state.backend.lock().await.to_server_state().await;
+            let terminal = if after.is_running() {
+                after
+            } else {
+                rookery_core::state::ServerState::Failed {
+                    last_error: e.to_string(),
+                    profile: current.profile_name().unwrap_or_default().to_string(),
+                    since: chrono::Utc::now(),
+                }
+            };
+            state.set_server_state(terminal).await;
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -399,6 +422,25 @@ pub async fn post_swap(
             clear_drain().await;
         }
 
+        // LAN-1120: refuse to spawn a backend once shutdown has begun.
+        // `begin_shutdown()` runs before `server_handle.abort()`, so the flag is
+        // already visible here; shutdown then gives up on `op_lock` after 20s
+        // (TimeoutStopSec=45 vs a ~135s worst-case swap), so without this check
+        // the swap goes on to spawn an llama-server *after* the daemon has
+        // exited — ~30 GB of VRAM held by an unsupervised orphan. Same check the
+        // idle watcher in main.rs makes after taking `op_lock`.
+        //
+        // Placement: this sits AFTER the unconditional `clear_drain()` above and
+        // before anything sets drain again, so this early return cannot leak
+        // `draining=true` and wedge post_chat on a permanent 503.
+        if state.agent_manager.is_shutting_down() {
+            tracing::warn!(
+                profile = %req.profile,
+                "daemon is shutting down, aborting swap before starting new backend"
+            );
+            return Err(rookery_core::error::Error::Shutdown);
+        }
+
         // Create new backend for the target profile and start it
         let config = state.config.read().await;
         let profile = config
@@ -496,6 +538,19 @@ pub async fn post_swap(
                 },
                 status,
             }))
+        }
+        Err(rookery_core::error::Error::Shutdown) => {
+            // Not a failure: the old backend is stopped and no new one was
+            // launched, so `Stopped` is the honest terminal state — and it is
+            // what the shutdown path writes anyway, so this is idempotent.
+            // `Swapping` must not be left behind (LAN-1081).
+            state
+                .set_server_state(rookery_core::state::ServerState::Stopped)
+                .await;
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "daemon is shutting down" })),
+            ))
         }
         Err(e) => {
             tracing::error!(error = %e, "swap failed");
@@ -3178,6 +3233,170 @@ mod tests {
             assert_eq!(json["status"]["state"], "stopped");
         }
 
+        // --- 10b/10c. LAN-1123: a failed stop must still land a TERMINAL state ---
+        //
+        // post_stop broadcasts `Stopping` before it calls stop(); the error path
+        // used to return 500 without landing anything, so the daemon sat on
+        // `Stopping` forever (reconcile() only folds it to Stopped across a
+        // restart). Both tests below see "stopping" without the fix.
+
+        /// Backend whose stop() always fails. `survives` models the vLLM case:
+        /// `docker compose down` errors and the container is deliberately left
+        /// registered, so the server is still serving after the failed stop.
+        struct StopFailsBackend {
+            running: std::sync::atomic::AtomicBool,
+            survives: bool,
+            info: BackendInfo,
+            draining: std::sync::atomic::AtomicBool,
+            cuda_error_tx: tokio::sync::watch::Sender<bool>,
+        }
+
+        impl StopFailsBackend {
+            fn new(survives: bool) -> Self {
+                let (cuda_error_tx, _) = tokio::sync::watch::channel(false);
+                Self {
+                    running: std::sync::atomic::AtomicBool::new(true),
+                    survives,
+                    info: BackendInfo {
+                        pid: Some(4242),
+                        container_id: None,
+                        port: 19876,
+                        profile: "test".into(),
+                        started_at: chrono::Utc::now(),
+                        backend_type: BackendType::LlamaServer,
+                        command_line: vec!["mock-server".into()],
+                        exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
+                    },
+                    draining: std::sync::atomic::AtomicBool::new(false),
+                    cuda_error_tx,
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl InferenceBackend for StopFailsBackend {
+            async fn start(
+                &self,
+                _config: &rookery_core::config::Config,
+                _profile: &str,
+            ) -> rookery_core::error::Result<BackendInfo> {
+                Ok(self.info.clone())
+            }
+
+            async fn stop(&self) -> rookery_core::error::Result<()> {
+                if !self.survives {
+                    self.running
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(rookery_core::error::Error::StatePersist(
+                    "docker compose down failed".into(),
+                ))
+            }
+
+            async fn is_running(&self) -> bool {
+                self.running.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            async fn process_info(&self) -> Option<BackendInfo> {
+                Some(self.info.clone())
+            }
+
+            async fn adopt(&self, _info: BackendInfo) -> rookery_core::error::Result<()> {
+                Ok(())
+            }
+
+            async fn to_server_state(&self) -> rookery_core::state::ServerState {
+                if self.running.load(std::sync::atomic::Ordering::SeqCst) {
+                    rookery_core::state::ServerState::Running {
+                        profile: self.info.profile.clone(),
+                        pid: self.info.pid.unwrap_or(0),
+                        port: self.info.port,
+                        since: self.info.started_at,
+                        command_line: self.info.command_line.clone(),
+                        exe_path: self.info.exe_path.clone(),
+                        backend_type: self.info.backend_type,
+                        container_id: self.info.container_id.clone(),
+                    }
+                } else {
+                    rookery_core::state::ServerState::Stopped
+                }
+            }
+
+            fn is_draining(&self) -> bool {
+                self.draining.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn set_draining(&self, draining: bool) {
+                self.draining
+                    .store(draining, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            fn subscribe_errors(&self) -> tokio::sync::watch::Receiver<bool> {
+                self.cuda_error_tx.subscribe()
+            }
+        }
+
+        async fn post_stop_with_failing_backend(
+            survives: bool,
+        ) -> (
+            tempfile::TempDir,
+            std::sync::Arc<crate::app_state::AppState>,
+        ) {
+            let (dir, state) =
+                build_test_app_state(Some(Box::new(StopFailsBackend::new(survives))));
+            sync_state_from_backend(&state).await;
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/stop")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = test_router(state.clone()).oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a failed stop is still a 500"
+            );
+
+            (dir, state)
+        }
+
+        // Process did not survive → record why it is down.
+        #[tokio::test]
+        async fn test_route_stop_failure_lands_failed_state() {
+            let (_dir, state) = post_stop_with_failing_backend(false).await;
+
+            let after = state.current_state().await;
+            assert!(
+                matches!(
+                    after,
+                    rookery_core::state::ServerState::Failed { ref profile, .. } if profile == "test"
+                ),
+                "failed stop must land Failed, not linger on Stopping — got {after:?}"
+            );
+            assert_eq!(
+                super::status_from_state(&after).state,
+                "failed: state persistence error: docker compose down failed",
+                "the stop error must be surfaced to clients"
+            );
+        }
+
+        // Process demonstrably survived → report the truth, so a later
+        // post_start does not launch a second server on the same port.
+        #[tokio::test]
+        async fn test_route_stop_failure_lands_running_when_process_survives() {
+            let (_dir, state) = post_stop_with_failing_backend(true).await;
+
+            let after = state.current_state().await;
+            assert!(
+                after.is_running(),
+                "a survived process must be reported Running, not Stopping/Failed — got {after:?}"
+            );
+            assert_eq!(after.profile_name(), Some("test"));
+        }
+
         #[tokio::test]
         async fn test_route_sleep_when_running() {
             let running_info = BackendInfo {
@@ -3550,6 +3769,61 @@ mod tests {
             assert!(
                 !state.backend.lock().await.is_draining(),
                 "rejected swap must not leave the backend draining"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 12c. POST /api/swap once shutdown has begun → 503, nothing spawned ---
+        //
+        // LAN-1120 regression test. Shutdown calls begin_shutdown() before
+        // aborting axum, then gives up on op_lock after 20s, so a swap that is
+        // mid-flight runs on and spawns an llama-server the exiting daemon never
+        // supervises. Without the guard this reaches new_backend.start(), fails
+        // on the missing binary and returns 500 with a `Failed` state.
+        #[tokio::test]
+        async fn test_route_swap_aborts_when_shutting_down() {
+            let (mock_port, shutdown_tx) = spawn_mock_llama_server().await;
+
+            let backend = mock_backend_on_port(mock_port);
+            let (_dir, state) = build_test_app_state(Some(Box::new(backend)));
+            sync_state_from_backend(&state).await;
+
+            // What main.rs does on SIGTERM, before server_handle.abort().
+            state.agent_manager.begin_shutdown();
+
+            let app = test_router_full(state.clone());
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/swap")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"test"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "swap must abort with 503 once shutdown has begun"
+            );
+
+            // The guard is an early return placed AFTER clear_drain(), so it
+            // must not wedge post_chat on a permanent 503.
+            assert!(
+                !state.backend.lock().await.is_draining(),
+                "shutdown abort must not leave the backend draining"
+            );
+
+            // No backend was spawned, and no transient state left behind.
+            assert!(
+                !state.backend.lock().await.is_running().await,
+                "shutdown abort must not start a new backend"
+            );
+            let after = state.current_state().await;
+            assert!(
+                matches!(after, rookery_core::state::ServerState::Stopped),
+                "shutdown abort must land Stopped, not linger on Swapping — got {after:?}"
             );
 
             let _ = shutdown_tx.send(());
