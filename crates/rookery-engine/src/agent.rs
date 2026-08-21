@@ -2385,16 +2385,22 @@ name = "test-agent"
         let log_buffer = Arc::new(LogBuffer::new(100));
         let (_adir, manager) = test_manager(log_buffer);
 
-        // Start an agent that exits after a brief delay
-        let config = AgentConfig {
-            command: "bash".to_string(),
-            args: vec!["-c".to_string(), "sleep 0.1".to_string()],
-            ..test_agent_config()
-        };
-        manager.start("crasher", &config).await.unwrap();
+        // A long-lived agent, killed explicitly below. It must NOT exit on a timer:
+        // start() ends in write_atomic's two fsyncs, which stall for 150-200ms when
+        // the disk is busy under full-suite parallelism, so a child on a 100ms timer
+        // was routinely dead before "initially running" ran.
+        let config = test_agent_config();
+        let info = manager.start("crasher", &config).await.unwrap();
 
-        // Initially running
+        // Initially running — deterministic, the child only dies when we kill it.
         assert!(manager.is_running("crasher").await);
+
+        // Crash it: killed out from under the manager, not stopped through it.
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(info.pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .unwrap();
 
         // Poll until the process has exited
         let exited = poll_until_async(
