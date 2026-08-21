@@ -171,6 +171,7 @@ impl HfClient {
         let client = reqwest::Client::builder()
             .user_agent(format!("rookery/{}", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
@@ -1211,5 +1212,23 @@ mod tests {
         let rec = recommend_quant(&quants, &profile, 10240, 20480).unwrap();
         assert_eq!(rec.label, "Q4_K_M");
         assert_eq!(rec.perf_estimate.fit_mode, FitMode::PartialOffload);
+    }
+
+    // ponytail: see the twin in releases.rs for the mechanism and its ceiling.
+    // This is the client `download_file` uses, so an unbounded connect here
+    // stalls a model pull for the full kernel SYN timeout.
+    #[tokio::test]
+    async fn test_hf_client_bounds_connect_to_blackhole() {
+        let started = std::time::Instant::now();
+        let _ = HfClient::new()
+            .client
+            .get("http://192.0.2.1:81/")
+            .send()
+            .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "connect to a blackholed peer took {elapsed:?}; connect_timeout is not applied"
+        );
     }
 }
