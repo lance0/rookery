@@ -12,6 +12,7 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let (cached, set_cached) = signal(Vec::<serde_json::Value>::new());
     let (searching, set_searching) = signal(false);
     let (loading_quants, set_loading_quants) = signal(false);
+    let (quants_error, set_quants_error) = signal(Option::<String>::None);
 
     // Load hardware and cached models on mount
     let set_hardware_init = set_hardware;
@@ -60,6 +61,8 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
 
     let select_repo = move |repo: String| {
         set_selected_repo.set(Some(repo.clone()));
+        set_quants.set(Vec::new());
+        set_quants_error.set(None);
         set_loading_quants.set(true);
         let set_toasts = set_toasts;
         wasm_bindgen_futures::spawn_local(async move {
@@ -69,11 +72,14 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                         set_quants.set(q.clone());
                     }
                 }
-                Err(e) => show_toast(
-                    set_toasts,
-                    format!("failed to load quants: {e}"),
-                    ToastKind::Error,
-                ),
+                Err(e) => {
+                    show_toast(
+                        set_toasts,
+                        format!("failed to load quants: {e}"),
+                        ToastKind::Error,
+                    );
+                    set_quants_error.set(Some(e));
+                }
             }
             set_loading_quants.set(false);
         });
@@ -268,7 +274,14 @@ pub fn ModelsPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                     Some(_) if loading_quants.get() => {
                         view! { <div class="card"><div class="empty">"loading quants..."</div></div> }.into_any()
                     }
-                    _ => view! { <div></div> }.into_any()
+                    Some(repo) => {
+                        let msg = match quants_error.get() {
+                            Some(e) => format!("failed to load quants for {repo}: {e}"),
+                            None => format!("no GGUF quants found for {repo}"),
+                        };
+                        view! { <div class="card"><div class="empty">{msg}</div></div> }.into_any()
+                    }
+                    None => view! { <div></div> }.into_any()
                 }
             }}
 

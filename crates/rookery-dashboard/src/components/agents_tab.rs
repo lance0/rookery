@@ -22,6 +22,7 @@ pub fn AgentsTab(
     set_toasts: WriteSignal<Vec<Toast>>,
 ) -> impl IntoView {
     let (updating_agent, set_updating_agent) = signal(Option::<String>::None);
+    let (acting_agent, set_acting_agent) = signal(Option::<String>::None);
     let (health_details, set_health_details) =
         signal(std::collections::HashMap::<String, serde_json::Value>::new());
 
@@ -119,6 +120,7 @@ pub fn AgentsTab(
                             let updating_name_text = name.clone();
 
                             let click_name = name.clone();
+                            let acting_name = name.clone();
                             let running = is_running;
                             let set_agents_click = set_agents;
                             let set_toasts_click = set_toasts;
@@ -126,6 +128,7 @@ pub fn AgentsTab(
                                 let n = click_name.clone();
                                 let sa = set_agents_click;
                                 let st = set_toasts_click;
+                                set_acting_agent.set(Some(n.clone()));
                                 wasm_bindgen_futures::spawn_local(async move {
                                     let result = if running {
                                         api::stop_agent(&n).await
@@ -142,6 +145,7 @@ pub fn AgentsTab(
                                     }
                                     gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
                                     if let Ok(a) = api::fetch_agents().await { sa.set(a); }
+                                    set_acting_agent.set(None);
                                 });
                             };
 
@@ -268,7 +272,13 @@ pub fn AgentsTab(
                                                 }
                                             }}
                                         </button>
-                                        <button class="btn" on:click=on_click>{btn_text}</button>
+                                        <button
+                                            class="btn"
+                                            on:click=on_click
+                                            disabled=move || acting_agent.get().as_deref() == Some(acting_name.as_str())
+                                        >
+                                            {btn_text}
+                                        </button>
                                     </div>
                                 </div>
                             }
