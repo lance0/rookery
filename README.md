@@ -50,17 +50,19 @@ See [Installation](#installation) below for setup instructions.
 ## Features
 
 - **Multi-backend** — manage llama-server (GGUF) and vLLM (safetensors, AWQ, GPTQ, NVFP4) from the same config
-- **Hot-swap** — switch between model profiles without restarting the daemon
-- **Config reload** — `rookery reload` re-reads the config file in place, so adding a profile or repointing a model no longer costs a daemon restart; a bad edit is rejected and the old config kept
+- **Hot-swap** — `rookery swap <profile>` stops the running backend and brings up another one, draining in-flight requests first. The daemon, its agents, and your open dashboard all stay up
+- **Config reload** — `rookery reload` re-reads `config.toml` in place, so adding a profile or repointing a model costs neither a daemon restart nor a model reload: the running backend and the running agents are left untouched. A config that fails to parse or validate is rejected and the daemon keeps the old one
 - **Live dashboard** — Leptos WASM frontend with 7 tabs: Overview, Settings, Agents, Chat, Bench, Logs, Models
 - **GPU monitoring** — real-time VRAM, temperature, utilization, power draw, per-process memory via NVML
 - **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (multi-platform AI agent with tool calling, web browsing, vision, and voice), coding assistants, or any service that depends on inference
+- **Agent data safety** — a read-only `PRAGMA quick_check` sweep flags corrupt agent SQLite databases before you find out the hard way, and an update or a swap bounce takes a `VACUUM INTO` snapshot first (3 generations kept under `db-backups/`)
 - **Model discovery** — search HuggingFace, browse quants, VRAM-aware recommendations, one-click download
 - **Upstream release monitor** — background polling of llama.cpp releases with version comparison, dashboard banner, and `rookery releases` CLI
 - **Auto-sleep** — unloads the model after idle timeout, wakes transparently on next request
 - **Inference canary** — periodic health checks detect CUDA zombies and auto-restart
 - **Prometheus metrics** — `/metrics` endpoint for GPU, server, agent, and canary telemetry
 - **Optional API key auth** — single bearer token protects API and SSE data routes (dashboard shell is public, data requires auth)
+- **Scriptable CLI** — every command has a documented exit code (`0` success, `1` runtime or daemon-reported failure, `2` usage error) and most take `--json`, so `rookery start && rookery agent start hermes` does the right thing
 - **systemd integration** — OOM protection, journal logging, graceful shutdown
 
 ### vs Alternatives
@@ -250,11 +252,12 @@ rookery models list         # locally cached models
 rookery models hardware     # GPU/CPU/RAM profile
 rookery releases            # upstream release status (llama.cpp)
 rookery config              # validate config
+rookery reload              # re-read config.toml without restarting the daemon
 rookery auth generate       # generate a random API key
 rookery completions <shell> # generate shell completions
 ```
 
-Most commands support `--json` for scripting.
+Most commands support `--json` for scripting. Exit codes: `0` the command did what it reported, `1` runtime failure (daemon unreachable, or the daemon reported the operation failed), `2` usage error. See [docs/cli.md](docs/cli.md) for the full contract.
 
 ## API
 
@@ -282,11 +285,14 @@ The daemon exposes a REST API. When `api_key` is configured, all `/api/*` data r
 | `/api/agents/{name}/health` | GET | Detailed health (watchdog, backoff, deps) |
 | `/api/config` | GET | Full config (secrets redacted) |
 | `/api/config/profile/{name}` | PUT | Update profile sampling params |
+| `/api/reload` | POST | Re-read config from disk; backend and agents untouched, invalid config rejected |
+| `/api/releases` | GET | Upstream release status (llama.cpp) |
 | `/api/model-info` | GET | Model ID, context window |
 | `/api/server-stats` | GET | Slot status, request count |
 | `/api/hardware` | GET | Hardware profile (GPU, CPU, RAM) |
 | `/api/models/search` | GET | Search HuggingFace `?q=query` |
 | `/api/models/quants` | GET | List quants `?repo=name` |
+| `/api/models/recommend` | GET | Best-fit quant for free VRAM `?repo=name` |
 | `/api/models/cached` | GET | Locally cached models |
 | `/api/models/pull` | POST | Download model `{ "repo": "...", "quant": "..." }` |
 | `/metrics` | GET | Prometheus/OpenMetrics (always open) |
