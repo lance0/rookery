@@ -407,3 +407,118 @@ fn models_pull_failure_goes_to_stderr_not_stdout() {
         stdout(&out)
     );
 }
+
+// ── 5. `sleep` / `wake` join the contract (LAN-1148) ────────────────────
+//
+// Both printed `message` and returned Ok(()), so both exited 0 in plain *and*
+// `--json` mode on a daemon-reported failure. `wake` is the dangerous one:
+// `rookery wake && rookery bench` benched a server that never woke.
+//
+// The idempotency call: the daemon already draws the line, returning
+// success:true for "server already sleeping" / "already running" and false only
+// for "server is not running" / "server is not sleeping". Those two are not
+// no-ops reaching the desired end state — a Stopped server that you `sleep`
+// cannot then be `wake`d — so the CLI honours the field as-is.
+
+const NOT_RUNNING: &str = r#"{"success":false,"message":"server is not running","status":{}}"#;
+const NOT_SLEEPING: &str = r#"{"success":false,"message":"server is not sleeping","status":{}}"#;
+
+#[test]
+fn sleep_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(NOT_RUNNING);
+    let out = run(port, &["sleep"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "`rookery sleep` must exit 1 when the daemon reports success:false; \
+         stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("server is not running"),
+        "the failure message must reach stderr, not stdout: {:?}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn wake_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(NOT_SLEEPING);
+    let out = run(port, &["wake"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "`rookery wake && rookery bench` otherwise benches a server that never \
+         woke — the exact boot-script shape LAN-1084 was filed for. stderr: {}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("server is not sleeping"));
+}
+
+/// The daemon also reports `success: server_state.is_running()` after actually
+/// attempting the wake, so a wake that started but failed its health check is a
+/// success:false body with a cheerful message. The exit code must follow the
+/// field, not the wording.
+#[test]
+fn wake_exits_nonzero_when_the_woken_server_is_not_running() {
+    let port = stub_daemon(r#"{"success":false,"message":"server failed to wake","status":{}}"#);
+    let out = run(port, &["wake"]);
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn sleep_json_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(NOT_RUNNING);
+    let out = run(port, &["sleep", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "`--json` must agree with plain mode on the identical body; stdout: {}",
+        stdout(&out)
+    );
+    assert_eq!(parse_stdout(&out)["message"], "server is not running");
+}
+
+#[test]
+fn wake_json_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(NOT_SLEEPING);
+    let out = run(port, &["wake", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    assert_eq!(parse_stdout(&out)["success"], false);
+}
+
+/// The compatibility half of the idempotency decision: a shutdown script that
+/// calls `rookery sleep` defensively against an already-sleeping server keeps
+/// exiting 0, because the daemon calls that case success:true.
+#[test]
+fn sleep_still_exits_zero_when_already_sleeping() {
+    let port = stub_daemon(r#"{"success":true,"message":"server already sleeping","status":{}}"#);
+    for args in [vec!["sleep"], vec!["sleep", "--json"]] {
+        let out = run(port, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "the idempotent repeat-sleep must not become a failure, for `{}`; \
+             stderr: {}",
+            args.join(" "),
+            stderr(&out)
+        );
+        assert!(stdout(&out).contains("server already sleeping"));
+    }
+}
+
+#[test]
+fn wake_still_exits_zero_on_success() {
+    let port = stub_daemon(r#"{"success":true,"message":"server woke with profile 'fast'"}"#);
+    for args in [vec!["wake"], vec!["wake", "--json"]] {
+        let out = run(port, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "for `{}`; stderr: {}",
+            args.join(" "),
+            stderr(&out)
+        );
+        assert!(stdout(&out).contains("server woke"));
+    }
+}

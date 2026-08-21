@@ -130,11 +130,16 @@ exit=1
 
 `--json` follows exactly the same exit codes as plain output.
 
-**Daemon-reported failures exit `1`.** The daemon returns HTTP 200 with `success: false` for a genuine failure, so the body carries the verdict rather than the status line. These commands read it: `start`, `swap`, `agent start`, `agent stop`, `agent update`, `models pull`.
+**Daemon-reported failures exit `1`.** The daemon returns HTTP 200 with `success: false` for a genuine failure, so the body carries the verdict rather than the status line. These commands read it: `start`, `swap`, `sleep`, `wake`, `agent start`, `agent stop`, `agent update`, `models pull`.
 
 ```bash
 rookery start && rookery agent start hermes   # the agent is not started against a dead server
+rookery wake  && rookery bench                # the bench does not run against a server that never woke
 ```
+
+**Repeating an operation that already holds is a success, not a failure.** `rookery sleep` against an already-sleeping server, `rookery wake` against an already-running one, and `rookery stop` against an already-stopped one all exit `0` — the requested end state is the actual state, so defensive shutdown and boot scripts can call them unconditionally.
+
+What exits `1` is being in a state the operation cannot reach that end state *from*: `sleep` on a stopped or failed server reports `server is not running`, and `wake` on a server that is not sleeping reports `server is not sleeping`. Neither is a no-op — a stopped server that you `sleep` cannot then be woken — so both are real failures.
 
 **An unreachable daemon exits `1`** on every command that contacts one — which is all of them except `config`, `auth generate` and `completions`, which work purely locally. `config` exits `1` when the config file is missing or fails validation.
 
