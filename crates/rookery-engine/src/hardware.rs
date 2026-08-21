@@ -74,13 +74,25 @@ pub fn build_hardware_profile(gpu_monitor: Option<&GpuMonitor>) -> HardwareProfi
     HardwareProfile { gpu, cpu }
 }
 
-/// Get live VRAM free from GPU monitor.
-pub fn live_vram_free_mb(gpu_monitor: Option<&GpuMonitor>) -> u64 {
+/// Get live VRAM free from GPU monitor, or `None` if the query failed.
+///
+/// `None` means "we don't know" (no monitor, NVML error, no device) and must
+/// not be collapsed to `0` — a fit check reading 0 tells the user the GPU is
+/// full when in fact nothing was measured.
+pub fn try_live_vram_free_mb(gpu_monitor: Option<&GpuMonitor>) -> Option<u64> {
     gpu_monitor
         .and_then(|m| m.stats().ok())
         .and_then(|s| s.first().cloned())
-        .map(|g| g.vram_total_mb - g.vram_used_mb)
-        .unwrap_or(0)
+        .map(|g| g.vram_total_mb.saturating_sub(g.vram_used_mb))
+}
+
+/// Get live VRAM free from GPU monitor, reporting a failed query as `0`.
+///
+/// ponytail: kept so the daemon call sites keep compiling. Prefer
+/// [`try_live_vram_free_mb`] — this one cannot tell "NVML failed" from
+/// "GPU genuinely full". Delete once every caller has moved over.
+pub fn live_vram_free_mb(gpu_monitor: Option<&GpuMonitor>) -> u64 {
+    try_live_vram_free_mb(gpu_monitor).unwrap_or(0)
 }
 
 /// Estimate performance for a given model size on this hardware.
@@ -256,6 +268,7 @@ fn read_ram_total_mb() -> u64 {
     0
 }
 
+/// Live free RAM in MB, or 0 if `/proc/meminfo` is unreadable.
 pub fn read_ram_free_mb() -> u64 {
     let content = match std::fs::read_to_string("/proc/meminfo") {
         Ok(c) => c,
@@ -273,4 +286,22 @@ pub fn read_ram_free_mb() -> u64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_live_vram_free_reports_unknown_not_zero() {
+        // No monitor is the same failure shape as an NVML error: nothing was
+        // measured. It must not read as "0 MB free", which is a full GPU.
+        assert_eq!(try_live_vram_free_mb(None), None);
+    }
+
+    #[test]
+    fn test_live_vram_free_keeps_legacy_zero_fallback() {
+        // The lossy wrapper still exists for the daemon call sites.
+        assert_eq!(live_vram_free_mb(None), 0);
+    }
 }

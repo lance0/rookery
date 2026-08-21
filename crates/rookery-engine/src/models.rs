@@ -509,11 +509,11 @@ fn scan_hf_hub_cache(models: &mut Vec<CachedModel>) {
         return;
     };
 
-    if !hub_dir.exists() {
-        return;
-    }
+    scan_hf_hub_dir(&hub_dir, models);
+}
 
-    let entries = match std::fs::read_dir(&hub_dir) {
+fn scan_hf_hub_dir(hub_dir: &Path, models: &mut Vec<CachedModel>) {
+    let entries = match std::fs::read_dir(hub_dir) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -534,63 +534,113 @@ fn scan_hf_hub_cache(models: &mut Vec<CachedModel>) {
             .unwrap()
             .replacen("--", "/", 1);
 
-        // Look in snapshots/*/
-        let snapshots_dir = entry.path().join("snapshots");
-        if !snapshots_dir.exists() {
-            continue;
-        }
-
-        let snapshot_dirs = match std::fs::read_dir(&snapshots_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let snapshot = match current_snapshot(&entry.path()) {
+            Some(s) => s,
+            None => continue,
         };
 
-        for snap_entry in snapshot_dirs.flatten() {
-            if !snap_entry.path().is_dir() {
-                continue;
-            }
+        // Sum shards per quant so this agrees with extract_quants(), which also
+        // sums. Recording only the first shard made the two views disagree.
+        let mut by_label: std::collections::HashMap<String, (PathBuf, u64)> =
+            std::collections::HashMap::new();
 
-            let files = match std::fs::read_dir(snap_entry.path()) {
-                Ok(e) => e,
-                Err(_) => continue,
+        for path in hf_snapshot_gguf_files(&snapshot) {
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
             };
+            let quant_label = extract_quant_label(name.strip_suffix(".gguf").unwrap_or(&name));
+            // Follow symlinks to get real file size (HF hub uses symlinks to blobs)
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-            for file_entry in files.flatten() {
-                let path = file_entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                if !name.ends_with(".gguf") || name.ends_with(".gguf.part") {
-                    continue;
-                }
-                // Skip vision projectors
-                if name.starts_with("mmproj") {
-                    continue;
-                }
+            let slot = by_label
+                .entry(quant_label)
+                .or_insert_with(|| (path.clone(), 0));
+            slot.1 += size;
+            // Lowest path wins, so a sharded quant reports shard 00001 rather
+            // than whichever shard readdir happened to yield first.
+            if path < slot.0 {
+                slot.0 = path;
+            }
+        }
 
-                let quant_label = extract_quant_label(name.strip_suffix(".gguf").unwrap_or(&name));
-                // Follow symlinks to get real file size (HF hub uses symlinks to blobs)
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-
-                // Deduplicate — don't add if already found from llama.cpp cache
-                if !models
-                    .iter()
-                    .any(|m| m.repo == repo && m.quant_label == quant_label)
-                {
-                    models.push(CachedModel {
-                        repo: repo.clone(),
-                        quant_label,
-                        path,
-                        size_bytes: size,
-                    });
-                }
+        for (quant_label, (path, size_bytes)) in by_label {
+            // Deduplicate — don't add if already found from llama.cpp cache
+            if !models
+                .iter()
+                .any(|m| m.repo == repo && m.quant_label == quant_label)
+            {
+                models.push(CachedModel {
+                    repo: repo.clone(),
+                    quant_label,
+                    path,
+                    size_bytes,
+                });
             }
         }
     }
+}
+
+/// Pick the one snapshot HF itself considers current.
+///
+/// `refs/main` records the revision the last `main` pull resolved to, which is
+/// the truth; mtime only records when a directory was last touched, and a
+/// rollback, a `revision=`-pinned download or an rsync/restore all bump the
+/// wrong one. Falls back to newest mtime (then greatest name, so equal
+/// timestamps still resolve deterministically) when `refs/main` is missing —
+/// a revision-pinned download never writes it.
+fn current_snapshot(repo_dir: &Path) -> Option<PathBuf> {
+    let snapshots = repo_dir.join("snapshots");
+
+    if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
+        let pinned = snapshots.join(rev.trim());
+        if pinned.is_dir() {
+            return Some(pinned);
+        }
+    }
+
+    std::fs::read_dir(&snapshots)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .max_by_key(|e| (e.metadata().and_then(|m| m.modified()).ok(), e.file_name()))
+        .map(|e| e.path())
+}
+
+/// GGUF files in a snapshot, including one level of subdirectory — Unsloth
+/// ships extras like `MTP/mtp-*.gguf` nested, and a top-level-only scan misses
+/// them. ponytail: one level matches HF's actual layouts; deepen only if a repo
+/// turns up that nests further.
+fn hf_snapshot_gguf_files(snapshot: &Path) -> Vec<PathBuf> {
+    fn is_gguf(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        // Skip vision projectors
+        path.is_file() && name.ends_with(".gguf") && !name.starts_with("mmproj")
+    }
+
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(snapshot) else {
+        return out;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                out.extend(
+                    sub_entries
+                        .flatten()
+                        .map(|s| s.path())
+                        .filter(|p| is_gguf(p)),
+                );
+            }
+        } else if is_gguf(&path) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 /// Parse a llama.cpp cache filename into (repo, quant_label).
@@ -638,11 +688,30 @@ fn llama_cache_dir() -> PathBuf {
     }
 }
 
-/// Mark quants as downloaded by cross-referencing with the local cache.
+/// Mark quants as downloaded by cross-referencing with the local cache,
+/// scoped to `repo` (pass the output of [`normalize_repo`]).
+///
+/// Quant labels are not unique across repos — every Unsloth repo has a
+/// `UD-Q6_K_XL` — so the repo has to be part of the match or one cached model
+/// marks every other repo's same-labelled quant as already downloaded.
+pub fn mark_downloaded_for_repo(quants: &mut [QuantInfo], extra_dirs: &[PathBuf], repo: &str) {
+    mark_downloaded_from(quants, &scan_cache(extra_dirs), Some(repo));
+}
+
+/// Repo-blind variant: matches on quant label alone, so any repo's cached
+/// `UD-Q6_K_XL` marks every repo's `UD-Q6_K_XL` as downloaded.
+///
+/// ponytail: kept only so the daemon call site keeps compiling. Delete once
+/// `routes.rs` moves to [`mark_downloaded_for_repo`].
 pub fn mark_downloaded(quants: &mut [QuantInfo], extra_dirs: &[PathBuf]) {
-    let cached = scan_cache(extra_dirs);
+    mark_downloaded_from(quants, &scan_cache(extra_dirs), None);
+}
+
+fn mark_downloaded_from(quants: &mut [QuantInfo], cached: &[CachedModel], repo: Option<&str>) {
     for quant in quants.iter_mut() {
-        quant.is_downloaded = cached.iter().any(|c| c.quant_label == quant.label);
+        quant.is_downloaded = cached
+            .iter()
+            .any(|c| repo.is_none_or(|r| c.repo == r) && c.quant_label == quant.label);
     }
 }
 
@@ -939,6 +1008,175 @@ mod tests {
         assert_eq!(normalize_repo("test/model-gguf"), "test/model-gguf");
         assert_eq!(normalize_repo("test/model-GGUF"), "test/model-GGUF");
         assert_eq!(normalize_repo("test/model-Gguf"), "test/model-Gguf");
+    }
+
+    // --- LAN-1092 ---
+
+    fn quant(label: &str) -> QuantInfo {
+        QuantInfo {
+            label: label.into(),
+            files: vec![],
+            total_bytes: 0,
+            is_downloaded: false,
+            perf_estimate: None,
+        }
+    }
+
+    fn cached(repo: &str, label: &str) -> CachedModel {
+        CachedModel {
+            repo: repo.into(),
+            quant_label: label.into(),
+            path: PathBuf::from("/dev/null"),
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn test_mark_downloaded_does_not_leak_across_repos() {
+        // UD-Q6_K_XL cached for Qwen3.8 must not mark a *different* repo's
+        // UD-Q6_K_XL as already downloaded — that skips a multi-GB download.
+        let mut quants = vec![quant("UD-Q6_K_XL"), quant("Q4_K_M")];
+        let cache = vec![cached("unsloth/Qwen3.8-27B-GGUF", "UD-Q6_K_XL")];
+
+        mark_downloaded_from(&mut quants, &cache, Some("unsloth/Gemma-4-31B-GGUF"));
+        assert!(!quants[0].is_downloaded, "other repo's quant leaked in");
+        assert!(!quants[1].is_downloaded);
+
+        mark_downloaded_from(&mut quants, &cache, Some("unsloth/Qwen3.8-27B-GGUF"));
+        assert!(quants[0].is_downloaded, "own repo's quant must still match");
+        assert!(!quants[1].is_downloaded);
+    }
+
+    /// Build `hub/models--{owner}--{name}/` with the given snapshots.
+    /// Each snapshot is `(revision, files)` where a file path may contain `/`.
+    fn write_hub_repo(hub: &Path, dir_name: &str, snapshots: &[(&str, &[(&str, u64)])]) {
+        for (rev, files) in snapshots {
+            let snap = hub.join(dir_name).join("snapshots").join(rev);
+            for (rel, size) in *files {
+                let path = snap.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, vec![0u8; *size as usize]).unwrap();
+            }
+            // Snapshots land oldest-first, so readdir order and mtime order
+            // both put the last-written one last.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn write_ref_main(hub: &Path, dir_name: &str, rev: &str) {
+        let refs = hub.join(dir_name).join("refs");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("main"), format!("{rev}\n")).unwrap();
+    }
+
+    #[test]
+    fn test_hub_scan_follows_refs_main_not_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path();
+        let dir = "models--unsloth--Qwen3.6-27B-GGUF";
+
+        // "current" is written FIRST, so it is both older and earlier in
+        // readdir than the stale snapshot. Only refs/main can pick it.
+        write_hub_repo(
+            hub,
+            dir,
+            &[
+                ("aaaacurrent", &[("Model-UD-Q6_K_XL.gguf", 100)]),
+                ("zzzzstale", &[("Model-UD-Q6_K_XL.gguf", 200)]),
+            ],
+        );
+        write_ref_main(hub, dir, "aaaacurrent");
+
+        let mut models = Vec::new();
+        scan_hf_hub_dir(hub, &mut models);
+
+        assert_eq!(models.len(), 1, "one snapshot only, got {models:?}");
+        assert_eq!(models[0].size_bytes, 100, "picked the stale snapshot");
+        assert!(models[0].path.to_str().unwrap().contains("aaaacurrent"));
+    }
+
+    #[test]
+    fn test_hub_scan_falls_back_to_newest_when_no_refs_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path();
+        let dir = "models--unsloth--Pinned-GGUF";
+
+        // A revision-pinned download never writes refs/main; newest wins.
+        write_hub_repo(
+            hub,
+            dir,
+            &[
+                ("zzzzold", &[("Model-Q4_K_M.gguf", 100)]),
+                ("aaaanew", &[("Model-Q4_K_M.gguf", 200)]),
+            ],
+        );
+
+        let mut models = Vec::new();
+        scan_hf_hub_dir(hub, &mut models);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].size_bytes, 200, "picked the older snapshot");
+    }
+
+    #[test]
+    fn test_hub_scan_sums_shards_like_extract_quants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path();
+
+        write_hub_repo(
+            hub,
+            "models--unsloth--Sharded-GGUF",
+            &[(
+                "rev1",
+                &[
+                    ("Model-Q8_0-00001-of-00002.gguf", 300),
+                    ("Model-Q8_0-00002-of-00002.gguf", 700),
+                ],
+            )],
+        );
+
+        let mut models = Vec::new();
+        scan_hf_hub_dir(hub, &mut models);
+
+        assert_eq!(models.len(), 1, "shards must collapse to one quant");
+        assert_eq!(models[0].quant_label, "Q8_0");
+        assert_eq!(models[0].size_bytes, 1000, "only one shard was counted");
+        assert!(
+            models[0].path.to_str().unwrap().contains("00001-of-00002"),
+            "should point at the first shard, got {:?}",
+            models[0].path
+        );
+    }
+
+    #[test]
+    fn test_hub_scan_finds_subdirectory_quants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path();
+
+        // Unsloth ships MTP heads nested one level down.
+        write_hub_repo(
+            hub,
+            "models--unsloth--Nested-GGUF",
+            &[(
+                "rev1",
+                &[
+                    ("Model-UD-Q6_K_XL.gguf", 100),
+                    ("MTP/mtp-Q8_0.gguf", 50),
+                    ("mmproj-BF16.gguf", 10),
+                ],
+            )],
+        );
+
+        let mut models = Vec::new();
+        scan_hf_hub_dir(hub, &mut models);
+
+        let labels: Vec<&str> = models.iter().map(|m| m.quant_label.as_str()).collect();
+        assert!(
+            labels.contains(&"Q8_0"),
+            "missed MTP/ subdir, got {labels:?}"
+        );
+        assert!(labels.contains(&"UD-Q6_K_XL"));
+        assert!(!labels.contains(&"BF16"), "mmproj must stay excluded");
     }
 
     #[test]
