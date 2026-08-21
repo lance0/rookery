@@ -18,12 +18,17 @@ use crate::metrics::RuntimeMetrics;
 pub enum StartServerError {
     Start(String),
     Health(String),
+    /// Shutdown had already begun, so no backend was spawned. Distinct from
+    /// `Start` because it is not a failure and must not map to a 500.
+    Shutdown,
 }
 
 impl std::fmt::Display for StartServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Start(msg) | Self::Health(msg) => f.write_str(msg),
+            // Borrow the canonical wording rather than repeating the literal.
+            Self::Shutdown => write!(f, "{}", rookery_core::error::Error::Shutdown),
         }
     }
 }
@@ -76,6 +81,38 @@ impl AppState {
         profile_name: &str,
         record_activity: bool,
     ) -> Result<ServerState, StartServerError> {
+        // LAN-1128: refuse to spawn a backend once shutdown has begun — the same
+        // race LAN-1120 closed for `post_swap`, guarded here instead of at the
+        // routes because every start path (`post_start`, `post_wake`,
+        // `post_chat`'s wake, the canary restart, auto-start) funnels through
+        // this one function.
+        //
+        // `begin_shutdown()` runs before `server_handle.abort()`, so the flag is
+        // already visible; shutdown then gives up on `op_lock` after 20s
+        // (LAN-1074) while the health wait below runs for up to 120s. Without
+        // this check a start that is merely slow goes on to spawn an
+        // llama-server *after* the daemon has exited — ~30 GB of VRAM held by an
+        // unsupervised orphan.
+        //
+        // Placement is before the `Starting` broadcast on purpose: nothing has
+        // been torn down or announced yet, so there is no transient state to
+        // unwind and no window in which a client sees `Starting` for a start
+        // that will never happen.
+        if self.agent_manager.is_shutting_down() {
+            tracing::warn!(
+                profile = %profile_name,
+                "daemon is shutting down, refusing to start server"
+            );
+            // `Stopped` is the honest terminal state (no backend was spawned)
+            // and it is what the shutdown path writes anyway, so this is
+            // idempotent with it. It also matters if we never get there: a wake
+            // aborted here would otherwise persist `Sleeping`, and a SIGKILL at
+            // `TimeoutStopSec` would leave the next boot restoring a sleeping
+            // server that does not exist.
+            self.set_server_state(ServerState::Stopped).await;
+            return Err(StartServerError::Shutdown);
+        }
+
         let starting_state = ServerState::Starting {
             profile: profile_name.to_string(),
             since: chrono::Utc::now(),
