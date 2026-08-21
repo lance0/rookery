@@ -846,7 +846,6 @@ mod tests {
     use async_trait::async_trait;
     use rookery_core::config::BackendType;
     use rookery_core::error::{Error, Result};
-    use tokio::sync::watch;
 
     struct MockBackend {
         running: bool,
@@ -883,11 +882,6 @@ mod tests {
         }
 
         fn set_draining(&self, _draining: bool) {}
-
-        fn subscribe_errors(&self) -> watch::Receiver<bool> {
-            let (_tx, rx) = watch::channel(false);
-            rx
-        }
     }
 
     #[tokio::test]

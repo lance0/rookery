@@ -34,7 +34,6 @@ pub struct MockBackend {
     running: AtomicBool,
     draining: AtomicBool,
     info: Mutex<Option<BackendInfo>>,
-    cuda_error_tx: watch::Sender<bool>,
 }
 
 impl Default for MockBackend {
@@ -45,23 +44,19 @@ impl Default for MockBackend {
 
 impl MockBackend {
     pub fn new() -> Self {
-        let (cuda_error_tx, _) = watch::channel(false);
         Self {
             running: AtomicBool::new(false),
             draining: AtomicBool::new(false),
             info: Mutex::new(None),
-            cuda_error_tx,
         }
     }
 
     /// Create a mock backend that reports as running with the given info.
     pub fn running_with(info: BackendInfo) -> Self {
-        let (cuda_error_tx, _) = watch::channel(false);
         Self {
             running: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             info: Mutex::new(Some(info)),
-            cuda_error_tx,
         }
     }
 }
@@ -134,10 +129,6 @@ impl InferenceBackend for MockBackend {
 
     fn set_draining(&self, draining: bool) {
         self.draining.store(draining, Ordering::SeqCst);
-    }
-
-    fn subscribe_errors(&self) -> watch::Receiver<bool> {
-        self.cuda_error_tx.subscribe()
     }
 }
 

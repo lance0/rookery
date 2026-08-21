@@ -30,8 +30,7 @@ The `InferenceBackend` trait (`backend.rs`) abstracts the inference server lifec
 InferenceBackend (trait)
 ├── start(), stop(), is_running(), adopt()
 ├── process_info(), to_server_state()
-├── is_draining(), set_draining()
-└── subscribe_errors()
+└── is_draining(), set_draining()
 
 LlamaServerBackend          VllmBackend
 ├── Wraps ProcessManager    ├── Docker Compose lifecycle

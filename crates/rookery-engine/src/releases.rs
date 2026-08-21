@@ -82,11 +82,6 @@ impl ReleaseCache {
         }
         self.repos.iter_mut().find(|r| r.repo == repo).unwrap()
     }
-
-    /// Returns true if any tracked repo has an update available.
-    pub fn has_updates(&self) -> bool {
-        self.repos.iter().any(|r| r.update_available)
-    }
 }
 
 // --- GitHub Client ---
@@ -353,7 +348,6 @@ mod tests {
         let loaded = ReleaseCache::load(&tmp);
         assert_eq!(loaded.repos.len(), 1);
         assert!(loaded.repos[0].update_available);
-        assert!(loaded.has_updates());
         let _ = std::fs::remove_file(&tmp);
     }
 

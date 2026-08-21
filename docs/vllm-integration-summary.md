@@ -6,7 +6,7 @@ vLLM is now supported as an alternative inference backend alongside llama-server
 
 ### Milestone 1: Backend Abstraction (core refactoring)
 
-- **InferenceBackend trait** (`rookery-engine/src/backend.rs`) — async trait with methods: `start`, `stop`, `is_running`, `process_info`, `adopt`, `to_server_state`, `is_draining`, `set_draining`, `subscribe_errors`
+- **InferenceBackend trait** (`rookery-engine/src/backend.rs`) — async trait with methods: `start`, `stop`, `is_running`, `process_info`, `adopt`, `to_server_state`, `is_draining`, `set_draining`
 - **LlamaServerBackend** wraps existing ProcessManager, zero behavior change
 - **Config sub-tables** — Profile now uses `[profiles.name.llama_server]` and `[profiles.name.vllm]` sub-tables for backend-specific fields. Flat legacy profiles (no sub-table) auto-detected as llama-server for backward compat
 - **BackendType enum** (LlamaServer, Vllm) in ServerState::Running with backward-compatible deserialization

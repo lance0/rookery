@@ -94,9 +94,6 @@ pub trait InferenceBackend: Send + Sync {
 
     /// Set the drain mode flag (called by daemon during swap orchestration).
     fn set_draining(&self, draining: bool);
-
-    /// Subscribe to error notifications (e.g., CUDA errors from stderr).
-    fn subscribe_errors(&self) -> watch::Receiver<bool>;
 }
 
 // ── LlamaServerBackend ────────────────────────────────────────────────
@@ -203,10 +200,6 @@ impl InferenceBackend for LlamaServerBackend {
     fn set_draining(&self, draining: bool) {
         self.process_manager.set_draining(draining);
     }
-
-    fn subscribe_errors(&self) -> watch::Receiver<bool> {
-        self.process_manager.subscribe_cuda_errors()
-    }
 }
 
 // ── VllmBackend ───────────────────────────────────────────────────────
@@ -228,8 +221,6 @@ pub struct VllmBackend {
     log_buffer: Arc<LogBuffer>,
     /// Drain flag managed by daemon-level swap orchestration.
     draining: AtomicBool,
-    /// Watch channel sender for CUDA error detection.
-    cuda_error_tx: watch::Sender<bool>,
     /// Optional daemon-level CUDA error notifier that survives backend swaps.
     daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
     /// Info about the running backend (profile, port, started_at, etc.).
@@ -253,13 +244,11 @@ impl VllmBackend {
         log_buffer: Arc<LogBuffer>,
         daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
     ) -> Self {
-        let (cuda_error_tx, _) = watch::channel(false);
         Self {
             compose_file_path,
             container_id: Mutex::new(None),
             log_buffer,
             draining: AtomicBool::new(false),
-            cuda_error_tx,
             daemon_error_tx,
             info: Mutex::new(None),
             log_task: Mutex::new(None),
@@ -354,7 +343,6 @@ impl VllmBackend {
     async fn spawn_log_capture(&self, container_id: String) {
         let compose_path = self.compose_file_path.clone();
         let log_buffer = self.log_buffer.clone();
-        let cuda_error_tx = self.cuda_error_tx.clone();
         let daemon_error_tx = self.daemon_error_tx.clone();
 
         let handle = tokio::spawn(async move {
@@ -393,7 +381,6 @@ impl VllmBackend {
                         // Check for CUDA errors before pushing to log buffer
                         if is_cuda_error(&line) {
                             tracing::error!("CUDA error detected in vLLM logs: {line}");
-                            let _ = cuda_error_tx.send(true);
                             if let Some(tx) = &daemon_error_tx {
                                 let _ = tx.send(Some(BackendErrorEvent {
                                     backend_type: BackendType::Vllm,
@@ -618,10 +605,6 @@ impl InferenceBackend for VllmBackend {
 
     fn set_draining(&self, draining: bool) {
         self.draining.store(draining, Ordering::SeqCst);
-    }
-
-    fn subscribe_errors(&self) -> watch::Receiver<bool> {
-        self.cuda_error_tx.subscribe()
     }
 }
 
@@ -862,17 +845,6 @@ mod tests {
             !backend.is_draining(),
             "should not be draining after set_draining(false)"
         );
-    }
-
-    // === subscribe_errors returns a valid receiver
-    #[test]
-    fn test_llama_server_backend_subscribe_errors() {
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = LlamaServerBackend::new(log_buffer);
-
-        let rx = backend.subscribe_errors();
-        // Initial value should be false (no errors)
-        assert!(!*rx.borrow(), "initial error state should be false");
     }
 
     // adopt() registers PID for orphan recovery
@@ -1286,8 +1258,8 @@ mod tests {
 
     // Canary-relevant trait methods work on LlamaServerBackend
     //
-    // The inference canary uses three trait methods: to_server_state(), is_draining(),
-    // and subscribe_errors(). This test verifies all three work correctly on
+    // The inference canary uses two trait methods: to_server_state() and
+    // is_draining(). This test verifies both work correctly on
     // LlamaServerBackend, which is the foundation for the canary integration.
     #[tokio::test]
     async fn test_canary_trait_methods_on_llama_server_backend() {
@@ -1317,21 +1289,6 @@ mod tests {
         assert!(
             !backend.is_draining(),
             "canary should see draining=false after swap completes"
-        );
-
-        // subscribe_errors() — canary uses this to detect CUDA errors
-        let rx = backend.subscribe_errors();
-        assert!(
-            !*rx.borrow(),
-            "initial error state should be false (no CUDA errors for canary)"
-        );
-
-        // The receiver should be a valid watch channel that can be polled
-        // (canary polls this in its loop to trigger immediate restart on CUDA error)
-        let rx2 = backend.subscribe_errors();
-        assert!(
-            !*rx2.borrow(),
-            "multiple subscribers should all see false initially"
         );
     }
 
@@ -1404,15 +1361,6 @@ mod tests {
         assert!(backend.is_draining());
         backend.set_draining(false);
         assert!(!backend.is_draining());
-    }
-
-    // === VllmBackend subscribe_errors
-    #[test]
-    fn test_vllm_backend_subscribe_errors() {
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = VllmBackend::new(PathBuf::from("/tmp/test-compose.yml"), log_buffer);
-        let rx = backend.subscribe_errors();
-        assert!(!*rx.borrow(), "initial error state should be false");
     }
 
     // is_running() checks container state, NOT /proc PID
@@ -1937,100 +1885,6 @@ mod tests {
 
     // ── Log capture lifecycle tests ───────────────────
 
-    // Log lines flow into LogBuffer with [vllm] prefix
-    //
-    // Spawns a real subprocess that outputs lines, verifies they arrive
-    // in the LogBuffer with the [vllm] prefix.
-    #[tokio::test]
-    async fn test_vllm_log_capture_prefixes_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a compose file that just runs echo via a real docker compose
-        // We can't rely on docker, so instead test the spawn_log_capture helper
-        // by creating a fake compose file and verifying the mechanism.
-        //
-        // Since spawn_log_capture runs `docker compose -f {path} logs -f --no-color`,
-        // we test the log prefix behavior by directly testing the is_cuda_error function
-        // and the log format pattern. The full integration is tested in integration tests.
-        //
-        // For a unit-level test, we simulate the log capture behavior.
-        let compose_path = dir.path().join("compose.yml");
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = VllmBackend::new(compose_path, log_buffer.clone());
-
-        // Test that subscribe_errors starts with false
-        let rx = backend.subscribe_errors();
-        assert!(!*rx.borrow(), "initial error state should be false");
-
-        // Simulate what the log capture task does: push lines with [vllm] prefix
-        // and trigger CUDA errors
-        log_buffer.push("[vllm] INFO: vLLM version 0.8.0".to_string());
-        log_buffer.push("[vllm] INFO: Using CUDA device 0".to_string());
-
-        let lines = log_buffer.last_n(10);
-        assert_eq!(lines.len(), 2);
-        assert!(
-            lines[0].starts_with("[vllm] "),
-            "line should have [vllm] prefix"
-        );
-        assert!(
-            lines[1].starts_with("[vllm] "),
-            "line should have [vllm] prefix"
-        );
-    }
-
-    // CUDA errors in log stream trigger watch channel
-    //
-    // Verifies that when a CUDA error line appears, the cuda_error_tx
-    // watch channel is triggered.
-    #[tokio::test]
-    async fn test_vllm_cuda_error_triggers_watch_channel() {
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = VllmBackend::new(PathBuf::from("/tmp/test-compose.yml"), log_buffer);
-
-        let mut rx = backend.subscribe_errors();
-        assert!(!*rx.borrow(), "initial state should be false");
-
-        // Simulate CUDA error detection (same as what log capture task does)
-        let line = "RuntimeError: CUDA error: out of memory";
-        if is_cuda_error(line) {
-            let _ = backend.cuda_error_tx.send(true);
-        }
-
-        // The receiver should have been updated
-        rx.changed().await.unwrap();
-        assert!(*rx.borrow(), "error state should be true after CUDA error");
-    }
-
-    // Normal CUDA lines do NOT trigger watch channel
-    #[tokio::test]
-    async fn test_vllm_normal_cuda_lines_dont_trigger_watch() {
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = VllmBackend::new(PathBuf::from("/tmp/test-compose.yml"), log_buffer);
-
-        let rx = backend.subscribe_errors();
-        assert!(!*rx.borrow());
-
-        // Process normal CUDA lines — should NOT trigger
-        let normal_lines = [
-            "Using CUDA device 0",
-            "CUDA version: 12.4",
-            "CUDA available: True",
-            "Initializing CUDA",
-        ];
-
-        for line in &normal_lines {
-            if is_cuda_error(line) {
-                let _ = backend.cuda_error_tx.send(true);
-            }
-        }
-
-        // Error state should still be false
-        assert!(
-            !*rx.borrow(),
-            "error state should remain false for normal CUDA lines"
-        );
-    }
-
     // Log capture task terminated on stop()
     //
     // Verifies that stop() aborts the log capture task handle.
@@ -2149,12 +2003,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _compose_path = dir.path().join("vllm-compose.yml");
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let cuda_error_tx = watch::Sender::new(false);
 
         // Simulate the log capture behavior with a short-lived subprocess
         // that exits immediately (like a container stopping)
         let log_buffer_clone = log_buffer.clone();
-        let cuda_tx = cuda_error_tx.clone();
 
         let handle = tokio::spawn(async move {
             // Use a command that outputs a line and exits
@@ -2179,9 +2031,6 @@ mod tests {
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
-                        if is_cuda_error(&line) {
-                            let _ = cuda_tx.send(true);
-                        }
                         log_buffer_clone.push(format!("[vllm] {line}"));
                     }
                     Ok(None) => break,
@@ -2913,8 +2762,8 @@ mod tests {
     // Backend error channel propagates CUDA errors
     //
     // Tests that CUDA errors detected in the backend's process stderr
-    // propagate through subscribe_errors(). Uses a script that outputs
-    // a CUDA error line to stderr.
+    // propagate to the daemon-level error notifier. Uses a script that
+    // outputs a CUDA error line to stderr.
     #[tokio::test]
     async fn test_llama_backend_error_channel_propagates_cuda_errors() {
         // Create a script that outputs a CUDA error to stderr, then sleeps
@@ -2932,11 +2781,10 @@ mod tests {
 
         let config = make_backend_test_config(script_path.to_str().unwrap(), port);
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let backend = LlamaServerBackend::new(log_buffer);
+        let (error_tx, mut error_rx) = watch::channel(None);
+        let backend = LlamaServerBackend::new_with_error_notifier(log_buffer, Some(error_tx));
 
-        // Subscribe to errors BEFORE starting
-        let mut error_rx = backend.subscribe_errors();
-        assert!(!*error_rx.borrow(), "initial error state should be false");
+        assert!(error_rx.borrow().is_none(), "no error before start");
 
         // Start the backend — the script will output a CUDA error to stderr
         let info = backend
@@ -2948,7 +2796,7 @@ mod tests {
         // Wait for the CUDA error to be detected (stderr capture is async)
         let detected = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            error_rx.wait_for(|&val| val),
+            error_rx.wait_for(|val| val.is_some()),
         )
         .await;
 
@@ -2956,12 +2804,10 @@ mod tests {
             detected.is_ok(),
             "CUDA error should be detected within timeout"
         );
-        // Re-check with a fresh borrow after the wait completes
-        let has_error = *backend.subscribe_errors().borrow();
-        assert!(
-            has_error,
-            "error channel should report true after CUDA error"
-        );
+        drop(detected);
+        let event = error_rx.borrow().clone().expect("error event recorded");
+        assert_eq!(event.backend_type, BackendType::LlamaServer);
+        assert_eq!(event.pid, info.pid);
 
         // Clean up
         backend.stop().await.unwrap();
@@ -3012,11 +2858,6 @@ mod tests {
             !llama_backend.is_draining(),
             "llama backend should not be draining initially"
         );
-        let llama_errors = llama_backend.subscribe_errors();
-        assert!(
-            !*llama_errors.borrow(),
-            "llama backend should have no errors initially"
-        );
 
         // VllmBackend profile
         let vllm_profile = Profile {
@@ -3061,11 +2902,6 @@ mod tests {
         assert!(
             !vllm_backend.is_draining(),
             "vllm backend should not be draining initially"
-        );
-        let vllm_errors = vllm_backend.subscribe_errors();
-        assert!(
-            !*vllm_errors.borrow(),
-            "vllm backend should have no errors initially"
         );
     }
 

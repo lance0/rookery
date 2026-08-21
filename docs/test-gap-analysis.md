@@ -40,12 +40,10 @@ The roadmap explicitly calls out these test gaps:
 4. `ProcessManager::adopt()` — stores info, no child handle
 5. `ProcessManager::is_running()` — try_wait on child, or is_pid_alive for adopted
 6. `ProcessManager::to_server_state()` — maps process state to ServerState
-7. `ProcessManager::swap()` — drain → stop → start_and_wait
-8. `ProcessManager::start_and_wait()` — start + health check, transitions to Failed on timeout
-9. CUDA error detection in stderr → triggers watch channel
-10. OOM score adj write failure (non-root)
-11. `start()` when already running returns error
-12. Empty command line returns error
+7. CUDA error detection in stderr → notifies the daemon error channel
+8. OOM score adj write failure (non-root)
+9. `start()` when already running returns error
+10. Empty command line returns error
 
 **Test types needed:** Mock-based unit tests using a **mock llama-server** (see §4).
 
@@ -58,7 +56,7 @@ The roadmap explicitly calls out these test gaps:
 Comprehensive coverage of:
 - `InferenceBackend` trait object safety, Send+Sync
 - `BackendInfo` serde roundtrips (llama-server + vllm)
-- `LlamaServerBackend`: idle state, stop no-op, adopt, is_running, draining, subscribe_errors, start with real process, stop after adopt
+- `LlamaServerBackend`: idle state, stop no-op, adopt, is_running, draining, start with real process, stop after adopt
 - `VllmBackend`: idle state, container checks, compose file writing, docker compose commands, log capture, CUDA error detection
 - `create_backend()` factory function
 - Conversion helpers: `process_info_to_backend_info`, `backend_info_to_process_info`

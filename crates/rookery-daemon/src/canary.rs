@@ -16,9 +16,6 @@ pub const CANARY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay before retrying a failed canary check.
 pub const CANARY_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Timeout for health check after a canary-triggered restart.
-pub const CANARY_HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Delay after stopping server to allow GPU state cleanup before restart.
 pub const GPU_COOLDOWN_DELAY: Duration = Duration::from_secs(5);
 
@@ -260,7 +257,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use tokio::sync::watch;
 
     use crate::test_utils::build_test_app_state;
 
@@ -386,12 +382,10 @@ mod tests {
         start_port: tokio::sync::Mutex<u16>,
         stop_count: AtomicU32,
         start_count: AtomicU32,
-        cuda_error_tx: watch::Sender<bool>,
     }
 
     impl CanaryMockBackend {
         fn new(port: u16) -> Self {
-            let (cuda_error_tx, _) = watch::channel(false);
             Self {
                 running: AtomicBool::new(true),
                 draining: AtomicBool::new(false),
@@ -401,7 +395,6 @@ mod tests {
                 start_port: tokio::sync::Mutex::new(port),
                 stop_count: AtomicU32::new(0),
                 start_count: AtomicU32::new(0),
-                cuda_error_tx,
             }
         }
 
@@ -415,10 +408,6 @@ mod tests {
 
         async fn set_start_port(&self, port: u16) {
             *self.start_port.lock().await = port;
-        }
-
-        fn trigger_cuda_error(&self) {
-            let _ = self.cuda_error_tx.send(true);
         }
     }
 
@@ -503,10 +492,6 @@ mod tests {
 
         fn set_draining(&self, draining: bool) {
             self.draining.store(draining, Ordering::SeqCst);
-        }
-
-        fn subscribe_errors(&self) -> watch::Receiver<bool> {
-            self.cuda_error_tx.subscribe()
         }
     }
 
@@ -653,26 +638,6 @@ mod tests {
         let restarted = run_canary_check(&state, None).await;
 
         assert!(!restarted, "should skip check when not running");
-    }
-
-    // === Test 5: CUDA error on watch channel triggers immediate canary check
-
-    //
-    // The canary loop in main() uses `cuda_error_rx.changed()` in a
-    // `tokio::select!` to break out of the sleep interval. This test
-    // verifies the watch channel fires when a CUDA error is sent.
-    #[tokio::test]
-    async fn test_cuda_error_triggers_canary_via_watch_channel() {
-        let mock_backend = CanaryMockBackend::new(1);
-
-        let mut rx = mock_backend.subscribe_errors();
-        assert!(!*rx.borrow(), "initial state should be false");
-
-        mock_backend.trigger_cuda_error();
-
-        let changed = tokio::time::timeout(Duration::from_secs(1), rx.changed()).await;
-        assert!(changed.is_ok(), "watch channel should notify on CUDA error");
-        assert!(*rx.borrow(), "CUDA error flag should be true after trigger");
     }
 
     // === Test 6: Canary acquires op_lock during restart
