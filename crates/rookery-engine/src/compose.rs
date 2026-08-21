@@ -7,6 +7,35 @@ use serde::Serialize;
 /// Path where the generated compose file is written.
 pub const COMPOSE_FILE_NAME: &str = "vllm-compose.yml";
 
+/// Mount point of the HuggingFace cache inside the vLLM container.
+/// This is the container's default `HF_HOME`, so its `hub/` subdirectory
+/// lines up with the host's.
+const CONTAINER_HF_CACHE: &str = "/root/.cache/huggingface";
+
+/// The `volumes` entry that persists downloaded weights across restarts.
+///
+/// `stop()` runs `docker compose down`, which deletes the container's writable
+/// layer — without this bind mount every start re-downloads the whole model,
+/// and a slow first pull gets torn down by the health timeout before it ever
+/// finishes.
+///
+/// The default honours `HF_HOME` when set, so the container shares the host's
+/// existing model cache instead of pulling a second copy; `${HF_CACHE}`
+/// overrides it at `docker compose` time without regenerating the file.
+fn hf_cache_volume() -> String {
+    let default = std::env::var("HF_HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".cache/huggingface")
+                .display()
+                .to_string()
+        });
+    format!("${{HF_CACHE:-{default}}}:{CONTAINER_HF_CACHE}")
+}
+
 /// Returns the default compose file path: `~/.config/rookery/vllm-compose.yml`.
 pub fn compose_file_path() -> Result<std::path::PathBuf> {
     let config_dir = dirs::config_dir()
@@ -22,6 +51,7 @@ pub fn compose_file_path() -> Result<std::path::PathBuf> {
 /// - `runtime: nvidia`
 /// - Port mapping `{profile_port}:8000` (vLLM serves on 8000 internally)
 /// - Environment: `HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}`
+/// - A bind mount of the host HuggingFace cache (see [`hf_cache_volume`])
 /// - Command args: `--model`, `--gpu-memory-utilization`, `--port 8000`,
 ///   plus optional args when set, plus `extra_args` verbatim
 /// - `deploy.resources.reservations.devices` for GPU
@@ -95,6 +125,7 @@ pub fn generate_compose(config: &Config, profile: &str) -> Result<String> {
                     runtime: "nvidia".to_string(),
                     ports: vec![format!("{}:8000", prof.port)],
                     environment: vec!["HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}".to_string()],
+                    volumes: vec![hf_cache_volume()],
                     command,
                     deploy: Deploy {
                         resources: Resources {
@@ -130,6 +161,7 @@ struct Service {
     runtime: String,
     ports: Vec<String>,
     environment: Vec<String>,
+    volumes: Vec<String>,
     command: Vec<String>,
     deploy: Deploy,
 }
@@ -446,6 +478,73 @@ gpu_memory_utilization = {gpu_mem}
             has_hf_token,
             "environment should include HF_TOKEN passthrough"
         );
+    }
+
+    // Regression: without a cache bind mount, `docker compose down` discards
+    // the container's writable layer and every start re-downloads the model.
+    #[test]
+    fn test_compose_mounts_hf_cache() {
+        let config = make_vllm_config(default_vllm_config(), 8081, "test/model");
+
+        let yaml_str = generate_compose(&config, "test_vllm").unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+
+        let volumes = parsed["services"]["vllm"]["volumes"]
+            .as_sequence()
+            .expect("compose must declare a volumes list");
+        assert!(
+            !volumes.is_empty(),
+            "compose must bind-mount the HF cache, or `docker compose down` \
+             discards the weights and every start re-downloads the model"
+        );
+        let mount = volumes[0].as_str().unwrap();
+
+        assert!(
+            mount.ends_with(":/root/.cache/huggingface"),
+            "mount must target the container HF cache, got: {mount}"
+        );
+        assert!(
+            mount.starts_with("${HF_CACHE:-"),
+            "host side must stay overridable via HF_CACHE, got: {mount}"
+        );
+
+        // The baked-in default must be a real path, not a literal `~` — docker
+        // compose does not run a shell over bind-mount sources.
+        let host = mount.split(":/root").next().unwrap();
+        let default = host
+            .trim_start_matches("${HF_CACHE:-")
+            .trim_end_matches('}');
+        assert!(
+            !default.contains('~') && !default.is_empty(),
+            "default host path must be expanded, got: {default}"
+        );
+    }
+
+    // The default follows HF_HOME when the daemon has one, so the container
+    // reuses the host's existing model cache instead of pulling a second copy.
+    #[test]
+    fn test_hf_cache_volume_honours_hf_home() {
+        // ponytail: reads the process env, so assert on the shape the daemon
+        // will actually emit rather than mutating env (racy under a test
+        // harness that runs threads in parallel).
+        let mount = hf_cache_volume();
+        let host = mount
+            .trim_start_matches("${HF_CACHE:-")
+            .split(":/root")
+            .next()
+            .unwrap()
+            .trim_end_matches('}');
+
+        match std::env::var("HF_HOME") {
+            Ok(hf_home) if !hf_home.is_empty() => assert_eq!(
+                host, hf_home,
+                "default should be HF_HOME when the daemon has one set"
+            ),
+            _ => assert!(
+                host.ends_with(".cache/huggingface"),
+                "default should fall back to the home HF cache, got: {host}"
+            ),
+        }
     }
 
     // Generated compose file is valid YAML
