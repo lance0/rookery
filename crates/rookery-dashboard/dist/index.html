@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>rookery</title>
-    <link rel="stylesheet" href="/style-d95bfaedef7e6728.css" integrity="sha384-bZgMCbZZZsQSGlOdtDbH9/S2WeBBOlYAl1zfprYE9m+KyynrPnVLCJo5EL+qRcer"/>
+    <link rel="stylesheet" href="/style-adc76ff3694d88cb.css" integrity="sha384-wNCrmgx0xAkQwrMUFUuHS++nUq20s7LeUOVYJU/N6LWJKqHOWS0xOpmTxKtqaWJE"/>
     <!-- -all enables every wasm feature for validation.
          Current rustc emits bulk-memory (memory.copy) and nontrapping
          float-to-int (i64.trunc_sat_f64_s); trunk's bundled wasm-opt rejects
@@ -14,8 +14,8 @@
          emitted, and the browser targets here support all of it. -->
     
 <script type="module">
-import init, * as bindings from '/rookery-dashboard-bc404dfea48e53d5.js';
-const wasm = await init({ module_or_path: '/rookery-dashboard-bc404dfea48e53d5_bg.wasm' });
+import init, * as bindings from '/rookery-dashboard-aec6cb9dad541eea.js';
+const wasm = await init({ module_or_path: '/rookery-dashboard-aec6cb9dad541eea_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -27,6 +27,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="modulepreload" href="/rookery-dashboard-bc404dfea48e53d5.js" crossorigin="anonymous" integrity="sha384-42Y7MsKw+fwIDXjNR9GrH2hQdA3+Aq9l/KosWHmAaiFG1aMqcswvGku5yml/Tw8H"><link rel="preload" href="/rookery-dashboard-bc404dfea48e53d5_bg.wasm" crossorigin="anonymous" integrity="sha384-gs0RzdanV7tNkwSibpOa20OvhmaCvn1bo0c6bKjLi9sOzJf9BM4emIRPJ+ilrGjf" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/rookery-dashboard-aec6cb9dad541eea.js" crossorigin="anonymous" integrity="sha384-xf9TBXD6YRV1e5VPV/SczC2aHxTSvYUmWmBn/juiksLDw5ROvY44Be+htPChdlsp"><link rel="preload" href="/rookery-dashboard-aec6cb9dad541eea_bg.wasm" crossorigin="anonymous" integrity="sha384-2Gfs7WbIcMl0nODPPJccavb9UX5QBvaar6V/WfljLWm5TkL/JNkjcglMfnIRrJRt" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>
