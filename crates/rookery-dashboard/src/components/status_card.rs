@@ -19,6 +19,9 @@ fn spawn_refresh_lists(
 #[component]
 pub fn StatusCard(
     status: ReadSignal<ServerStatus>,
+    /// Live uptime, re-anchored on each `state` event and ticked once a
+    /// second by `App`. `None` whenever the server is not running.
+    uptime_secs: Signal<Option<i64>>,
     set_profiles: WriteSignal<Vec<ProfileInfo>>,
     set_agents: WriteSignal<AgentsData>,
     set_toasts: WriteSignal<Vec<Toast>>,
@@ -81,9 +84,8 @@ pub fn StatusCard(
         }
     };
     let uptime = move || {
-        status
+        uptime_secs
             .get()
-            .uptime_secs
             .map(|secs| {
                 let h = secs / 3600;
                 let m = (secs % 3600) / 60;

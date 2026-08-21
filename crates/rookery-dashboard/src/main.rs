@@ -120,6 +120,18 @@ fn get_storage() -> Option<web_sys::Storage> {
     get_window()?.local_storage().ok()?
 }
 
+/// Monotonic milliseconds since page load.
+///
+/// Deliberately not `Date::now()`: wall time steps on an NTP correction, a
+/// DST change, or a resume from sleep, and an uptime derived from it would
+/// jump — or run backwards — at exactly those moments. `performance.now()`
+/// only ever moves forward.
+fn now_ms() -> f64 {
+    get_window()
+        .and_then(|w| w.performance())
+        .map_or(0.0, |p| p.now())
+}
+
 fn init_theme() -> bool {
     // Returns true if light mode
     if let Some(storage) = get_storage()
@@ -284,6 +296,34 @@ fn App() -> impl IntoView {
     );
     sse::connect_sse(stream);
     sse::spawn_watchdog(stream);
+
+    // Uptime ticks client-side. `uptime_secs` only ever arrives on a `state`
+    // event, which fires on transition — so the card showed whatever the last
+    // transition reported (0s for a server that just started) until the next
+    // one, i.e. essentially forever.
+    //
+    // Anchor the reported value against a monotonic reading and add the
+    // elapsed time. Re-anchoring is driven off `status` itself rather than a
+    // second stamp in `SseHandles`: every `state` event calls `set_status`, so
+    // a swap or restart resets the count for free. (LAN-1082's `last_event_at`
+    // is the wrong stamp to reuse here — it is `Date::now()`, and every ping,
+    // gpu and log event touches it, so it does not mark a state transition.)
+    // `None` in, `None` out: stopped, sleeping, failed, swapping and dead
+    // agents all report no uptime and must not count up from a stale anchor.
+    let uptime_anchor = RwSignal::new(None::<(f64, i64)>);
+    let uptime_tick = RwSignal::new(0u32);
+    Effect::new(move |_| uptime_anchor.set(status.get().uptime_secs.map(|s| (now_ms(), s))));
+    wasm_bindgen_futures::spawn_local(async move {
+        loop {
+            gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
+            uptime_tick.update(|t| *t = t.wrapping_add(1));
+        }
+    });
+    let uptime_secs = Signal::derive(move || {
+        let (at, secs) = uptime_anchor.get()?;
+        uptime_tick.track();
+        Some(secs + ((now_ms() - at) / 1000.0) as i64)
+    });
 
     {
         let set_auth_required_evt = set_auth_required;
@@ -657,7 +697,7 @@ fn App() -> impl IntoView {
 
                             <div style:display=move || panel_display(Tab::Overview)>
                                 <div class="grid">
-                                    <StatusCard status=status set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
+                                    <StatusCard status=status uptime_secs=uptime_secs set_profiles=set_profiles set_agents=set_agents set_toasts=set_toasts />
                                     <GpuPanel gpu=gpu />
                                 </div>
                                 <div class="grid">
