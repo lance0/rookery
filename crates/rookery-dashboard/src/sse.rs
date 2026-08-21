@@ -12,6 +12,7 @@
 //! emits a `ping` event on a fixed interval so the stamp advances even when
 //! nothing changed.
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use leptos::prelude::*;
@@ -76,8 +77,86 @@ impl ConnState {
     }
 }
 
+/// The live stream plus the closures wired to it, owned together so they can
+/// be torn down together.
+///
+/// Listeners used to be registered with `Closure::forget()`. That was harmless
+/// while the connection was established once at startup; with an explicit
+/// reconnect path it leaks the whole set every time — six closures per
+/// reconnect, ~120/hour at the 30s backoff cap.
+///
+/// They cannot simply be dropped instead, because dropping a [`Closure`]
+/// invalidates the JS function pointer it handed out — calling one afterwards
+/// is a use-after-free that surfaces as a hard WASM trap in the console, not a
+/// Rust error. So the teardown order is fixed, and lives in [`Drop`] rather
+/// than at the call sites so it cannot be got wrong by a later caller.
+struct Connection {
+    /// Our own handle, independent of `SseHandles::event_source`: teardown must
+    /// be able to detach the listeners even if something else already cleared
+    /// that signal (`on_logout` and the `rookery-auth-required` handler both
+    /// do).
+    es: web_sys::EventSource,
+    /// Named listeners, kept with the name they were registered under so
+    /// `removeEventListener` can be handed the identical (type, callback) pair.
+    named: NamedListeners,
+    /// `onerror` and `onopen` are set as properties, not listeners, so they are
+    /// detached with `set_onerror(None)` / `set_onopen(None)` and never need to
+    /// be read back. They are fields purely so each closure lives exactly as
+    /// long as the `EventSource` that can call it.
+    #[allow(dead_code)]
+    on_error: Closure<dyn FnMut(web_sys::Event)>,
+    #[allow(dead_code)]
+    on_open: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+type NamedListeners = Vec<(&'static str, Closure<dyn FnMut(web_sys::MessageEvent)>)>;
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Ordering is load-bearing:
+        //
+        //   1. `close()` — readyState goes CLOSED and the UA stops dispatching
+        //      to this EventSource, so no *pending* event can still land.
+        //   2. detach — after this the EventSource holds no reference to any of
+        //      our function pointers, so no *future* dispatch can reach them
+        //      either, whatever else still holds the object.
+        //   3. the closures drop, on return from this fn, when the fields drop.
+        //
+        // Only after 1 and 2 is a closure unreachable from JS, so only then is
+        // freeing it safe. Doing it the other way round is the use-after-free.
+        self.es.close();
+        self.es.set_onerror(None);
+        self.es.set_onopen(None);
+        for (name, callback) in &self.named {
+            let _ = self
+                .es
+                .remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref());
+        }
+    }
+}
+
+thread_local! {
+    /// The one live connection. WASM is single-threaded and the dashboard opens
+    /// exactly one stream, so this needs no more machinery than a slot.
+    static LIVE: RefCell<Option<Connection>> = const { RefCell::new(None) };
+}
+
+/// Drop the previous connection — see [`Connection::drop`] for the ordering.
+///
+/// Safe to call from anywhere *except* synchronously inside one of the
+/// closures it frees. Nothing does: the only listener that triggers a
+/// reconnect is `on_error`, and it goes through [`schedule_reconnect`], which
+/// always crosses a timer await before reaching [`connect_sse`].
+fn close_current(handles: SseHandles) {
+    // Bound out of the `with` so the `RefCell` borrow is released before the
+    // connection drops.
+    let previous = LIVE.with(|slot| slot.borrow_mut().take());
+    drop(previous);
+    handles.set_event_source.set(None);
+}
+
 /// Everything the stream needs to write into. All fields are `Copy` signals so
-/// the error handler can call [`connect_sse`] again from inside itself.
+/// the error handler can schedule a reconnect from inside itself.
 #[derive(Clone, Copy)]
 pub struct SseHandles {
     pub event_source: ReadSignal<Option<web_sys::EventSource>>,
@@ -147,18 +226,12 @@ fn reconnect_now(handles: SseHandles) {
     if handles.retry_pending.get_untracked() {
         return;
     }
-    if let Some(existing) = handles.event_source.get_untracked() {
-        existing.close();
-    }
-    handles.set_event_source.set(None);
+    close_current(handles);
     schedule_reconnect(handles);
 }
 
 pub fn connect_sse(handles: SseHandles) {
-    if let Some(existing) = handles.event_source.get_untracked() {
-        existing.close();
-    }
-    handles.set_event_source.set(None);
+    close_current(handles);
 
     let Ok(es) = web_sys::EventSource::new(&api::events_url()) else {
         handles.conn.set(ConnState::Disconnected);
@@ -174,7 +247,6 @@ pub fn connect_sse(handles: SseHandles) {
         handles.touch();
     });
     let _ = es.add_event_listener_with_callback("ping", on_ping.as_ref().unchecked_ref());
-    on_ping.forget();
 
     let on_gpu = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
         handles.touch();
@@ -185,7 +257,6 @@ pub fn connect_sse(handles: SseHandles) {
         }
     });
     let _ = es.add_event_listener_with_callback("gpu", on_gpu.as_ref().unchecked_ref());
-    on_gpu.forget();
 
     let on_state = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
         handles.touch();
@@ -208,7 +279,6 @@ pub fn connect_sse(handles: SseHandles) {
         }
     });
     let _ = es.add_event_listener_with_callback("state", on_state.as_ref().unchecked_ref());
-    on_state.forget();
 
     let on_log = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
         handles.touch();
@@ -222,7 +292,6 @@ pub fn connect_sse(handles: SseHandles) {
         }
     });
     let _ = es.add_event_listener_with_callback("log", on_log.as_ref().unchecked_ref());
-    on_log.forget();
 
     // `error` fires both for a transport blip the browser will retry itself
     // (`readyState == CONNECTING`) and for a permanently closed stream. Per
@@ -240,7 +309,6 @@ pub fn connect_sse(handles: SseHandles) {
         }
     });
     es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-    on_error.forget();
 
     let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
         handles.touch();
@@ -248,7 +316,22 @@ pub fn connect_sse(handles: SseHandles) {
         handles.conn.set(ConnState::Live);
     });
     es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
-    on_open.forget();
+
+    // Take ownership of the whole set. This replaces nothing — `close_current`
+    // above already emptied the slot — so no closure is freed here.
+    LIVE.with(|slot| {
+        *slot.borrow_mut() = Some(Connection {
+            es: es.clone(),
+            named: vec![
+                ("ping", on_ping),
+                ("gpu", on_gpu),
+                ("state", on_state),
+                ("log", on_log),
+            ],
+            on_error,
+            on_open,
+        });
+    });
 
     handles.set_event_source.set(Some(es));
 }

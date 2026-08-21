@@ -84,12 +84,21 @@ pub fn is_unauthorized(error: &str) -> bool {
     error.trim() == "HTTP 401"
 }
 
+/// Percent-encode a value being interpolated into a URL.
+///
+/// Correct for both query values and path segments: `encodeURIComponent`
+/// escapes `&`, `#`, `+`, `?` and `/`, so a repo like `unsloth/Foo+GGUF` or a
+/// profile named `a/b` survives the round trip instead of splitting into
+/// another parameter, truncating into a fragment, or decoding as a space.
+/// Identifiers made of `A-Za-z0-9-_.!~*'()` pass through untouched, so this is
+/// a no-op for every name we actually ship.
+fn enc(value: &str) -> String {
+    js_sys::encode_uri_component(value).into()
+}
+
 pub fn events_url() -> String {
     match get_api_key() {
-        Some(api_key) => {
-            let encoded: String = js_sys::encode_uri_component(&api_key).into();
-            format!("/api/events?token={encoded}")
-        }
+        Some(api_key) => format!("/api/events?token={}", enc(&api_key)),
         None => "/api/events".into(),
     }
 }
@@ -163,7 +172,8 @@ pub async fn swap_profile(profile: &str) -> Result<serde_json::Value, String> {
 
 pub async fn fetch_agent_health(name: &str) -> Result<serde_json::Value, String> {
     let resp = send(auth_request(Request::get(&format!(
-        "/api/agents/{name}/health"
+        "/api/agents/{}/health",
+        enc(name)
     ))))
     .await?;
     resp.json().await.map_err(|e| e.to_string())
@@ -184,7 +194,7 @@ pub async fn stop_agent(name: &str) -> Result<serde_json::Value, String> {
 }
 
 pub async fn update_agent(name: &str) -> Result<serde_json::Value, String> {
-    let request = auth_request(Request::post(&format!("/api/agents/{name}/update")));
+    let request = auth_request(Request::post(&format!("/api/agents/{}/update", enc(name))));
     let resp = send_request(
         request
             .json(&serde_json::json!({}))
@@ -221,7 +231,8 @@ pub async fn fetch_hardware() -> Result<serde_json::Value, String> {
 
 pub async fn search_models(query: &str) -> Result<serde_json::Value, String> {
     let resp = send(auth_request(Request::get(&format!(
-        "/api/models/search?q={query}"
+        "/api/models/search?q={}",
+        enc(query)
     ))))
     .await?;
     resp.json().await.map_err(|e| e.to_string())
@@ -229,7 +240,8 @@ pub async fn search_models(query: &str) -> Result<serde_json::Value, String> {
 
 pub async fn fetch_quants(repo: &str) -> Result<serde_json::Value, String> {
     let resp = send(auth_request(Request::get(&format!(
-        "/api/models/quants?repo={repo}"
+        "/api/models/quants?repo={}",
+        enc(repo)
     ))))
     .await?;
     resp.json().await.map_err(|e| e.to_string())
@@ -256,7 +268,7 @@ pub async fn update_profile(
     name: &str,
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let request = auth_request(Request::put(&format!("/api/config/profile/{name}")));
+    let request = auth_request(Request::put(&format!("/api/config/profile/{}", enc(name))));
     let resp = send_request(request.json(data).map_err(|e| e.to_string())?).await?;
     resp.json().await.map_err(|e| e.to_string())
 }
