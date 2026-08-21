@@ -15,12 +15,17 @@ depends_on_port = 8081               # bounce when this port recovers (server re
 version_file = "/path/to/pyproject.toml"  # read version from project file
 update_command = "/path/to/agent update"  # run for updates
 update_workdir = "/path/to/agent/repo"    # optional working directory for updates
-restart_on_error_patterns = [        # immediate restart on these stderr patterns
+stop_timeout_secs = 30               # SIGTERM grace before SIGKILL (default 30)
+restart_on_error_patterns = [        # restart after 3 matches in 10 minutes
     "ConnectionError",
     "ReadTimeout"
 ]
-data_dir = "/path/to/agent/data"     # SQLite databases to integrity-check nightly
+data_dir = "/path/to/agent/data"     # SQLite root: nightly check + pre-change backups
 ```
+
+`data_dir` is what turns on both database-safety features below. With neither it
+nor `workdir` set, the nightly sweep and the pre-change backups have no root to
+resolve and do nothing.
 
 ## Agent Lifecycle
 
@@ -33,6 +38,13 @@ rookery agent update hermes   # stop, update, restart
 rookery agent status          # list agents with status
 rookery agent status --json   # machine-readable
 ```
+
+`stop` and `update` take a [pre-change database backup](#pre-change-database-backups)
+first when `data_dir` (or `workdir`) is set, which adds a few seconds. `stop` also
+waits up to `stop_timeout_secs` (default 30) after `SIGTERM` before escalating to
+`SIGKILL`; taking the SIGKILL path is logged at `error` and should be treated as
+an incident, since hard-killing an agent mid-WAL-checkpoint is how torn pages
+happen.
 
 ### Auto-Start
 
@@ -64,10 +76,12 @@ Returns:
 
 `rookery agent update <name>` and `POST /api/agents/{name}/update` run the configured `update_command` under rookery control:
 
-1. stop the agent if it is running
-2. run the update command with `[agent:<name>:update]` log prefix
-3. restart the agent
-4. report the resulting version if `version_file` is configured
+1. stop the agent if it is running, taking a pre-change database backup
+2. if the agent was *already* stopped, take the backup anyway — the update
+   migrates state in place regardless of whether the process is up
+3. run the update command with `[agent:<name>:update]` log prefix
+4. restart the agent
+5. report the resulting version if `version_file` is configured
 
 If the update command exits non-zero, rookery attempts to restart the previous agent code and returns a failure response instead of leaving the agent down.
 
@@ -98,6 +112,8 @@ A 60-second uptime guard prevents double-bouncing when the swap handler already 
 Monitors agent stderr for fatal patterns. When **three** lines match (case-insensitive) within a **ten-minute** window, the watchdog triggers an **immediate** restart instead of waiting for the next 30s poll cycle.
 
 A single match is ignored on purpose — `ReadTimeout` and its relatives are transient network conditions, and restarting a process over one interrupts writes for no benefit. A wedged gateway re-emits its error every poll cycle, so it still trips the threshold in seconds; failures as slow as one every 5 minutes still restart. The counter is per process and resets once the agent restarts.
+
+The trade-off to be aware of: **a pattern that a wedged agent prints exactly once no longer restarts it.** If your agent signals a terminal state with a single line, this path will not catch it — `restart_on_crash` covers an agent that actually exits, but one that wedges while still running does not. Below-threshold matches are logged (`error pattern matched, below restart threshold`) so you can see them accumulating.
 
 ```toml
 restart_on_error_patterns = [
@@ -173,6 +189,72 @@ rows while `max(id)` failed outright — the count came out of an index without
 ever touching the damaged leaf pages. The reverse happens just as easily. Only a
 full page traversal is evidence. `quick_check` skips `integrity_check`'s
 index-versus-table cross-checks and measures ~2s on a 392 MB database.
+
+### Pre-change Database Backups
+
+The integrity sweep detects damage. This is the other half: making sure there is
+something to restore when it does. Before rookery takes an agent down for a
+change that is about to mutate state the agent owns, it copies that agent's
+databases with `VACUUM INTO`.
+
+It runs on the same `data_dir` (falling back to `workdir`), so the same one
+setting enables both features.
+
+**When a backup is taken:**
+
+| Flow | Backup? |
+|---|---|
+| `rookery agent update <name>` — running agent | yes |
+| `rookery agent update <name>` — already-stopped agent | yes |
+| Profile swap that bounces the agent (`restart_on_swap`) | yes |
+| `rookery agent stop <name>` (manual) | **yes** |
+| Watchdog crash restart / dependency-port bounce | no |
+| Daemon shutdown (`stop_all`) | no |
+
+A manual `rookery agent stop` taking a copy is worth knowing about: it adds a few
+seconds to a command that used to be instant. It is deliberate — that is the path
+`POST /api/agents/{name}/update` stops the agent through, and `hermes update`
+applies config migrations in place. The two excluded flows are excluded for
+concrete reasons: daemon shutdown would add minutes to `systemctl stop` for a
+copy nothing is about to change, and an agent in a crash-restart loop would churn
+out gigabytes and — worse — age the pre-update backup out of retention exactly
+when it is needed.
+
+**`VACUUM INTO`, read-only, not `cp`.** `cp` of a live database reads pages while
+the writer mutates them and can capture a torn page — producing exactly the file
+this exists to avoid creating. `VACUUM INTO` runs inside a read transaction, so
+the copy is a consistent snapshot. The source is opened `-readonly` for the same
+reason the integrity check is: a read-write open checkpoints the WAL on close and
+**deletes** the `-wal`/`-shm` sidecars. Measured on a database with 2.8 MB of
+uncheckpointed WAL, the read-write open removed both sidecars; the read-only open
+left them byte-for-byte intact, and the copy still contained every row, because
+the reader reads *through* the WAL.
+
+**Layout and retention.** Copies land in `<data_dir>/db-backups/<UTC timestamp>/`,
+one directory per generation, each file suffixed `.bak` (a nested
+`cron/executions.db` is flattened to `cron_executions.db.bak` so it cannot
+collide with a root-level file of the same name). **Three generations** are kept;
+older ones are pruned on every run. The `.bak` suffix and the extra directory
+level are not cosmetic — the integrity sweep walks only one level deep and
+filters on `*.db`, so backups are excluded twice over, and neither a deeper walk
+nor a change to the extension filter can silently rope them in and multiply the
+nightly sweep's runtime by the retention count.
+
+**Disk cost:** worst case is three times the total size of the agent's live
+databases. For Hermes' ~400 MB that is ~1.2 GB.
+
+**Fail-open.** A failed backup does not block the change. Failures are logged
+loudly — `tracing` at `error` level, plus a `[agent:<name>] db backup FAILED`
+line in the log buffer — and the update or stop proceeds. A missing `sqlite3`, a
+full disk, or a read-only data directory must not wedge every update.
+
+A partial copy is never left behind: `VACUUM INTO` creates its destination
+immediately and fills it as it goes, so a killed copy, a corrupt source, or a
+full disk all leave a plausible-looking `.bak` on disk. Each copy is therefore
+read back and verified before it counts as a success, and discarded on any
+failure. Both halves are needed: a 0-byte file passes `PRAGMA quick_check`
+(SQLite reads it as a valid empty database), so verification alone would not
+catch it.
 
 ## Observability
 

@@ -1,3 +1,9 @@
+# The daemon validates this file at boot and exits 1 if it is invalid — a bad
+# config refuses to start rather than starting degraded. Check it first with
+# `rookery config-validate`. Rules: every model needs source = "hf" or "local",
+# "local" needs `path`, "hf" needs `repo`, and an "hf" model on a llama-server
+# profile also needs `file`. See docs/configuration.md.
+
 llama_server = "/path/to/llama.cpp/build/bin/llama-server"
 default_profile = "qwen_fast"
 listen = "127.0.0.1:3000"
@@ -10,7 +16,7 @@ idle_timeout = 1800  # seconds; 0 disables auto-sleep
 # Extra directories to scan for GGUF models (in addition to HF cache)
 # model_dirs = ["/mnt/models", "/home/user/gguf-collection"]
 
-# Upstream release monitoring (checks llama.cpp + vLLM GitHub releases)
+# Upstream release monitoring (checks ggml-org/llama.cpp releases only)
 release_check_interval = 1800  # seconds; 0 disables
 # github_token = "ghp_..."    # optional, for higher GitHub API rate limits
 
@@ -128,6 +134,8 @@ extra_args = ["--enable-chunked-prefill"]
 [agents.my_agent]
 command = "/path/to/agent"
 args = ["run"]
+# workdir = "/path/to/agent"        # cwd for the agent process
+# env = { LOG_LEVEL = "info" }      # extra environment variables
 auto_start = false
 restart_on_swap = true
 restart_on_crash = true
@@ -135,10 +143,29 @@ depends_on_port = 8081
 version_file = "/path/to/agent/pyproject.toml"
 update_command = "/path/to/agent update"
 update_workdir = "/path/to/agent/repo"
+
+# Seconds to wait after SIGTERM before escalating to SIGKILL. Raise it for an
+# agent with heavy teardown — hard-killing one mid-SQLite-WAL-checkpoint is how
+# torn pages happen.
+stop_timeout_secs = 30
+
+# Case-insensitive substring matches on the agent's stderr. THREE matches within
+# a ten-minute window are required before a restart — one ReadTimeout is a
+# transient network condition, not a fatal state. A pattern a wedged agent prints
+# exactly once will NOT restart it; restart_on_crash covers actual exits.
 restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 
-# Where this agent keeps its SQLite databases. Scanned one level deep for *.db
-# and checked nightly with a read-only PRAGMA quick_check; findings are logged
-# and exported as rookery_agent_db_corrupt, and never restart the agent.
-# Falls back to `workdir`; omit both to disable the check for this agent.
+# Where this agent keeps its SQLite databases. This one setting enables BOTH
+# database-safety features; without it (and without `workdir` to fall back to)
+# neither runs at all:
+#   1. a nightly read-only PRAGMA quick_check over every *.db in this directory
+#      and its immediate subdirectories, shortly after 04:00 local time. Findings
+#      are logged and exported as rookery_agent_db_corrupt, and never restart the
+#      agent.
+#   2. a VACUUM INTO backup taken before an agent update, before a swap that
+#      bounces the agent, and before a manual `rookery agent stop`. Three
+#      generations are kept under <data_dir>/db-backups/; a failed backup is
+#      logged loudly and does not block the change.
+# Deliberately separate from `workdir`, which also sets the agent process's cwd —
+# enabling checks should not mean relocating the agent.
 data_dir = "/path/to/agent/data"
