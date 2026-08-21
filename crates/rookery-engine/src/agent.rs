@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use crate::backup;
 use crate::integrity::{self, SQLITE3};
 use crate::logs::LogBuffer;
 use crate::process::is_pid_alive;
@@ -78,6 +79,10 @@ struct ManagedAgent {
     /// Seconds to wait after SIGTERM before SIGKILL, captured from config at
     /// start/adopt time so stop() doesn't need a config lookup.
     stop_timeout_secs: u64,
+    /// Where this agent's databases live (`data_dir`, else `workdir`), captured
+    /// from config at start/adopt time for the same reason as
+    /// `stop_timeout_secs`: `stop_inner` is handed a name, not a config.
+    backup_root: Option<std::path::PathBuf>,
     // Observability metrics
     total_restarts: u32,
     last_restart_reason: Option<String>,
@@ -86,6 +91,17 @@ struct ManagedAgent {
     error_count: Arc<AtomicU32>,
     /// Accumulated errors from previous restarts.
     lifetime_errors: u32,
+}
+
+/// Where an agent's SQLite databases live: `data_dir`, falling back to
+/// `workdir`. Shared by the integrity sweep and the pre-change backup so the two
+/// can never disagree about which files they are talking about.
+fn db_root(config: &AgentConfig) -> Option<std::path::PathBuf> {
+    config
+        .data_dir
+        .as_ref()
+        .or(config.workdir.as_ref())
+        .cloned()
 }
 
 /// Is the tracked process actually alive right now?
@@ -219,7 +235,7 @@ impl AgentManager {
     /// Read-only, in a subprocess, and purely advisory — see
     /// [`crate::integrity`]. Returns the number of corrupt databases found.
     pub async fn check_agent_databases(&self, name: &str, config: &AgentConfig) -> usize {
-        let Some(root) = config.data_dir.as_ref().or(config.workdir.as_ref()) else {
+        let Some(root) = db_root(config) else {
             tracing::debug!(
                 agent = name,
                 "no data_dir or workdir configured — skipping sqlite integrity check"
@@ -227,7 +243,7 @@ impl AgentManager {
             return 0;
         };
 
-        let result = integrity::sweep(&self.log_buffer, name, root, SQLITE3).await;
+        let result = integrity::sweep(&self.log_buffer, name, &root, SQLITE3).await;
 
         let mut all = self.db_integrity.lock().await;
         let entry = all.entry(name.to_string()).or_default();
@@ -320,6 +336,7 @@ impl AgentManager {
                 stop_timeout_secs: config
                     .map(|c| c.stop_timeout_secs)
                     .unwrap_or_else(rookery_core::config::default_stop_timeout_secs),
+                backup_root: config.and_then(db_root),
                 total_restarts: 0,
                 last_restart_reason: None,
                 last_restart_at: None,
@@ -484,6 +501,7 @@ impl AgentManager {
                 info: info.clone(),
                 intentional_stop: false,
                 stop_timeout_secs: config.stop_timeout_secs,
+                backup_root: db_root(config),
                 total_restarts: 0,
                 last_restart_reason: None,
                 last_restart_at: None,
@@ -500,8 +518,12 @@ impl AgentManager {
 
     /// Stop an agent at a user's request. Resets the crash-backoff counter,
     /// because a human intervening is a fresh start.
+    ///
+    /// Takes a pre-change database backup — this is the path `POST
+    /// /agents/{name}/update` stops the agent through, and `hermes update`
+    /// applies config migrations in place.
     pub async fn stop(&self, name: &str) -> Result<(), AgentError> {
-        self.stop_inner(name, true).await
+        self.stop_inner(name, true, true).await
     }
 
     /// Stop an agent as part of an automated flow (fatal-error restart, port
@@ -511,11 +533,35 @@ impl AgentManager {
     /// `stop` here silently erased the exponential backoff every time an
     /// automated path ran, so a agent failing on every startup attempt would
     /// restart forever at a fixed interval instead of backing off.
+    ///
+    /// Takes a pre-change database backup: the caller outside this module is the
+    /// `restart_on_swap` loop in the swap route. The watchdog's own restarts go
+    /// straight to `stop_inner` without one — see there for why.
     pub async fn stop_automated(&self, name: &str) -> Result<(), AgentError> {
-        self.stop_inner(name, false).await
+        self.stop_inner(name, false, true).await
     }
 
-    async fn stop_inner(&self, name: &str, reset_crash_count: bool) -> Result<(), AgentError> {
+    /// Stop an agent, optionally taking a backup of its databases first.
+    ///
+    /// # Why the backup hangs off here
+    ///
+    /// Every deliberate bounce — update, swap, manual stop — routes through this
+    /// one function, and each of them is followed by something that writes to
+    /// the agent's databases. One hook here covers all of them; hooking each
+    /// caller would mean touching the daemon's route handlers and would still
+    /// miss the next caller somebody adds.
+    ///
+    /// `backup` is false for the two flows where a copy is not wanted: daemon
+    /// shutdown (it would add minutes to `systemctl stop` for a copy nothing is
+    /// about to change) and the watchdog's crash/port-bounce restarts (an agent
+    /// in a restart loop would churn out gigabytes and, worse, would age the
+    /// pre-update backup out of retention exactly when it is needed).
+    async fn stop_inner(
+        &self,
+        name: &str,
+        reset_crash_count: bool,
+        backup: bool,
+    ) -> Result<(), AgentError> {
         let mut agents = self.agents.lock().await;
 
         let agent = agents
@@ -525,6 +571,11 @@ impl AgentManager {
         // Mark as intentional so watchdog doesn't restart it
         agent.intentional_stop = true;
 
+        let backup_root = if backup {
+            agent.backup_root.clone()
+        } else {
+            None
+        };
         let pid = agent.info.pid;
         let stop_timeout = std::time::Duration::from_secs(agent.stop_timeout_secs);
         tracing::info!(
@@ -607,11 +658,29 @@ impl AgentManager {
 
         agents.remove(name);
         self.persist_state(&agents);
+        // Released before the backup: `VACUUM INTO` of a 385 MB database takes
+        // seconds, and holding this would stall every /status and /health read
+        // for the duration.
+        drop(agents);
 
         // Only a user-initiated stop clears the backoff. Automated paths must not,
         // or an agent that fails on every start restarts forever at a fixed rate.
         if reset_crash_count {
             self.crash_counts.lock().await.remove(name);
+        }
+
+        // After the process is gone, so the databases are quiescent and no writer
+        // is racing the copy.
+        //
+        // Fails open: a backup failure is logged loudly (tracing ERROR plus the
+        // agent log buffer, where a crash would surface) but never blocks the
+        // stop. Blocking would be the safer-sounding choice, but the ways a
+        // backup fails — sqlite3 missing, disk full, a read-only data directory —
+        // are all conditions that would then wedge every update and every swap
+        // until a human noticed, and a rookery that cannot restart an agent is a
+        // worse outage than an update without a copy.
+        if let Some(root) = backup_root {
+            backup::run(&self.log_buffer, name, &root, SQLITE3, "restart").await;
         }
 
         Ok(())
@@ -659,7 +728,10 @@ impl AgentManager {
         };
 
         for name in names {
-            if let Err(e) = self.stop(&name).await {
+            // No backup: this is daemon shutdown, nothing is about to mutate the
+            // databases, and a copy per agent would add minutes to `systemctl
+            // stop rookery` for no recovery value.
+            if let Err(e) = self.stop_inner(&name, true, false).await {
                 tracing::warn!(agent = %name, error = %e, "failed to stop agent");
             }
         }
@@ -877,7 +949,11 @@ impl AgentManager {
                                     let agents = manager.agents.lock().await;
                                     agents.get(&agent_name).map(|a| (a.total_restarts, a.lifetime_errors + a.error_count.load(Ordering::Relaxed))).unwrap_or((0, 0))
                                 };
-                                let _ = manager.stop_automated(&agent_name).await;
+                                // No backup: a wedged agent can trip this every
+                                // poll cycle, and copying the databases each
+                                // time would both churn gigabytes and age the
+                                // real pre-update backup out of retention.
+                                let _ = manager.stop_inner(&agent_name, false, false).await;
                                 if manager.is_shutting_down() { return; }
                                 // Share the crash path's exponential backoff. Previously this
                                 // slept a flat 2s with no counter, so an agent emitting a
@@ -1009,7 +1085,10 @@ impl AgentManager {
                                     agent = %name,
                                     "bouncing agent after dependency port recovered"
                                 );
-                                let _ = manager.stop_automated(&name).await;
+                                // No backup, same reason as the fatal-pattern
+                                // path above: a flapping dependency port would
+                                // otherwise bounce this on a loop.
+                                let _ = manager.stop_inner(&name, false, false).await;
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 if manager.is_shutting_down() {
                                     return;
@@ -2395,5 +2474,122 @@ name = "test-agent"
 
         let err = manager.stop("nonexistent").await.unwrap_err();
         assert!(matches!(err, AgentError::NotFound(_)));
+    }
+
+    // === LAN-1088: pre-change database backups ===
+
+    /// A real SQLite database inside the caller's temp directory. Never runs
+    /// against anything under `~`.
+    fn make_test_db(path: &std::path::Path, rows: usize) -> bool {
+        let sql = format!(
+            "PRAGMA journal_mode=WAL; \
+             CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); \
+             INSERT INTO t(v) SELECT hex(randomblob(64)) FROM generate_series(1,{rows});"
+        );
+        std::process::Command::new(SQLITE3)
+            .arg(path)
+            .arg(sql)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    fn generations(data_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(data_dir.join(backup::BACKUP_DIR)) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// A running agent with a live database in its `data_dir`.
+    async fn agent_with_a_database(
+        manager: &AgentManager,
+    ) -> Option<(tempfile::TempDir, AgentConfig)> {
+        let data = tempfile::tempdir().unwrap();
+        if !make_test_db(&data.path().join("state.db"), 500) {
+            return None; // no sqlite3 on this box
+        }
+        let mut cfg = config_for("sleep");
+        cfg.args = vec!["60".to_string()];
+        cfg.data_dir = Some(data.path().to_path_buf());
+        manager.start("dbagent", &cfg).await.unwrap();
+        Some((data, cfg))
+    }
+
+    /// The whole ticket: a deliberate bounce leaves a restorable copy behind.
+    /// Fails without the `backup::run` call in `stop_inner` — nothing creates
+    /// `db-backups/` at all.
+    #[tokio::test]
+    async fn test_stop_backs_up_databases_before_the_agent_is_bounced() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_adir, manager) = test_manager(log_buffer);
+        let Some((data, _cfg)) = agent_with_a_database(&manager).await else {
+            return;
+        };
+
+        manager.stop("dbagent").await.unwrap();
+
+        let gens = generations(data.path());
+        assert_eq!(gens.len(), 1, "one stop should leave one generation");
+        let copy = gens[0].join("state.db.bak");
+        assert!(copy.exists(), "expected {}", copy.display());
+
+        let out = std::process::Command::new(SQLITE3)
+            .arg("-readonly")
+            .arg(&copy)
+            .arg("SELECT count(*) FROM t;")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "500",
+            "the backup must be a usable database, not a torn copy"
+        );
+    }
+
+    /// The swap path (`restart_on_swap` in the swap route) stops the agent via
+    /// `stop_automated`. Fails without the fix for the same reason as above.
+    #[tokio::test]
+    async fn test_stop_automated_backs_up_for_the_swap_path() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_adir, manager) = test_manager(log_buffer);
+        let Some((data, _cfg)) = agent_with_a_database(&manager).await else {
+            return;
+        };
+
+        manager.stop_automated("dbagent").await.unwrap();
+        assert_eq!(generations(data.path()).len(), 1);
+    }
+
+    /// Scoping, not the feature: daemon shutdown must not copy every database on
+    /// the way out. Fails if `stop_all` is ever switched back to `stop()`.
+    #[tokio::test]
+    async fn test_shutdown_does_not_back_up() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_adir, manager) = test_manager(log_buffer);
+        let Some((data, _cfg)) = agent_with_a_database(&manager).await else {
+            return;
+        };
+
+        manager.stop_all().await;
+        assert!(
+            generations(data.path()).is_empty(),
+            "shutdown must not add minutes to `systemctl stop rookery`"
+        );
+    }
+
+    /// An agent with no `data_dir` and no `workdir` has nothing to back up, and
+    /// must still stop cleanly.
+    #[tokio::test]
+    async fn test_stop_without_a_data_directory_still_stops() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let (_adir, manager) = test_manager(log_buffer);
+
+        let mut cfg = config_for("sleep");
+        cfg.args = vec!["60".to_string()];
+        manager.start("bare", &cfg).await.unwrap();
+        manager.stop("bare").await.unwrap();
+        assert!(!manager.is_running("bare").await);
     }
 }
