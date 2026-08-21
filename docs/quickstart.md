@@ -61,6 +61,16 @@ model = "my_model"
 port = 8081
 ```
 
+Check the file before starting the daemon:
+
+```bash
+rookery config
+```
+
+**The daemon refuses to boot on an invalid config.** It applies the same validation `rookery config` does and exits non-zero rather than starting on a config it cannot honour, so a bad edit shows up as a daemon that will not come up. Validation covers `default_profile` pointing at a profile that exists, a non-empty `[profiles]` table, and each model's fields: `source` must be `hf` or `local`, `local` needs `path`, `hf` needs `repo` — plus `file` when a llama.cpp profile references it. Run `rookery config` first and you get the error directly instead of reading it out of the service log.
+
+Once the daemon is running, `rookery reload` applies most config edits without a restart. See [CLI Reference](cli.md) for what reload can and cannot change.
+
 See [Configuration](configuration.md) for all options including vLLM backend, sampling parameters, and KV cache tuning.
 
 ## Building llama.cpp
@@ -116,6 +126,8 @@ rookery start
 ```
 
 With `auto_start = true` in your config, the default profile starts automatically on daemon boot.
+
+`rookery status` exits `1` when the daemon is unreachable — it still prints its output, so `rookery status --json | jq .state` keeps working while `rookery status || notify` now fires. See [Exit Codes](cli.md#exit-codes).
 
 ## Uninstall
 

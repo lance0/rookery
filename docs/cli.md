@@ -11,6 +11,17 @@ When `api_key` is set in `~/.config/rookery/config.toml`, the CLI automatically 
 --json            Output as JSON (supported on most commands)
 ```
 
+The daemon address is resolved in this order: `--daemon`, else `listen` from `~/.config/rookery/config.toml`, else `http://127.0.0.1:3000`. A `listen` bound to an unspecified address (`0.0.0.0`) is dialled as `127.0.0.1` on the same port.
+
+A config file that exists but fails to parse does not fall back silently — the CLI prints a warning naming the file and the address it settled on, then carries on:
+
+```console
+$ rookery status
+warning: /home/you/.config/rookery/config.toml: expected `=` — using http://127.0.0.1:3000
+```
+
+**An unreachable daemon fails in about 2 seconds.** The CLI sets a 2s connect timeout, so a wrong address or a stopped daemon returns promptly instead of sitting in the kernel's SYN retry loop for ~130s. There is deliberately no *total* request timeout — `start` waits on a health check for up to 120s, `bench` up to 60s, and `stop` up to `stop_timeout_secs`, none of which should be cut off mid-flight. The bound on a daemon that is listening but wedged is the same 2s timeout on the health probe that gates every command.
+
 ## Commands
 
 ### Server
@@ -74,7 +85,32 @@ rookery logs -f               # follow mode (stream via SSE)
 
 ```bash
 rookery config                # validate config, show resolved commands
+rookery reload                # re-read config.toml without restarting the daemon
 ```
+
+`rookery config` is purely local — it reads and validates the file without contacting the daemon, so it works before the daemon is up.
+
+`rookery reload` (`POST /api/reload`) makes the running daemon re-read `config.toml`. The file is read, parsed and validated into a candidate config *before* anything is swapped in, so **a bad config can never take down a running daemon** — every failure path returns before the live config is written, and the daemon keeps serving exactly what it already had. This is the deliberate inverse of boot behaviour, where an invalid config is a hard exit.
+
+```console
+$ rookery reload
+config reloaded from /home/you/.config/rookery/config.toml
+the running server and all agents were left untouched
+```
+
+Reload changes what *future* operations see. It never bounces anything:
+
+| | |
+|---|---|
+| **Applied immediately** | `api_key`, `idle_timeout`, `default_profile`; `profiles`, `models` and the `llama_server` binary path take effect on the next `start` or `swap`. |
+| **Left untouched** | The running backend keeps its profile, port, PID and binary. No agent is started, stopped or bounced. |
+| **Needs a daemon restart** | `listen`, `agents`, `auto_start`, `release_check_interval`. |
+
+Anything the reload cannot honour comes back as a warning rather than being silently dropped — a changed `listen`, edited `[agents]`, or a live profile whose port changed or that no longer exists in the file. In plain mode these print to stderr as `warning: ...` while the reload itself still succeeds; `--json` returns them in a `warnings` array alongside `applied_now`, `unchanged` and `needs_daemon_restart`.
+
+Removing the running profile from the config is legal: the backend is owned by the daemon, not by the config entry, so it keeps running and `stop`/`sleep` still work — but `start`/`swap` back to it will fail.
+
+A reload that collides with an in-flight `start`/`stop`/`swap` waits up to 5s for the operation lock and then returns HTTP 409 rather than pinning the connection for the length of a swap. The config is unchanged; retry when the operation finishes.
 
 ### Other
 
@@ -130,16 +166,33 @@ exit=1
 
 `--json` follows exactly the same exit codes as plain output.
 
-**Daemon-reported failures exit `1`.** The daemon returns HTTP 200 with `success: false` for a genuine failure, so the body carries the verdict rather than the status line. These commands read it: `start`, `swap`, `sleep`, `wake`, `agent start`, `agent stop`, `agent update`, `models pull`.
+**Daemon-reported failures exit `1`.** The daemon returns HTTP 200 with `success: false` for a genuine failure, so the body carries the verdict rather than the status line. These commands read `success`: `start`, `swap`, `sleep`, `wake`, `agent start`, `agent stop`, `agent update`.
+
+`models pull` exits `1` on the same principle but reads a different field — its body reports `started`, since the command only kicks off a background download and returns.
+
+`stop` is the exception: it does not read the body's verdict at all and exits `0` whenever the daemon was reachable. Do not use its exit code to confirm the server actually stopped — check `rookery status`.
 
 ```bash
 rookery start && rookery agent start hermes   # the agent is not started against a dead server
 rookery wake  && rookery bench                # the bench does not run against a server that never woke
 ```
 
-**Repeating an operation that already holds is a success, not a failure.** `rookery sleep` against an already-sleeping server, `rookery wake` against an already-running one, and `rookery stop` against an already-stopped one all exit `0` — the requested end state is the actual state, so defensive shutdown and boot scripts can call them unconditionally.
+**Repeating an operation that already holds is a success, not a failure.** The daemon answers `success: true` when the requested end state is already the actual state, so boot and shutdown scripts can call these unconditionally:
 
-What exits `1` is being in a state the operation cannot reach that end state *from*: `sleep` on a stopped or failed server reports `server is not running`, and `wake` on a server that is not sleeping reports `server is not sleeping`. Neither is a no-op — a stopped server that you `sleep` cannot then be woken — so both are real failures.
+| command | already-satisfied case | daemon message | exit |
+|---|---|---|---|
+| `rookery sleep` | server is sleeping | `server already sleeping` | `0` |
+| `rookery wake` | server is running | `already running with profile '<name>'` | `0` |
+| `rookery start <p>` | `<p>` is already running | `already running with profile '<p>'` | `0` |
+
+What exits `1` is being in a state the operation cannot reach that end state *from*:
+
+| command | unreachable-from case | daemon message | exit |
+|---|---|---|---|
+| `rookery sleep` | server stopped or failed | `server is not running` | `1` |
+| `rookery wake` | server not sleeping | `server is not sleeping` | `1` |
+
+Neither is a no-op dressed up as an error — a stopped server that you `sleep` cannot then be woken — so both are real failures.
 
 **An unreachable daemon exits `1`** on every command that contacts one — which is all of them except `config`, `auth generate` and `completions`, which work purely locally. `config` exits `1` when the config file is missing or fails validation.
 
