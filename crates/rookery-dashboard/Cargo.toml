@@ -34,6 +34,8 @@ web-sys = { version = "0.3", features = [
     "Response",
     "ReadableStream",
     "ReadableStreamDefaultReader",
+    "TextDecoder",
+    "TextDecodeOptions",
     "AbortController",
     "AbortSignal",
 ] }
