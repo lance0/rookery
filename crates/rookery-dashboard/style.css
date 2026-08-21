@@ -5,8 +5,12 @@
     --surface: #18181b;
     --border: #27272a;
     --fg: #e4e4e7;
-    --dim: #71717a;
-    --muted: #3f3f46;
+    /* Both secondary tiers clear WCAG AA 4.5:1 against the worse of the two
+       backdrops they land on (--surface #18181b, not --bg). Was --dim #71717a
+       (3.67:1) and --muted #3f3f46 (1.70:1) — .empty/.loading/.stat-label are
+       every status message in the app, so 1.70:1 was hiding error text. */
+    --dim: #a1a1aa;   /* 6.91:1 on surface, 7.36:1 on bg */
+    --muted: #82828b; /* 4.65:1 on surface, 4.95:1 on bg */
     --accent: #3b82f6;
     --green: #22c55e;
     --red: #ef4444;
@@ -19,8 +23,10 @@
     --surface: #ffffff;
     --border: #d4d4d8;
     --fg: #18181b;
-    --dim: #52525b;
-    --muted: #a1a1aa;
+    /* Light's worse backdrop is --bg #f4f4f5, not --surface #ffffff.
+       --dim already cleared AA; --muted was #a1a1aa at 2.33:1. */
+    --dim: #52525b;   /* 7.03:1 on bg, 7.73:1 on surface — unchanged */
+    --muted: #6a6a73; /* 4.87:1 on bg, 5.35:1 on surface */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -31,6 +37,12 @@ body {
     color: var(--fg);
     font-size: 12px;
     line-height: 1.5;
+    /* One rule instead of hunting selectors: every live-updating number (VRAM,
+       temps, tok/s, accept %, uptime) stops shifting its neighbours on each SSE
+       tick, and new ones inherit it. Defensive today — the whole app is
+       monospace, so digits are already fixed-width — but it costs one line and
+       holds if a proportional face is ever introduced. */
+    font-variant-numeric: tabular-nums;
 }
 
 .app { max-width: 1100px; margin: 0 auto; padding: 16px; }
@@ -373,7 +385,19 @@ body {
 .log-viewer::-webkit-scrollbar-track { background: var(--bg); }
 .log-viewer::-webkit-scrollbar-thumb { background: var(--border); }
 
-.log-line { white-space: pre-wrap; word-break: break-all; }
+/* Skip layout/paint for offscreen log lines. 18px is one unwrapped line at
+   11px x 1.6 line-height (17.6px, rounded). Lines pre-wrap and break-all, so
+   many are taller than one row — the `auto` keyword is what makes that safe:
+   once a line has been rendered the browser remembers its real height and uses
+   that instead of the 18px guess, so the scrollbar doesn't jump on scrollback.
+   content-visibility: auto keeps skipped content in the a11y tree and
+   findable by find-in-page, unlike display:none virtualisation. */
+.log-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 18px;
+}
 
 /* Processes */
 .process-row {
