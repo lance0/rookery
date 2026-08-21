@@ -37,7 +37,7 @@ cargo build --release -p rookery-daemon
 ### Run Tests
 
 ```bash
-cargo test --workspace         # 457+ tests, no GPU required
+make test                      # canonical command — runs cargo test --workspace
 cargo clippy --all-targets     # zero warnings enforced
 cargo fmt --all --check        # formatting enforced
 ```
