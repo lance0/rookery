@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod backend;
+pub mod backup;
 pub mod compose;
 pub mod gpu;
 pub mod hardware;
