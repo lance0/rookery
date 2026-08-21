@@ -256,3 +256,154 @@ fn missing_config_stays_quiet() {
         stderr(&out)
     );
 }
+
+// ── 4. The `--json` error contract (LAN-1102) ───────────────────────────
+//
+// Two halves of one contract: `--json` must not exit 0 on a failure the plain
+// mode exits 1 on, and must not leave `| jq` with empty stdin.
+
+fn parse_stdout(out: &Output) -> serde_json::Value {
+    serde_json::from_str(&stdout(out)).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be parseable JSON in --json mode ({e}); stdout was {:?}",
+            stdout(out)
+        )
+    })
+}
+
+/// The headline bug: plain mode exits 1, `--json` exited 0 on the same body.
+#[test]
+fn start_json_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(FAILED);
+    let out = run(port, &["start", "fast", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "`rookery start --json` must agree with plain `rookery start`, which \
+         exits 1 on the identical body — the machine-readable mode was the one \
+         that lied. stdout: {}",
+        stdout(&out)
+    );
+    assert_eq!(
+        parse_stdout(&out)["message"],
+        "server failed to start",
+        "the daemon body must still be printed verbatim, not replaced"
+    );
+}
+
+#[test]
+fn swap_json_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(FAILED);
+    let out = run(port, &["swap", "fast", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    assert_eq!(parse_stdout(&out)["success"], false);
+}
+
+#[test]
+fn agent_update_json_exits_nonzero_when_daemon_reports_failure() {
+    let port = stub_daemon(r#"{"success":false,"message":"update failed","version":"0.20.0"}"#);
+    let out = run(port, &["agent", "update", "hermes", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    assert_eq!(parse_stdout(&out)["version"], "0.20.0");
+}
+
+/// The other side of the same coin — success must stay exit 0 with the body
+/// untouched, or every `rookery start --json | jq` in a script breaks.
+#[test]
+fn start_json_still_exits_zero_on_success() {
+    let port = stub_daemon(r#"{"success":true,"message":"server started","status":{"pid":42}}"#);
+    let out = run(port, &["start", "fast", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the JSON success path must not regress into exit 1; stderr: {}",
+        stderr(&out)
+    );
+    let body = parse_stdout(&out);
+    assert_eq!(body["success"], true);
+    assert!(
+        body.get("error").is_none(),
+        "the success body must be the daemon's, unwrapped: {body}"
+    );
+}
+
+/// `rookery gpu --json | jq .` used to hand jq an empty stdin whenever the
+/// daemon was down.
+#[test]
+fn json_client_error_prints_an_envelope_instead_of_empty_stdout() {
+    let out = run_against(CLOSED, &["gpu", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let body = parse_stdout(&out);
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains(CLOSED),
+        "the envelope must name the probed URL: {body}"
+    );
+    assert_eq!(body["daemon_url"], CLOSED);
+}
+
+/// Every `--json` error path shares one key, whichever command produced it —
+/// that is the whole point of the envelope, and `status` (which has its own
+/// richer offline body) has to be part of it rather than a second shape.
+#[test]
+fn every_json_error_path_carries_the_shared_error_key() {
+    for args in [
+        vec!["gpu", "--json"],
+        vec!["profiles", "--json"],
+        vec!["status", "--json"],
+        vec!["bench", "--json"],
+        vec!["agent", "status", "--json"],
+        vec!["models", "list", "--json"],
+        vec!["releases", "--json"],
+    ] {
+        let out = run_against(CLOSED, &args);
+        assert_eq!(out.status.code(), Some(1), "for `{}`", args.join(" "));
+        let body = parse_stdout(&out);
+        assert!(
+            body["error"].is_string(),
+            "`rookery {} ` must emit a string .error: {body}",
+            args.join(" ")
+        );
+        assert_eq!(body["daemon_url"], CLOSED, "for `{}`", args.join(" "));
+    }
+}
+
+/// LAN-1084 shipped `.state` on this body a wave ago; converging on the shared
+/// envelope must add keys, not swap them out from under existing scripts.
+#[test]
+fn status_json_offline_keeps_its_state_field_while_gaining_error() {
+    let out = run_against(CLOSED, &["status", "--json"]);
+    let body = parse_stdout(&out);
+    assert_eq!(body["state"], "daemon_offline");
+    assert!(body["error"].is_string(), "{body}");
+}
+
+/// Usage errors are clap's, and clap exits 2. That is why daemon-unreachable
+/// and daemon-reported-failure both stay 1: taking 2 for either would collide
+/// with "you typed the command wrong", the one distinction a script most needs.
+#[test]
+fn usage_errors_exit_2_so_runtime_failures_can_own_1() {
+    let out = run_against(CLOSED, &["bogus-subcommand"]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+
+    let out = run_against(CLOSED, &["swap"]); // missing required <profile>
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+}
+
+/// The other five failure paths use stderr; this one printed to stdout, so a
+/// failed pull landed in whatever file the caller was capturing the report to.
+#[test]
+fn models_pull_failure_goes_to_stderr_not_stdout() {
+    let port = stub_daemon(r#"{"started":false,"message":"no GGUF files found"}"#);
+    let out = run(port, &["models", "pull", "unsloth/Qwen3.8-27B-GGUF"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("no GGUF files found"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stdout(&out).contains("no GGUF files found"),
+        "stdout: {}",
+        stdout(&out)
+    );
+}
