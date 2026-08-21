@@ -241,7 +241,10 @@ pub async fn encode_metrics(state: &AppState) -> String {
                 .get_or_create(&ProfileLabels { profile })
                 .set(Utc::now().signed_duration_since(since).num_seconds().max(0) as u64);
         }
-        rookery_core::state::ServerState::Sleeping { profile, .. } => {
+        // Intentionally out of service: 0, but labelled with the profile so an
+        // alert rule can tell it apart from a crash (which reports profile="").
+        rookery_core::state::ServerState::Sleeping { profile, .. }
+        | rookery_core::state::ServerState::Swapping { to: profile, .. } => {
             server_up
                 .get_or_create(&ServerLabels {
                     profile,

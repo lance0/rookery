@@ -346,6 +346,17 @@ pub async fn post_swap(
         "swapping model"
     );
 
+    // Broadcast BEFORE the drain. A swap is 30s+; until this landed, every
+    // client kept reporting the old profile as `running` for the whole ride.
+    // No drain flag is set yet, so this is not an early-return path.
+    state
+        .set_server_state(rookery_core::state::ServerState::Swapping {
+            from: old_profile.clone(),
+            to: req.profile.clone(),
+            since: chrono::Utc::now(),
+        })
+        .await;
+
     // Swap orchestration at daemon level: drain → stop → create new backend → start → health check
     //
     // IMPORTANT: set_draining(false) must be called on ALL exit paths after drain is set.
@@ -488,6 +499,17 @@ pub async fn post_swap(
         }
         Err(e) => {
             tracing::error!(error = %e, "swap failed");
+            // Must land a terminal state: this path used to leave the stale
+            // `Running{old}` behind, and now that we broadcast `Swapping` up
+            // front it would otherwise stick there forever, wedging every
+            // client that gates on it.
+            state
+                .set_server_state(rookery_core::state::ServerState::Failed {
+                    last_error: e.to_string(),
+                    profile: req.profile.clone(),
+                    since: chrono::Utc::now(),
+                })
+                .await;
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -1738,6 +1760,16 @@ fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse
             uptime_secs: None,
             backend: None,
         },
+        rookery_core::state::ServerState::Swapping { to, .. } => StatusResponse {
+            state: "swapping".into(),
+            profile: Some(to.clone()),
+            // Deliberately no pid/port/backend/uptime: nothing is serving yet,
+            // and reporting the target's port would be an optimistic lie.
+            pid: None,
+            port: None,
+            uptime_secs: None,
+            backend: None,
+        },
     }
 }
 
@@ -1796,6 +1828,30 @@ mod tests {
             json["backend"].is_null(),
             "backend should be null when failed"
         );
+    }
+
+    // LAN-1081: a swap must be visible on the wire, and the SSE `state` payload
+    // is what the dashboard turns into `class="badge swapping"` (it splits the
+    // state string on ':' and interpolates). If this string drifts, the amber
+    // badge silently stops rendering.
+    #[test]
+    fn test_status_from_state_swapping() {
+        let state = rookery_core::state::ServerState::Swapping {
+            from: Some("qwen_dense".into()),
+            to: "qwen38".into(),
+            since: chrono::Utc::now(),
+        };
+        let resp = status_from_state(&state);
+        assert_eq!(resp.state, "swapping");
+        assert_eq!(resp.profile, Some("qwen38".into()));
+        // Nothing is serving mid-swap — no optimistic pid/port/backend.
+        assert_eq!(resp.pid, None);
+        assert_eq!(resp.port, None);
+        assert_eq!(resp.backend, None);
+
+        let json = status_json_from_state(&state);
+        assert_eq!(json["state"], "swapping");
+        assert_eq!(json["profile"], "qwen38");
     }
 
     // === Fix #4: status_from_state returns 'starting'/'stopping' not 'transitioning'

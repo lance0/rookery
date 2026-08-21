@@ -230,7 +230,9 @@ body {
     text-align: left;
 }
 
-.profile-card:hover { border-color: var(--fg); color: var(--fg); }
+.profile-card:hover:not(:disabled) { border-color: var(--fg); color: var(--fg); }
+
+.profile-card:disabled { opacity: 0.4; cursor: wait; }
 
 .profile-card.active {
     border-color: var(--accent);
