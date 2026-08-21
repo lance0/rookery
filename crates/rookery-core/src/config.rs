@@ -418,8 +418,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub update_workdir: Option<PathBuf>,
 
-    /// Stderr patterns that trigger an immediate restart (case-insensitive substring match).
+    /// Stderr patterns that trigger a restart (case-insensitive substring match).
     /// Example: ["telegram.error.TimedOut", "ReadTimeout", "CLOSE_WAIT"]
+    ///
+    /// A single match is NOT enough: three matches within ten minutes are
+    /// required before the agent is bounced, because one `ReadTimeout` is a
+    /// transient network condition, not a fatal state. Slow-burn failures still
+    /// restart as long as they arrive faster than one every ~5 minutes; a
+    /// pattern that a wedged agent prints exactly once will not.
     #[serde(default)]
     pub restart_on_error_patterns: Vec<String>,
 
