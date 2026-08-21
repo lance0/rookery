@@ -630,10 +630,62 @@ body {
     height: 6px;
     border-radius: 50%;
     display: inline-block;
-    margin-right: 4px;
+    background: var(--muted);
 }
-.conn-dot.connected { background: var(--green); }
-.conn-dot.disconnected { background: var(--red); }
+
+/* Stream freshness chip — persistent, so it states what is true now. */
+.conn-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    font-size: 10px;
+    color: var(--dim);
+    white-space: nowrap;
+}
+
+.conn-chip.live { color: var(--green); border-color: var(--green); }
+.conn-chip.live .conn-dot { background: var(--green); }
+.conn-chip.stale { color: var(--amber); border-color: var(--amber); }
+.conn-chip.stale .conn-dot { background: var(--amber); }
+.conn-chip.reconnecting { color: var(--amber); border-color: var(--amber); }
+.conn-chip.reconnecting .conn-dot {
+    background: var(--amber);
+    animation: conn-pulse 1.2s ease-in-out infinite;
+}
+.conn-chip.dead { color: var(--red); border-color: var(--red); }
+.conn-chip.dead .conn-dot { background: var(--red); }
+
+@keyframes conn-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
+}
+
+/* Staleness: strip the numbers of their authority rather than hiding them.
+   3-10s of silence dims; past that the stream is presumed dead, so the
+   colour coding goes too — a green VRAM bar is a claim we can't back. */
+.app.data-stale .stat-value,
+.app.data-stale .badge,
+.app.data-stale .gauge-value,
+.app.data-stale .gauge-track,
+.app.data-stale .process-row {
+    opacity: 0.45;
+}
+
+.app.data-dead .stat-value,
+.app.data-dead .badge,
+.app.data-dead .gauge-value,
+.app.data-dead .gauge-track,
+.app.data-dead .process-row {
+    opacity: 0.3;
+    filter: grayscale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .conn-chip .conn-dot { animation: none; }
+}
 
 /* Mobile */
 @media (max-width: 768px) {
