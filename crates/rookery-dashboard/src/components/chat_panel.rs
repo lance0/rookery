@@ -222,7 +222,14 @@ async fn stream_chat(
         .dyn_into::<web_sys::ReadableStreamDefaultReader>()
         .map_err(|_| "not a reader")?;
 
-    let decoder = js_sys::eval("new TextDecoder()").map_err(|e| format!("{e:?}"))?;
+    // One decoder for the whole stream, deliberately outside the read loop:
+    // `stream: true` works by keeping the trailing bytes of a split UTF-8 sequence
+    // inside the decoder until the next chunk arrives. A per-chunk decoder starts
+    // with an empty internal buffer every time, so split sequences would still
+    // decode to U+FFFD and the flag would buy nothing.
+    let decoder = web_sys::TextDecoder::new().map_err(|e| format!("{e:?}"))?;
+    let decode_opts = web_sys::TextDecodeOptions::new();
+    decode_opts.set_stream(true);
 
     let mut buffer = String::new();
 
@@ -237,20 +244,21 @@ async fn stream_chat(
             .unwrap_or(true);
 
         if done {
+            // ponytail: no final `decoder.decode()` flush. Bytes still held by the
+            // decoder here mean the server truncated a UTF-8 sequence, so the flush
+            // could only yield U+FFFD — and it would land in `buffer`, whose trailing
+            // partial line is discarded on break anyway. Unobservable either way.
             break;
         }
 
-        let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|e| format!("{e:?}"))?;
+        let value: js_sys::Object = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+            .map_err(|e| format!("{e:?}"))?
+            .dyn_into()
+            .map_err(|_| "stream chunk is not a buffer")?;
 
-        // Decode Uint8Array to string
-        let decode_fn = js_sys::Reflect::get(&decoder, &JsValue::from_str("decode"))
+        let chunk = decoder
+            .decode_with_buffer_source_and_options(&value, &decode_opts)
             .map_err(|e| format!("{e:?}"))?;
-        let decode_fn: js_sys::Function = decode_fn.dyn_into().map_err(|_| "not a function")?;
-        let text = decode_fn
-            .call1(&decoder, &value)
-            .map_err(|e| format!("{e:?}"))?;
-        let chunk = text.as_string().unwrap_or_default();
 
         buffer.push_str(&chunk);
 
