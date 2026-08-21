@@ -95,7 +95,9 @@ A 60-second uptime guard prevents double-bouncing when the swap handler already 
 
 ### Error Pattern Restart (restart_on_error_patterns)
 
-Monitors agent stderr for fatal patterns. When a pattern matches (case-insensitive), the watchdog triggers an **immediate** restart instead of waiting for the next 30s poll cycle.
+Monitors agent stderr for fatal patterns. When **three** lines match (case-insensitive) within a **ten-minute** window, the watchdog triggers an **immediate** restart instead of waiting for the next 30s poll cycle.
+
+A single match is ignored on purpose — `ReadTimeout` and its relatives are transient network conditions, and restarting a process over one interrupts writes for no benefit. A wedged gateway re-emits its error every poll cycle, so it still trips the threshold in seconds; failures as slow as one every 5 minutes still restart. The counter is per process and resets once the agent restarts.
 
 ```toml
 restart_on_error_patterns = [

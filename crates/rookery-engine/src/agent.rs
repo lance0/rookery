@@ -2,9 +2,10 @@ use chrono::{Timelike, Utc};
 use rookery_core::config::AgentConfig;
 use rookery_core::state::{AgentEntry, AgentPersistence, AgentState};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -131,6 +132,28 @@ fn pid_cmdline_matches(pid: u32, command: &str) -> bool {
         _ => false,
     }
 }
+
+/// How many `restart_on_error_patterns` matches must land inside
+/// [`ERROR_PATTERN_WINDOW`] before an agent is restarted.
+///
+/// One line is not evidence of a wedged agent. `ReadTimeout` and friends are
+/// ordinary transient network conditions, and bouncing a process over one
+/// multiplies mid-write interruption risk for no benefit — the pattern path
+/// fired 42 times on 2026-07-25 alone. A genuinely wedged gateway re-emits its
+/// error every poll cycle and still trips this within seconds.
+const ERROR_PATTERN_THRESHOLD: usize = 3;
+
+/// Sliding window the matches must fall inside.
+///
+/// Deliberately much wider than the burst it is filtering: failures arriving as
+/// slowly as one every 5 minutes still reach the threshold and restart, so a
+/// slow-but-genuinely-broken agent is not left up forever.
+///
+/// ponytail: matches sparser than `ERROR_PATTERN_WINDOW / (THRESHOLD - 1)`
+/// (~5 min apart) are treated as transient and never restart. If an agent is
+/// ever found wedged while erroring more slowly than that, widen the window —
+/// or promote these two to per-agent config.
+const ERROR_PATTERN_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub struct AgentManager {
     agents: Mutex<HashMap<String, ManagedAgent>>,
@@ -386,6 +409,12 @@ impl AgentManager {
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
+                // Timestamps of recent pattern matches. Lives in this task, which
+                // is spawned per process, so a successful restart starts the count
+                // at zero. Pruned to the window on every match and cleared when it
+                // fires, so it holds at most ERROR_PATTERN_THRESHOLD entries.
+                let mut recent_matches: VecDeque<Instant> =
+                    VecDeque::with_capacity(ERROR_PATTERN_THRESHOLD);
                 while let Ok(Some(line)) = lines.next_line().await {
                     let lower = line.to_ascii_lowercase();
                     if lower.contains("error") {
@@ -394,12 +423,26 @@ impl AgentManager {
                     if !fatal_patterns.is_empty()
                         && fatal_patterns.iter().any(|pat| lower.contains(pat))
                     {
-                        tracing::warn!(
-                            agent = %agent_name,
-                            line = %line,
-                            "fatal error pattern detected, triggering restart"
-                        );
-                        let _ = fatal_tx.send(Some(agent_name.clone()));
+                        let now = Instant::now();
+                        recent_matches.retain(|t| now.duration_since(*t) <= ERROR_PATTERN_WINDOW);
+                        recent_matches.push_back(now);
+                        if recent_matches.len() >= ERROR_PATTERN_THRESHOLD {
+                            recent_matches.clear();
+                            tracing::warn!(
+                                agent = %agent_name,
+                                line = %line,
+                                "fatal error pattern detected, triggering restart"
+                            );
+                            let _ = fatal_tx.send(Some(agent_name.clone()));
+                        } else {
+                            tracing::warn!(
+                                agent = %agent_name,
+                                line = %line,
+                                matches = recent_matches.len(),
+                                threshold = ERROR_PATTERN_THRESHOLD,
+                                "error pattern matched, below restart threshold"
+                            );
+                        }
                     }
                     buf.push(format!("{p} {line}"));
                 }
@@ -1595,11 +1638,13 @@ name = "test-agent"
         let log_buffer = Arc::new(LogBuffer::new(100));
         let (_adir, manager) = test_manager(log_buffer);
 
+        // Three matches inside the window — the restart threshold (LAN-1091).
         let config = AgentConfig {
             command: "bash".to_string(),
             args: vec![
                 "-c".to_string(),
-                "echo 'telegram.error.TimedOut: connection lost' >&2; sleep 60".to_string(),
+                "for i in 1 2 3; do echo 'telegram.error.TimedOut: connection lost' >&2; done; sleep 60"
+                    .to_string(),
             ],
             workdir: None,
             env: HashMap::new(),
@@ -1628,6 +1673,127 @@ name = "test-agent"
         assert_eq!(triggered, Some("test".to_string()));
 
         manager.stop("test").await.unwrap();
+    }
+
+    /// LAN-1091: one `ReadTimeout` is a transient network condition, not a wedged
+    /// agent. Restarting over it interrupts writes for no benefit.
+    #[tokio::test]
+    async fn test_agent_single_error_line_does_not_restart() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let buf = log_buffer.clone();
+        let (_adir, manager) = test_manager(log_buffer);
+        let mut rx = manager.fatal_error_rx.clone();
+
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "echo 'httpcore.ReadTimeout: timed out' >&2; sleep 60".to_string(),
+            ],
+            restart_on_error_patterns: vec!["ReadTimeout".to_string()],
+            ..test_agent_config()
+        };
+
+        manager.start("test", &config).await.unwrap();
+        assert_no_restart_after_matches(&buf, &mut rx, 1, "ReadTimeout").await;
+
+        manager.stop("test").await.unwrap();
+    }
+
+    /// LAN-1091: threshold-1 matches still must not restart — the boundary, and
+    /// the case a naive "count them" fix gets wrong.
+    #[tokio::test]
+    async fn test_agent_below_threshold_does_not_restart() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let buf = log_buffer.clone();
+        let (_adir, manager) = test_manager(log_buffer);
+        let mut rx = manager.fatal_error_rx.clone();
+
+        let below = ERROR_PATTERN_THRESHOLD - 1;
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "for i in $(seq {below}); do echo 'httpcore.ReadTimeout' >&2; done; sleep 60"
+                ),
+            ],
+            restart_on_error_patterns: vec!["ReadTimeout".to_string()],
+            ..test_agent_config()
+        };
+
+        manager.start("test", &config).await.unwrap();
+        assert_no_restart_after_matches(&buf, &mut rx, below, "ReadTimeout").await;
+
+        manager.stop("test").await.unwrap();
+    }
+
+    /// LAN-1091: the counter lives with the stderr reader task, which dies with
+    /// the process, so a restart starts from zero instead of carrying stale
+    /// matches into the next process's first hiccup.
+    #[tokio::test]
+    async fn test_agent_error_pattern_count_resets_across_restart() {
+        let log_buffer = Arc::new(LogBuffer::new(100));
+        let buf = log_buffer.clone();
+        let (_adir, manager) = test_manager(log_buffer);
+        let mut rx = manager.fatal_error_rx.clone();
+
+        let below = ERROR_PATTERN_THRESHOLD - 1;
+        let config = AgentConfig {
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "for i in $(seq {below}); do echo 'httpcore.ReadTimeout' >&2; done; sleep 60"
+                ),
+            ],
+            restart_on_error_patterns: vec!["ReadTimeout".to_string()],
+            ..test_agent_config()
+        };
+
+        manager.start("test", &config).await.unwrap();
+        assert_no_restart_after_matches(&buf, &mut rx, below, "ReadTimeout").await;
+        manager.stop("test").await.unwrap();
+
+        // Same again on a fresh process: 2 + 2 matches is still not 3 in a row.
+        manager.start("test", &config).await.unwrap();
+        assert_no_restart_after_matches(&buf, &mut rx, below * 2, "ReadTimeout").await;
+        manager.stop("test").await.unwrap();
+    }
+
+    /// Wait until `want` matching lines have actually been read off stderr, then
+    /// assert no restart was triggered.
+    ///
+    /// The reader pushes a line to the log buffer only after deciding whether it
+    /// trips the threshold, so seeing the line in the buffer means the decision
+    /// for it has already been made — this waits on the real condition rather
+    /// than on a hopeful sleep.
+    async fn assert_no_restart_after_matches(
+        buf: &Arc<LogBuffer>,
+        rx: &mut tokio::sync::watch::Receiver<Option<String>>,
+        want: usize,
+        pattern: &str,
+    ) {
+        assert!(
+            poll_until(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_millis(20),
+                || buf
+                    .last_n(100)
+                    .iter()
+                    .filter(|l| l.contains(pattern))
+                    .count()
+                    >= want,
+            )
+            .await,
+            "agent should have emitted {want} matching stderr line(s)"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed())
+                .await
+                .is_err(),
+            "{want} matching line(s) must not trigger a restart (threshold is {ERROR_PATTERN_THRESHOLD})"
+        );
     }
 
     #[tokio::test]
