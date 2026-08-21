@@ -216,7 +216,7 @@ Rookery as the control plane for Hermes: Hermes manages itself (self-update, sel
 ## vLLM Backend Support (Done — Core)
 
 ### Architecture (Done)
-- [x] Backend trait: `InferenceBackend` trait in `backend.rs` (start, stop, health, swap, subscribe_errors)
+- [x] Backend trait: `InferenceBackend` trait in `backend.rs` (start, stop, adopt, state, drain flag)
 - [x] `LlamaServerBackend`: wraps ProcessManager, zero behavior change
 - [x] `VllmBackend`: Docker-based backend (docker compose up/down, log capture, CUDA detection)
 - [x] Config: profile sub-tables `[profiles.name.llama_server]` / `[profiles.name.vllm]`

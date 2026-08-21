@@ -11,7 +11,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
 use crate::backend::BackendErrorEvent;
-use crate::health;
 use crate::logs::LogBuffer;
 
 /// Check if a PID is alive and not a zombie.
@@ -40,7 +39,6 @@ pub struct ProcessManager {
     info: Arc<Mutex<Option<ProcessInfo>>>,
     log_buffer: Arc<LogBuffer>,
     draining: AtomicBool,
-    cuda_error_tx: watch::Sender<bool>,
     daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
 }
 
@@ -63,20 +61,13 @@ impl ProcessManager {
         log_buffer: Arc<LogBuffer>,
         daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
     ) -> Self {
-        let (cuda_error_tx, _) = watch::channel(false);
         Self {
             child: Arc::new(Mutex::new(None)),
             info: Arc::new(Mutex::new(None)),
             log_buffer,
             draining: AtomicBool::new(false),
-            cuda_error_tx,
             daemon_error_tx,
         }
-    }
-
-    /// Subscribe to CUDA error notifications from llama-server stderr.
-    pub fn subscribe_cuda_errors(&self) -> watch::Receiver<bool> {
-        self.cuda_error_tx.subscribe()
     }
 
     pub fn is_draining(&self) -> bool {
@@ -146,7 +137,6 @@ impl ProcessManager {
         let log_buf = self.log_buffer.clone();
         if let Some(stderr) = child.stderr.take() {
             let buf = log_buf.clone();
-            let cuda_tx = self.cuda_error_tx.clone();
             let daemon_error_tx = self.daemon_error_tx.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
@@ -156,7 +146,6 @@ impl ProcessManager {
                     let lower = line.to_ascii_lowercase();
                     if lower.contains("cuda error") || lower.contains("ggml_cuda_error") {
                         tracing::error!("CUDA error detected in stderr: {line}");
-                        let _ = cuda_tx.send(true);
                         if let Some(tx) = &daemon_error_tx {
                             let _ = tx.send(Some(BackendErrorEvent {
                                 backend_type: rookery_core::config::BackendType::LlamaServer,
@@ -255,6 +244,9 @@ impl ProcessManager {
     /// Adopt an existing process by PID (used when daemon restarts and finds a running server).
     pub async fn adopt(&self, info: ProcessInfo) {
         tracing::info!(pid = info.pid, profile = %info.profile, "adopting existing llama-server");
+        // Drop any stale child handle first — otherwise is_running()/stop() would
+        // act on the old child while `info` describes the adopted process.
+        *self.child.lock().await = None;
         *self.info.lock().await = Some(info);
         // No child handle — stop() will fall back to kill-by-PID
     }
@@ -293,48 +285,6 @@ impl ProcessManager {
                 container_id: None,
             },
             _ => ServerState::Stopped,
-        }
-    }
-
-    /// Hot-swap: drain in-flight requests, stop current server, start new profile, health check.
-    pub async fn swap(&self, config: &Config, new_profile: &str) -> Result<ServerState> {
-        let old_profile = self.process_info().await.map(|i| i.profile.clone());
-
-        tracing::info!(
-            from = ?old_profile,
-            to = new_profile,
-            "hot-swapping model"
-        );
-
-        // Stop current if running, with drain period
-        if self.is_running().await {
-            self.draining.store(true, Ordering::SeqCst);
-            tracing::info!("draining in-flight requests (5s)");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            self.stop().await?;
-            self.draining.store(false, Ordering::SeqCst);
-        }
-
-        // Start new profile
-        self.start_and_wait(config, new_profile).await
-    }
-
-    /// Start and wait for health check, returning the final state.
-    pub async fn start_and_wait(&self, config: &Config, profile_name: &str) -> Result<ServerState> {
-        let info = self.start(config, profile_name).await?;
-
-        // Wait for health with 120s timeout (model download can take a while)
-        match health::wait_for_health(info.port, std::time::Duration::from_secs(120)).await {
-            Ok(()) => Ok(self.to_server_state().await),
-            Err(e) => {
-                tracing::error!(error = %e, "health check failed, stopping server");
-                let _ = self.stop().await;
-                Ok(ServerState::Failed {
-                    last_error: e.to_string(),
-                    profile: profile_name.to_string(),
-                    since: Utc::now(),
-                })
-            }
         }
     }
 }
@@ -721,102 +671,7 @@ mod tests {
         );
     }
 
-    /// 10. start_and_wait() succeeds when mock server is healthy
-    #[tokio::test]
-    async fn test_start_and_wait_succeeds_with_healthy_server() {
-        use crate::test_utils::MockLlamaServer;
-
-        // Start a mock server first to get its port
-        let mock = MockLlamaServer::start().await;
-        let port = mock.port();
-
-        // Use a wrapper script that ignores args and stays alive.
-        // start_and_wait() calls start() (spawning this script) then
-        // wait_for_health(port). The mock server already serves /health on
-        // that port, so the health check passes.
-        let (_dir, script) = make_sleep_script();
-        let config = make_test_config(&script, port);
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let pm = ProcessManager::new(log_buffer);
-
-        let state = pm
-            .start_and_wait(&config, "test")
-            .await
-            .expect("start_and_wait should succeed");
-
-        match state {
-            ServerState::Running {
-                profile,
-                port: state_port,
-                ..
-            } => {
-                assert_eq!(profile, "test");
-                assert_eq!(state_port, port);
-            }
-            other => panic!("expected Running state, got {other:?}"),
-        }
-
-        // Clean up
-        pm.stop().await.unwrap();
-        mock.shutdown().await;
-    }
-
-    /// 11. start_and_wait() returns Failed state on health timeout
-    ///
-    /// We cannot call start_and_wait() directly because it has a hardcoded
-    /// 120s health timeout. Instead, we replicate its logic with a short
-    /// timeout to verify the failure → stop → Failed state pattern.
-    #[tokio::test]
-    async fn test_start_and_wait_returns_failed_on_health_timeout() {
-        // Get a free port with no HTTP server → health check will fail
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let (_dir, script) = make_sleep_script();
-        let config = make_test_config(&script, port);
-        let log_buffer = Arc::new(LogBuffer::new(100));
-        let pm = ProcessManager::new(log_buffer);
-
-        let info = pm
-            .start(&config, "test")
-            .await
-            .expect("start should succeed");
-        assert!(pm.is_running().await);
-
-        // Simulate what start_and_wait does but with a short timeout
-        let health_result =
-            health::wait_for_health(info.port, std::time::Duration::from_millis(500)).await;
-
-        assert!(
-            health_result.is_err(),
-            "health check should fail on unused port"
-        );
-
-        // stop + build Failed state like start_and_wait would
-        let _ = pm.stop().await;
-        let state = ServerState::Failed {
-            last_error: health_result.unwrap_err().to_string(),
-            profile: "test".into(),
-            since: Utc::now(),
-        };
-        match state {
-            ServerState::Failed {
-                ref last_error,
-                ref profile,
-                ..
-            } => {
-                assert!(
-                    last_error.contains("timed out"),
-                    "error should mention timeout, got: {last_error}"
-                );
-                assert_eq!(profile, "test");
-            }
-            other => panic!("expected Failed state, got {other:?}"),
-        }
-    }
-
-    /// 12. CUDA error detection in stderr triggers watch channel
+    /// 12. CUDA error detection in stderr triggers the daemon error notifier
     #[tokio::test]
     async fn test_cuda_error_detection_in_stderr() {
         let dir = tempfile::tempdir().unwrap();
@@ -828,10 +683,8 @@ mod tests {
 
         let config = make_test_config(script_path.to_str().unwrap(), 19012);
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let pm = ProcessManager::new(log_buffer);
-
-        // Subscribe to CUDA errors BEFORE starting
-        let mut cuda_rx = pm.subscribe_cuda_errors();
+        let (cuda_tx, mut cuda_rx) = watch::channel(None);
+        let pm = ProcessManager::new_with_error_notifier(log_buffer, Some(cuda_tx));
 
         pm.start(&config, "test")
             .await
@@ -843,11 +696,11 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "CUDA error should trigger the watch channel within timeout"
+            "CUDA error should notify the daemon within timeout"
         );
         assert!(
-            *cuda_rx.borrow(),
-            "CUDA error watch channel should be set to true"
+            cuda_rx.borrow().is_some(),
+            "daemon error notifier should carry a BackendErrorEvent"
         );
 
         pm.stop().await.unwrap();
@@ -915,7 +768,7 @@ mod tests {
         pm.stop().await.unwrap();
     }
 
-    /// CUDA error channel does not fire for normal (non-CUDA) stderr output
+    /// CUDA error notifier does not fire for normal (non-CUDA) stderr output
     #[tokio::test]
     async fn test_cuda_error_not_triggered_by_normal_output() {
         let dir = tempfile::tempdir().unwrap();
@@ -927,9 +780,8 @@ mod tests {
 
         let config = make_test_config(script_path.to_str().unwrap(), 19016);
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let pm = ProcessManager::new(log_buffer);
-
-        let mut cuda_rx = pm.subscribe_cuda_errors();
+        let (cuda_tx, mut cuda_rx) = watch::channel(None);
+        let pm = ProcessManager::new_with_error_notifier(log_buffer, Some(cuda_tx));
 
         pm.start(&config, "test")
             .await
@@ -941,7 +793,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "CUDA error channel should NOT fire for normal stderr output"
+            "CUDA error notifier should NOT fire for normal stderr output"
         );
 
         pm.stop().await.unwrap();
@@ -959,7 +811,7 @@ mod tests {
         );
     }
 
-    /// ggml_cuda_error variant also triggers the CUDA error watch channel
+    /// ggml_cuda_error variant also triggers the daemon error notifier
     #[tokio::test]
     async fn test_ggml_cuda_error_detection_in_stderr() {
         let dir = tempfile::tempdir().unwrap();
@@ -971,9 +823,8 @@ mod tests {
 
         let config = make_test_config(script_path.to_str().unwrap(), 19017);
         let log_buffer = Arc::new(LogBuffer::new(100));
-        let pm = ProcessManager::new(log_buffer);
-
-        let mut cuda_rx = pm.subscribe_cuda_errors();
+        let (cuda_tx, mut cuda_rx) = watch::channel(None);
+        let pm = ProcessManager::new_with_error_notifier(log_buffer, Some(cuda_tx));
 
         pm.start(&config, "test")
             .await
@@ -984,9 +835,9 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "ggml_cuda_error should trigger the watch channel"
+            "ggml_cuda_error should notify the daemon error channel"
         );
-        assert!(*cuda_rx.borrow());
+        assert!(cuda_rx.borrow().is_some());
 
         pm.stop().await.unwrap();
     }

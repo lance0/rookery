@@ -105,7 +105,7 @@ AgentManager tracks running agents in a `HashMap<String, ManagedAgent>` behind a
 
 State-changing operations (start, stop, swap) are serialized by `op_lock: tokio::sync::Mutex<()>` in `AppState`. This prevents two concurrent starts from racing past the idempotency check, or a stop racing with a swap.
 
-The config `RwLock` read guard is dropped before long `.await`s (like `start_and_wait`) to avoid holding the lock across process spawn + health check. Data needed after the await is cloned before dropping.
+The config `RwLock` read guard is dropped before long `.await`s (like `AppState::start_profile`) to avoid holding the lock across process spawn + health check. Data needed after the await is cloned before dropping.
 
 ## Swap Drain
 
