@@ -94,7 +94,8 @@ impl GitHubClient {
     pub fn new(token: Option<&str>) -> Self {
         let mut builder = reqwest::Client::builder()
             .user_agent(format!("rookery/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30));
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(2));
 
         if let Some(tok) = token {
             let mut headers = reqwest::header::HeaderMap::new();
@@ -244,6 +245,7 @@ pub async fn detect_llama_version_from_props(port: u16) -> Result<VersionInfo, S
     let url = format!("http://127.0.0.1:{port}/props");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(2))
         .build()
         .map_err(|e| format!("build client: {e}"))?;
 
@@ -355,5 +357,25 @@ mod tests {
     fn test_cache_load_missing() {
         let cache = ReleaseCache::load(Path::new("/nonexistent/path.json"));
         assert!(cache.repos.is_empty());
+    }
+
+    // ponytail: 192.0.2.1 is RFC 5737 TEST-NET-1, which blackholes SYNs on a
+    // normal network — so without `connect_timeout` the kernel SYN retry loop
+    // runs ~130s and this fails. Ceiling: on a network that rejects TEST-NET-1
+    // instantly (ICMP unreachable / no route) it passes either way. Only the
+    // elapsed time is asserted; whether the request errors is not our business.
+    #[tokio::test]
+    async fn test_github_client_bounds_connect_to_blackhole() {
+        let started = std::time::Instant::now();
+        let _ = GitHubClient::new(None)
+            .client
+            .get("http://192.0.2.1:81/")
+            .send()
+            .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "connect to a blackholed peer took {elapsed:?}; connect_timeout is not applied"
+        );
     }
 }
