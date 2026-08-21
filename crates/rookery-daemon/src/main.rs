@@ -21,6 +21,41 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
+/// How long shutdown waits for `op_lock` before tearing down anyway.
+///
+/// Must stay well inside `TimeoutStopSec=45` (rookery.service.in). A worst-case
+/// swap holds `op_lock` for 5s drain + 10s stop + start + a 120s health wait, so
+/// waiting it out would earn a SIGKILL — which skips `stop_all()` and the backend
+/// stop entirely, orphaning *more* than the race it was meant to fix.
+///
+/// ponytail: 20s covers a swap's drain (5s) + old-backend stop (10s) with margin
+/// and leaves ~25s of the 45s budget for `stop_all()` + `backend.stop()`. Raise
+/// only alongside `TimeoutStopSec`.
+const SHUTDOWN_OP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Acquire `op_lock` for shutdown so we don't stop the backend out from under an
+/// in-flight start/stop/swap.
+///
+/// `post_swap` releases `op_lock` only after `new_backend.start()`, so a shutdown
+/// that races it can exit *before* the swap spawns its llama-server, leaving ~30 GB
+/// of VRAM held by an unsupervised process.
+///
+/// Returns `None` on timeout, which falls through to the pre-fix behaviour — no
+/// worse than today, and it keeps us inside the systemd stop budget.
+async fn acquire_shutdown_op_lock(op_lock: &Mutex<()>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    match tokio::time::timeout(SHUTDOWN_OP_LOCK_WAIT, op_lock.lock()).await {
+        Ok(guard) => Some(guard),
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_OP_LOCK_WAIT.as_secs(),
+                "op_lock still held at shutdown (swap in flight?) — tearing down anyway to stay \
+                 inside TimeoutStopSec; an orphaned llama-server is possible"
+            );
+            None
+        }
+    }
+}
+
 async fn reconciled_backend_alive(
     backend_type: rookery_core::config::BackendType,
     running_pid: u32,
@@ -766,6 +801,10 @@ async fn main() {
     // Abort the axum server (don't wait for SSE streams to drain)
     server_handle.abort();
 
+    // Serialize with any in-flight start/stop/swap. Aborting axum does NOT cancel
+    // already-spawned per-connection handlers, so a swap can still be running here.
+    let _op_guard = acquire_shutdown_op_lock(&shutdown_state.op_lock).await;
+
     // Clean up child processes
     tracing::info!("shutting down — stopping agents and server");
     shutdown_state.agent_manager.stop_all().await;
@@ -864,6 +903,36 @@ mod tests {
         let backend = MockBackend { running: true };
         let alive = reconciled_backend_alive(BackendType::Vllm, 0, &backend).await;
         assert!(alive, "vLLM reconciliation should use backend.is_running()");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_op_lock_acquired_when_free() {
+        let op_lock = Mutex::new(());
+        assert!(
+            acquire_shutdown_op_lock(&op_lock).await.is_some(),
+            "shutdown must take op_lock so it can't stop a backend mid-swap"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_op_lock_wait_is_bounded() {
+        // A swap holds op_lock for up to ~135s; systemd SIGKILLs us at 45s.
+        assert!(
+            SHUTDOWN_OP_LOCK_WAIT < std::time::Duration::from_secs(45),
+            "wait must stay inside rookery.service.in TimeoutStopSec=45"
+        );
+
+        let op_lock = Mutex::new(());
+        let held = op_lock.lock().await;
+
+        let start = tokio::time::Instant::now();
+        assert!(
+            acquire_shutdown_op_lock(&op_lock).await.is_none(),
+            "shutdown must give up on a stuck op_lock, not block until SIGKILL"
+        );
+        assert!(start.elapsed() >= SHUTDOWN_OP_LOCK_WAIT);
+
+        drop(held);
     }
 
     #[tokio::test]
