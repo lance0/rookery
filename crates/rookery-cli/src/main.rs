@@ -84,6 +84,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Re-read the config file into the running daemon (no restart, no bounce)
+    Reload {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate config file
     #[command(name = "config")]
     ConfigValidate {
@@ -329,6 +335,7 @@ async fn main() {
         Commands::Profiles { json } => cmd_profiles(&client, json).await,
         Commands::Logs { follow, n } => cmd_logs(&client, follow, n).await,
         Commands::Bench { json } => cmd_bench(&client, json).await,
+        Commands::Reload { json } => cmd_reload(&client, json).await,
         Commands::ConfigValidate { json } => cmd_config_validate(json).await,
         Commands::Agent { cmd } => match cmd {
             AgentCommands::Start { name } => cmd_agent_start(&client, &name).await,
@@ -583,6 +590,28 @@ async fn cmd_gpu(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::e
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_reload(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    require_daemon(client).await?;
+
+    // A rejected reload comes back non-2xx and the body rides along in
+    // ClientError::Status, so a bad edit prints its parse/validation error here
+    // and the daemon keeps serving on the config it already had.
+    let resp: serde_json::Value = client.post("/api/reload", &EmptyBody {}).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("{}", resp["message"].as_str().unwrap_or(""));
+    for warning in resp["warnings"].as_array().into_iter().flatten() {
+        if let Some(warning) = warning.as_str() {
+            eprintln!("warning: {warning}");
+        }
+    }
+    println!("the running server and all agents were left untouched");
     Ok(())
 }
 

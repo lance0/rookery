@@ -634,6 +634,164 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<serde_json::
     Json(val)
 }
 
+/// How long `post_reload` waits for `op_lock` before giving up.
+///
+/// Reload serialises against start/stop/swap so it can never land half-way
+/// through one — but it runs inside a request handler, and a worst-case swap
+/// holds `op_lock` for ~135s (LAN-1074 bounded the *shutdown* wait at 20s for
+/// exactly this reason). So the wait is bounded: an uncontended reload takes
+/// the lock immediately, a contended one gets an actionable 409 instead of
+/// pinning a connection for minutes.
+const RELOAD_OP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn reload_error(status: StatusCode, error: String) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "success": false, "error": error })),
+    )
+}
+
+/// Re-read the config file from disk into the live `AppState` — without
+/// touching the running backend, its port, or any agent process.
+///
+/// **A bad config can never take down a running daemon.** The file is read,
+/// parsed and validated into a *local* `Config`; every failure path returns
+/// before `state.config` is written, so a rejected reload leaves the daemon on
+/// exactly the config it was already serving. This is deliberately the inverse
+/// of LAN-1076's boot behaviour — at boot an invalid config is `exit(1)`,
+/// here it is a 400 and nothing else.
+///
+/// Reload changes what *future* operations see. The live backend keeps its
+/// profile, port, PID and binary until the next start/swap; agents are never
+/// bounced. Anything the reload cannot honour comes back in `warnings`,
+/// because a reload that silently doesn't apply is worse than no reload.
+pub async fn post_reload(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let path = state.config_path.clone();
+
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        reload_error(
+            StatusCode::BAD_REQUEST,
+            format!("failed to read {}: {e} — config unchanged", path.display()),
+        )
+    })?;
+
+    let candidate: rookery_core::config::Config = toml::from_str(&text).map_err(|e| {
+        reload_error(
+            StatusCode::BAD_REQUEST,
+            format!("{}: parse error: {e} — config unchanged", path.display()),
+        )
+    })?;
+
+    // The same gate main.rs applies at boot, minus the exit(1).
+    candidate.validate().map_err(|e| {
+        reload_error(
+            StatusCode::BAD_REQUEST,
+            format!("{}: {e} — config unchanged", path.display()),
+        )
+    })?;
+
+    let _op_guard = tokio::time::timeout(RELOAD_OP_LOCK_WAIT, state.op_lock.lock())
+        .await
+        .map_err(|_| {
+            reload_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "a start/stop/swap is in flight (waited {}s) — config unchanged, retry when it finishes",
+                    RELOAD_OP_LOCK_WAIT.as_secs()
+                ),
+            )
+        })?;
+
+    let live = state.current_state().await;
+    let live_port = match &live {
+        rookery_core::state::ServerState::Running { port, .. } => Some(*port),
+        _ => None,
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    {
+        let old = state.config.read().await;
+        if old.listen != candidate.listen {
+            warnings.push(format!(
+                "listen changed {} → {} — the socket is already bound, this one needs a daemon restart",
+                old.listen, candidate.listen
+            ));
+        }
+        // Compare through serde rather than PartialEq: AgentConfig doesn't
+        // derive it, and Serialize is already there.
+        if serde_json::to_value(&old.agents).ok() != serde_json::to_value(&candidate.agents).ok() {
+            warnings.push(
+                "[agents] changed — running agents are deliberately left alone and the watchdog \
+                 holds the definitions it booted with, so this one needs a daemon restart"
+                    .into(),
+            );
+        }
+        if old.release_check_interval != candidate.release_check_interval {
+            warnings.push(
+                "release_check_interval changed — the release monitor captured its interval at \
+                 boot, so this one needs a daemon restart"
+                    .into(),
+            );
+        }
+    }
+
+    if let Some(profile) = live.profile_name() {
+        match candidate.profiles.get(profile) {
+            // Removing the running profile is legal and does not stop anything.
+            // The backend is owned by AppState, not by the config entry.
+            None => warnings.push(format!(
+                "profile '{profile}' is live but is no longer in the config — the backend keeps \
+                 running untouched and stop/sleep still work, but start/swap back to it will fail"
+            )),
+            Some(p) => {
+                if let Some(port) = live_port
+                    && p.port != port
+                {
+                    warnings.push(format!(
+                        "profile '{profile}' port changed {port} → {} — the live backend stays on \
+                         {port}; the new port applies on the next start/swap",
+                        p.port
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut profiles: Vec<String> = candidate.profiles.keys().cloned().collect();
+    profiles.sort();
+
+    *state.config.write().await = candidate;
+
+    tracing::info!(
+        path = %path.display(),
+        profiles = profiles.len(),
+        warnings = warnings.len(),
+        "config reloaded (backend and agents untouched)"
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("config reloaded from {}", path.display()),
+        "path": path.display().to_string(),
+        "profiles": profiles,
+        "applied_now": [
+            "api_key (checked on every request)",
+            "idle_timeout (re-read each 30s poll)",
+            "default_profile",
+            "profiles / models — for the next start or swap",
+            "llama_server binary path — for the next start or swap",
+        ],
+        "unchanged": [
+            "the running backend: profile, port, PID and binary stay exactly as they are",
+            "agent processes: none are started, stopped or bounced",
+        ],
+        "needs_daemon_restart": ["listen", "agents", "auto_start", "release_check_interval"],
+        "warnings": warnings,
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct ProfileUpdate {
     #[serde(default)]
@@ -674,7 +832,7 @@ pub async fn put_profile(
     let profile = config.profiles.get_mut(&name).ok_or((
         StatusCode::NOT_FOUND,
         format!(
-            "no such profile: {name} (config is read at daemon start — restart rookeryd if you just added it)"
+            "no such profile: {name} (config is read at daemon start — POST /api/reload if you just added it)"
         ),
     ))?;
 
@@ -861,10 +1019,16 @@ pub async fn post_chat(
                         }
                     }
                 }
-                _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+                _ => {
+                    state.metrics.inc_chat_error();
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
             }
         }
-        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+        _ => {
+            state.metrics.inc_chat_error();
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
     };
 
     let client = reqwest::Client::builder()
@@ -3527,6 +3691,7 @@ mod tests {
                     "/api/config/profile/{name}",
                     axum::routing::put(super::put_profile),
                 )
+                .route("/api/reload", post(super::post_reload))
                 .route("/api/logs", get(super::get_logs))
                 .route("/metrics", get(super::get_metrics))
                 .route("/api/start", post(super::post_start))
@@ -4657,6 +4822,217 @@ mod tests {
                 resp.status(),
                 StatusCode::NOT_FOUND,
                 "updating nonexistent profile should return 404"
+            );
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // LAN-1090 — POST /api/reload
+        // ═══════════════════════════════════════════════════════════════
+
+        /// Write a config file at `state.config_path` that the daemon would
+        /// accept at boot. `llama_server` has to point at a file that really
+        /// exists because `Config::validate()` stats it, so it is created in
+        /// the state's own tempdir.
+        fn seed_config_file(
+            dir: &tempfile::TempDir,
+            state: &std::sync::Arc<crate::app_state::AppState>,
+            profiles: &[(&str, u16)],
+            default_profile: &str,
+        ) {
+            let bin = dir.path().join("llama-server");
+            std::fs::write(&bin, b"#!/bin/sh\n").expect("write fake llama-server");
+            let mut text = format!(
+                "llama_server = {:?}\ndefault_profile = \"{default_profile}\"\n\
+                 listen = \"127.0.0.1:19876\"\n\n\
+                 [models.test_model]\nsource = \"local\"\npath = \"/tmp/fake.gguf\"\n",
+                bin.display().to_string()
+            );
+            for (name, port) in profiles {
+                text.push_str(&format!(
+                    "\n[profiles.{name}]\nmodel = \"test_model\"\nport = {port}\n"
+                ));
+            }
+            std::fs::write(&state.config_path, text).expect("write config file");
+        }
+
+        async fn post_reload(app: Router) -> (StatusCode, serde_json::Value) {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/reload")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice(&body).unwrap_or_default())
+        }
+
+        // A profile added to the file after boot is picked up without a restart.
+        // This is the whole point of the ticket; without the route it is a 404.
+        #[tokio::test]
+        async fn test_route_reload_picks_up_a_profile_added_after_boot() {
+            let (dir, state) = build_test_app_state(None);
+            seed_config_file(&dir, &state, &[("test", 19876), ("qwen39", 19877)], "test");
+
+            let (status, json) = post_reload(test_router_full(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "reload should apply, got: {json}");
+            assert_eq!(json["profiles"], serde_json::json!(["qwen39", "test"]));
+
+            let config = state.config.read().await;
+            assert!(
+                config.profiles.contains_key("qwen39"),
+                "the new profile must be live in the daemon, not just on disk"
+            );
+        }
+
+        // THE property: a typo in the config file must never take down a
+        // running daemon. main.rs exit(1)s on this at boot (LAN-1076); reload
+        // must reject it and keep serving the config it already had.
+        #[tokio::test]
+        async fn test_route_reload_rejects_unparseable_config_and_keeps_the_old_one() {
+            let (_dir, state) = build_test_app_state(None);
+            // Marker that only exists in the live config, never on disk — so a
+            // surviving value proves the in-memory Config was not replaced,
+            // rather than proving the file happened to round-trip.
+            state.config.write().await.api_key = Some("live-key".into());
+            std::fs::write(&state.config_path, "profiles = [[[ not toml").unwrap();
+
+            let (status, json) = post_reload(test_router_full(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "got: {json}");
+            assert!(
+                json["error"].as_str().unwrap_or("").contains("parse error"),
+                "error should name the parse failure, got: {json}"
+            );
+
+            let config = state.config.read().await;
+            assert_eq!(config.api_key.as_deref(), Some("live-key"));
+            assert!(config.profiles.contains_key("test"));
+        }
+
+        // Parses fine, fails the same validation the daemon applies at boot.
+        // Also must not replace the live config.
+        #[tokio::test]
+        async fn test_route_reload_rejects_invalid_config_and_keeps_the_old_one() {
+            let (dir, state) = build_test_app_state(None);
+            state.config.write().await.api_key = Some("live-key".into());
+            // default_profile names a profile that does not exist.
+            seed_config_file(&dir, &state, &[("test", 19876)], "ghost");
+
+            let (status, json) = post_reload(test_router_full(state.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "got: {json}");
+            assert!(
+                json["error"].as_str().unwrap_or("").contains("ghost"),
+                "error should name the offending profile, got: {json}"
+            );
+
+            assert_eq!(
+                state.config.read().await.api_key.as_deref(),
+                Some("live-key"),
+                "a rejected reload must leave the live config untouched"
+            );
+        }
+
+        // Deleting the running profile from the config is legal and stops
+        // nothing — the backend is owned by AppState, not by the config entry.
+        #[tokio::test]
+        async fn test_route_reload_leaves_the_running_backend_alone() {
+            let (dir, state) = build_test_app_state(Some(Box::new(mock_backend_on_port(19876))));
+            sync_state_from_backend(&state).await;
+            // "test" is live; the new file only knows about "other".
+            seed_config_file(&dir, &state, &[("other", 19999)], "other");
+
+            let (status, json) = post_reload(test_router_full(state.clone())).await;
+            assert_eq!(status, StatusCode::OK, "got: {json}");
+
+            let warnings = json["warnings"].as_array().expect("warnings array");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.as_str().unwrap_or("").contains("no longer in the config")),
+                "removing the live profile must be reported, got: {json}"
+            );
+
+            let live = state.current_state().await;
+            assert_eq!(live.profile_name(), Some("test"), "profile must not change");
+            assert!(live.is_running(), "reload must not stop the backend");
+            assert!(state.backend.lock().await.is_running().await);
+        }
+
+        // Reload serialises against start/stop/swap, but the wait is bounded so
+        // it can never pin a request handler behind a ~135s swap.
+        #[tokio::test(start_paused = true)]
+        async fn test_route_reload_returns_409_while_an_operation_holds_op_lock() {
+            let (dir, state) = build_test_app_state(None);
+            seed_config_file(&dir, &state, &[("test", 19876)], "test");
+
+            let _op_guard = state.op_lock.lock().await;
+            let (status, json) = post_reload(test_router_full(state.clone())).await;
+
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "a reload contending with an in-flight op must 409, not hang, got: {json}"
+            );
+            assert!(json["error"].as_str().unwrap_or("").contains("in flight"));
+        }
+
+        // LAN-1090 cheap interim: "profile not found" alone is indistinguishable
+        // from a typo when the real cause is a profile the daemon never loaded.
+        #[test]
+        fn test_profile_not_found_error_points_at_reload() {
+            let msg = rookery_core::error::Error::ProfileNotFound("qwen39".into()).to_string();
+            assert!(msg.contains("qwen39"), "got: {msg}");
+            assert!(
+                msg.contains("POST /api/reload"),
+                "the error must say how to load a just-added profile, got: {msg}"
+            );
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // LAN-1101 — chat request/error counters must agree
+        // ═══════════════════════════════════════════════════════════════
+
+        // The port-resolution match increments chat_requests, then bailed out on
+        // a stopped server without ever incrementing chat_errors — so
+        // rookery_chat_requests_total and rookery_chat_errors_total disagreed on
+        // the most common failure there is.
+        #[tokio::test]
+        async fn test_route_chat_on_stopped_server_increments_the_error_counter() {
+            let (_dir, state) = build_test_app_state(None);
+            assert!(!state.current_state().await.is_running());
+            let app = test_router_full(state);
+
+            let chat_req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(chat_req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            let metrics_resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/metrics")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = metrics_resp.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+
+            assert!(
+                text.contains("rookery_chat_requests_total 1"),
+                "got:\n{text}"
+            );
+            assert!(
+                text.contains("rookery_chat_errors_total 1"),
+                "a counted request that fails must also be counted as an error, got:\n{text}"
             );
         }
 
