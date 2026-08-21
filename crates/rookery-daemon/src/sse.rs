@@ -36,14 +36,24 @@ pub async fn get_events(
     let gpu_stream =
         tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(2)))
             .map(move |_| {
-                let stats = gpu_state
-                    .gpu_monitor
-                    .as_ref()
-                    .and_then(|m| m.stats().ok())
-                    .unwrap_or_default();
+                // A failed NVML query is not the same as a machine with no
+                // GPU, but `.ok().unwrap_or_default()` collapsed both into
+                // `gpus: []` — which arrives perfectly on schedule and so is
+                // invisible to a staleness watchdog by construction. Mark the
+                // failure on the payload instead.
+                //
+                // The monitor being `None` *is* the GPU-less case: NVML never
+                // initialised at startup, so there is nothing to fail. That
+                // stays quiet and unmarked, as does a successful query that
+                // simply finds no devices.
+                let payload = match gpu_state.gpu_monitor.as_ref().map(|m| m.stats()) {
+                    Some(Err(e)) => serde_json::json!({ "gpus": [], "error": e.to_string() }),
+                    Some(Ok(stats)) => serde_json::json!({ "gpus": stats }),
+                    None => serde_json::json!({ "gpus": [] }),
+                };
                 Ok(Event::default()
                     .event("gpu")
-                    .json_data(serde_json::json!({ "gpus": stats }))
+                    .json_data(payload)
                     .unwrap_or_else(|_| Event::default().event("gpu").data("{}")))
             });
 
@@ -324,6 +334,41 @@ mod tests {
                 "unnamed event would surface via onmessage as data: {block:?}"
             );
         }
+    }
+
+    // --- 3c. A machine with no NVML at all is NOT reported as degraded ---
+    //
+    // `gpu_monitor: None` is what a legitimately GPU-less box looks like:
+    // NVML never initialised, so no query ever fails. The `error` marker must
+    // be absent there, or every such dashboard would cry wolf forever. It is
+    // set only when NVML is present and the query itself fails.
+    #[tokio::test]
+    async fn test_sse_gpu_event_is_quiet_without_nvml() {
+        let (_dir, state) = build_test_app_state(None);
+        assert!(state.gpu_monitor.is_none(), "test state has no NVML");
+        let app = sse_router(state);
+
+        let req = Request::builder()
+            .uri("/api/events")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_text = read_sse_body(resp.into_body(), 400).await;
+        let events = parse_sse_events(&body_text);
+
+        let (_, data) = events
+            .iter()
+            .find(|(kind, _)| kind == "gpu")
+            .unwrap_or_else(|| panic!("expected a 'gpu' event, got: {body_text}"));
+        let json: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(json["gpus"], serde_json::json!([]));
+        assert!(
+            json.get("error").is_none(),
+            "a GPU-less machine must not be marked degraded, got: {json}"
+        );
     }
 
     // --- 4. SSE connection limit: connection beyond MAX gets 429 ---

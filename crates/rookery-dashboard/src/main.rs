@@ -24,6 +24,10 @@ pub struct ServerStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GpuData {
     pub gpus: Vec<GpuStats>,
+    /// Set only when NVML was available and the query failed. Absent on a
+    /// machine with no GPU, where `gpus: []` is the correct answer.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
