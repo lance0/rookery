@@ -66,6 +66,8 @@ This separation means:
 - VRAM estimates live on the model, not duplicated per profile
 - Swapping between profiles that share a model is faster (no re-download)
 
+The daemon reads config at boot and holds it in an `RwLock`, which used to mean any config edit cost a `systemctl restart`. `POST /api/reload` re-reads the file and swaps it in under `op_lock`. It validates the new config *before* writing `state.config`, so a rejected reload leaves the daemon on the old one — a daemon that half-applies a bad edit is worse than one that refuses it. The running backend and the running agents are deliberately left alone: reload is for picking up a new profile or a repointed model, not for restarting anything. Whatever the reload cannot honour without a restart comes back in `warnings`, because a reload that silently does not apply is worse than no reload at all.
+
 ## Process Management
 
 ProcessManager spawns llama-server as a child process with stdout/stderr captured. On stop:
@@ -146,20 +148,20 @@ This ensures no orphan processes are left behind on daemon stop.
 
 ## Security
 
-- Daemon binds to `127.0.0.1` only — not exposed to network
+- Daemon binds to `127.0.0.1` by default — not exposed to the network
 - llama-server binds to `0.0.0.0` for LAN access (configurable per profile)
-- No authentication on daemon API (localhost only)
+- Optional bearer token: setting `api_key` in the config gates every `/api/*` data route and the SSE stream. `GET /api/health`, `/metrics`, and the dashboard HTML shell stay open — the shell has to load in order to prompt for the key. Auth is opt-in because the default bind is loopback, where a token buys nothing; a non-loopback `listen` without one is the case worth warning about, and that warning is not yet implemented (see ROADMAP.md)
 - `GET /api/config` redacts agent env vars (replaces with count) to prevent credential leakage
-- Future: optional bearer token for remote access
 
 ## Dashboard
 
 The dashboard is a Leptos WASM app built with `trunk` and embedded into the daemon binary via `include_dir!`. It connects to `/api/events` (SSE) for real-time updates and uses REST API calls for actions.
 
 Key design decisions:
-- **Single polling loop** — server stats polling runs at the `App` level, passed as a signal prop to `ServerStats`. This prevents accumulation of polling loops when tabs are switched (Leptos recreates components on tab change).
-- **SSE reconnection** — `EventSource` auto-reconnects natively; `onopen` handler resets the connected state after reconnection.
-- **Chat streaming** — SSE proxy through the daemon (`POST /api/chat`) to llama-server's `/v1/chat/completions`. Partial failures mark the message as `[incomplete]`.
+- **Tab panels stay mounted** — every panel is rendered once and shown or hidden with `style:display`, rather than being created and destroyed on tab change. Unmounting was wiping panel state (a half-typed chat message, a search result set) every time the user looked at something else. The cost is that all seven panels exist at all times, which is why the polling below is centralized rather than per-panel.
+- **Single polling loop** — server stats polling runs at the `App` level and is passed down as a signal prop. One loop regardless of which tab is visible, and no way for a panel to accumulate its own. Health polling is additionally gated on document visibility, so a backgrounded tab stops asking.
+- **SSE reconnection** — `EventSource` auto-reconnects natively, but a natively-open stream is not the same as a live one: a connection can stay open and silently deliver nothing. So the client also runs a staleness watchdog against a server-side ping heartbeat, and reconnects with jittered backoff when the stream goes quiet, rather than trusting `readyState`. Closures are dropped on reconnect instead of leaking one set per attempt.
+- **Chat streaming** — SSE proxy through the daemon (`POST /api/chat`) to the backend's `/v1/chat/completions`. One reused `TextDecoder` (via `web-sys`) decodes the stream, so a multi-byte character split across two chunks survives. Partial failures mark the message as `[incomplete]`. Upstream errors surface as 502 rather than a 200 with an empty body.
 
 ## Future
 
