@@ -743,7 +743,7 @@ fn App() -> impl IntoView {
                 }.into_any()
             }}
 
-            <ToastContainer toasts=toasts />
+            <ToastContainer toasts=toasts set_toasts=set_toasts />
         </div>
     }
 }

@@ -4,8 +4,19 @@ use leptos::prelude::*;
 #[component]
 pub fn AgentSummary(agents: ReadSignal<AgentsData>, set_tab: WriteSignal<Tab>) -> impl IntoView {
     view! {
+        // The card stays click-to-open for the mouse; the button is the keyboard and
+        // screen-reader path (a bare on:click div is reachable by neither).
         <div class="card agent-summary" on:click=move |_| set_tab.set(Tab::Agents) style="cursor:pointer">
-            <h2>"Agents" <span class="agent-summary-link">"details \u{2192}"</span></h2>
+            <h2>
+                "Agents"
+                <button
+                    class="agent-summary-link"
+                    aria-label="Agent details"
+                    on:click=move |_| set_tab.set(Tab::Agents)
+                >
+                    "details \u{2192}"
+                </button>
+            </h2>
             {move || {
                 let data = agents.get();
                 if data.configured.is_empty() {
