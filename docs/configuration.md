@@ -2,6 +2,57 @@
 
 Config file: `~/.config/rookery/config.toml`
 
+## Validation is a boot gate
+
+**An invalid config no longer boots degraded — the daemon refuses to start.**
+`rookeryd` calls `Config::validate()` immediately after loading the file and, on
+any error, prints `invalid config: <reason>` plus the config path to stderr and
+exits with status 1.
+
+This is a behaviour change. A config with, say, a typo'd `source` or a
+`default_profile` naming a profile that does not exist previously started and
+then misbehaved silently — a bogus `default_profile` started whichever profile
+`HashMap` iteration happened to yield first, and an unrecognised `source` emitted
+no model argument at all and failed later inside llama.cpp with an opaque error.
+Now it stops at boot with the reason.
+
+The rules enforced:
+
+| Rule | Error when violated |
+|---|---|
+| Model `source` must be exactly `"hf"` or `"local"` | `unknown source '<x>' — must be "hf" or "local"` |
+| `source = "local"` requires `path` | `source = "local" requires \`path\`` |
+| `source = "hf"` requires `repo` | `source = "hf" requires \`repo\`` |
+| An `hf` model used by a **llama-server** profile also requires `file` | `has source = "hf" but no \`file\` — llama-server needs \`-hf <repo>:<file>\`` |
+| Every profile's `model` must name a defined `[models.*]` entry | invalid model reference |
+| A profile may not have both `llama_server` and `vllm` sub-tables | `exactly one backend must be specified` |
+| vLLM `gpu_memory_utilization` must be in `(0.0, 1.0]` | reports the offending value |
+| `default_profile` must name a defined profile | profile not found |
+| `llama_server` binary path must be set and exist — **only if** at least one llama-server profile is defined | path required / binary not found |
+
+The `file` requirement is llama-server-only on purpose: vLLM takes the bare repo
+and has no GGUF file to name.
+
+Note what is *not* checked: nothing calls `path.exists()` on a model. These are
+field-presence checks only, because an HF cache populates on first start and
+model directories can be lazily mounted.
+
+Under systemd this failure is bounded rather than a restart loop —
+`rookery.service` sets `StartLimitIntervalSec=300` / `StartLimitBurst=5`, so five
+failed starts in five minutes puts the unit in `failed` instead of thrashing.
+Check `journalctl -u rookery -n 20` for the `invalid config:` line.
+
+Check a config before restarting anything:
+
+```bash
+rookery config-validate          # "config OK: <path>", or the error on stderr + exit 1
+rookery config-validate --json   # {"valid": true, "path": ...} / {"valid": false, "error": ...}
+```
+
+`POST /api/reload` validates the candidate config the same way and rejects it
+without swapping, so a bad edit cannot take down a running daemon — the error
+comes back on the response and the running server and agents are left untouched.
+
 ## Top-Level
 
 ```toml
@@ -184,6 +235,8 @@ See [Agent Management](agents.md) for full documentation.
 [agents.my_agent]
 command = "/path/to/agent"
 args = ["run"]
+workdir = "/path/to/agent"      # cwd for the agent process (optional)
+env = { LOG_LEVEL = "info" }    # extra environment variables (optional)
 auto_start = true
 restart_on_swap = true
 restart_on_crash = true
@@ -196,11 +249,26 @@ stop_timeout_secs = 30
 data_dir = "/path/to/agent/data"
 ```
 
-`data_dir` points at the agent's SQLite databases. It is scanned one level deep
-for `*.db` and checked nightly with a read-only `PRAGMA quick_check`; findings
-are logged and exported as `rookery_agent_db_corrupt`, and never restart the
-agent. It is separate from `workdir` because `workdir` also sets the agent
-process's cwd. Falls back to `workdir`; omit both to disable the check.
+`data_dir` points at the agent's SQLite databases, and it is what enables **both**
+database-safety features. Without it (and without a `workdir` to fall back to)
+the nightly integrity sweep and the pre-change backups do nothing at all — they
+have no root to resolve and are silently skipped. If you take one thing from this
+page for an agent with a database, it is: set `data_dir`.
+
+- The directory and its immediate subdirectories are scanned for `*.db` and
+  checked once a day with a read-only `PRAGMA quick_check`. Findings are logged
+  and exported as `rookery_agent_db_corrupt`; they never restart the agent.
+- The same root is where a `VACUUM INTO` copy is written before an update, a swap
+  bounce, or a manual `rookery agent stop`.
+
+It is deliberately **not** overloaded onto `workdir`, because `workdir` also sets
+the agent process's cwd — coupling "enable integrity checks and backups" to
+"relocate the agent" is a footgun. An agent that runs from anywhere and writes to
+`~/.hermes` should not have to be moved to get checked. `data_dir` falls back to
+`workdir` when unset; omit both and the agent is simply not covered.
+
+See [Agent Management](agents.md#database-integrity-data_dir) for the full
+behaviour, including backup retention and disk cost.
 
 `stop_timeout_secs` is how long the daemon waits after `SIGTERM` before escalating
 to `SIGKILL`. Default is 30 seconds. Raise it for an agent with heavy shutdown
@@ -208,8 +276,18 @@ work — an agent checkpointing a large SQLite WAL that gets hard-killed mid-wri
 is how torn pages happen. Taking the SIGKILL path is logged at `error` level and
 should be treated as an incident.
 
-`restart_on_error_patterns` matches stderr lines and restarts immediately on a
-hit. Be conservative here: a transient network condition like a bare `ReadTimeout`
-is not a fatal state, and restarting a whole agent process over one multiplies the
-risk of interrupting a write. Restarts through this path use the same exponential
-backoff as crash restarts.
+`restart_on_error_patterns` matches stderr lines (case-insensitive substring).
+**A single match is not enough: three matches inside a ten-minute sliding window
+are required before the agent is bounced.** One `ReadTimeout` is a transient
+network condition, not a fatal state, and restarting a whole agent process over
+one multiplies the risk of interrupting a write.
+
+The consequence worth knowing: **a pattern that a wedged agent prints exactly
+once will no longer restart it.** A genuinely wedged gateway re-emits its error
+every poll cycle and trips the threshold in seconds, and failures arriving as
+slowly as one every ~5 minutes still reach it — but a single fatal line does not.
+`restart_on_crash` still covers an agent that actually exits. The match counter
+lives with the process, so a successful restart starts it at zero, and it is
+cleared when it fires.
+
+Restarts through this path use the same exponential backoff as crash restarts.
