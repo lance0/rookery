@@ -52,6 +52,8 @@ Rookery scans multiple locations to find downloaded models:
 model_dirs = ["/mnt/models", "/home/user/gguf-collection"]
 ```
 
+For the HuggingFace hub cache specifically: a repo can have more than one snapshot on disk (a rollback, a `revision=`-pinned download, or a restored backup all leave old ones behind). Rookery picks the snapshot HF's own `refs/main` file names as current, not whichever snapshot directory happens to be listed first — falling back to the newest by modification time if `refs/main` is missing (a revision-pinned download never writes it). Quants split across multiple shard files report the combined size of all shards, and quant files nested one level into a subdirectory of the snapshot (for example an MTP head shipped alongside the main GGUF) are found too, not just files at the snapshot's top level.
+
 The Models tab in the dashboard and `rookery models list` show all discovered models across all sources.
 
 ## CLI
@@ -74,6 +76,8 @@ Most commands support `--json` for scripting.
 - **VRAM-aware recommendations**: considers free VRAM, model size with 15% overhead, and RAM for partial offload
 - **Quant preference**: UD variants first (UD-Q4_K_XL > UD-Q4_K_L), then standard (Q8_0 > Q6_K > Q4_K_M)
 - **Multi-cache scanner**: finds models in HF hub cache, llama.cpp cache, and custom directories
+- **Per-repo download detection**: a cached quant only marks that quant "downloaded" for the repo it was pulled from — the same quant label cached for a different repo (e.g. two Unsloth repos both shipping a `UD-Q6_K_XL`) no longer produces a false positive
+- **Resilient downloads**: model pulls use a stall timeout (no bytes for 30s aborts) rather than a fixed total deadline, so a large multi-GB GGUF isn't cut off partway through
 - **Dashboard**: Models tab has search, quant browser, and one-click download
 
 ## API

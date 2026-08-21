@@ -3,10 +3,44 @@
 ## Unit Tests
 
 ```bash
-cargo test --workspace    # 337+ tests, no GPU required
+cargo test --workspace    # 457 tests, no GPU required
 ```
 
 All tests use mock backends and temp directories — they never touch your real config or running daemon.
+
+Breakdown: 232 engine, 116 daemon, 59 CLI, 50 core. The CLI figure includes 28
+integration tests in `crates/rookery-cli/tests/exit_codes.rs`, which spawn the
+built binary and assert its exit codes; the rest are in-module unit tests.
+
+A handful of tests are gated behind `ROOKERY_INTEGRATION=1` and are skipped by
+default — the vLLM lifecycle tests in `crates/rookery-engine/src/backend.rs`
+need a working Docker daemon.
+
+## Dashboard Gates
+
+**`crates/rookery-dashboard` is excluded from the cargo workspace** (`exclude`
+in the root `Cargo.toml`). Root-level `cargo test --workspace`, `cargo fmt
+--all`, and `cargo clippy --workspace` all skip it silently — and so does the
+`.githooks/pre-commit` hook, which runs exactly those. The crate went four
+months unformatted because of this.
+
+Run its gates explicitly, from the repo root:
+
+```bash
+cargo fmt --manifest-path crates/rookery-dashboard/Cargo.toml --check
+cargo clippy --manifest-path crates/rookery-dashboard/Cargo.toml \
+  --target wasm32-unknown-unknown --all-targets -- -D warnings
+trunk build --release
+```
+
+The `wasm32-unknown-unknown` target is required — clippy against the host
+target will not reflect what actually ships. CI runs these in a separate
+`Dashboard (WASM)` job for the same reason.
+
+`trunk build --release` is a compile check, not a reproducibility check. CI
+deliberately does not diff the result against the committed `dist/`: wasm output
+is not byte-reproducible across toolchain versions. Freshness of the shipped
+artifact is enforced in the release workflow, which rebuilds `dist/` first.
 
 ## Chaos Tests
 

@@ -1,25 +1,36 @@
 # Rookery Test Gap Analysis
 
-**Date:** 2026-03-28
-**Current test count:** 171 (14 CLI + 30 core + 23 daemon + 104 engine)
-**Target:** 50–100 additional tests
+**Date:** 2026-08-21
+**Current test count:** 457 (59 CLI + 50 core + 116 daemon + 232 engine)
+**At the 0.1.8 tag (`f9ee1e7`):** 358
+
+This document was first written on 2026-03-28 against a 171-test suite. Most of
+the gaps it catalogued have since been filled. Where a section below cites a
+prior count, it is the **0.1.8** figure, not the original 2026-03-28 one — the
+suite had already grown substantially between those two points.
+
+> The dashboard crate is **excluded from the cargo workspace**, so its own tests are
+> not part of the 457 and do not run under `cargo test --workspace`. See
+> [testing.md](testing.md) for how to run them.
 
 ---
 
 ## 1. Roadmap Test Plan (from ROADMAP.md § Code Quality & Testing)
 
-The roadmap explicitly calls out these test gaps:
-
 | Status | Item |
 |--------|------|
-| ✅ Done | `rookery-core`: config parsing, state serialization, reconciliation (now 30 tests) |
-| ✅ Done | `rookery-engine`: log buffer, model utils, is_pid_alive, version parsing, AgentManager (now 104 tests) |
-| ❌ TODO | `rookery-engine`: **ProcessManager start/stop/swap** (needs mock llama-server) |
-| ❌ TODO | `rookery-engine`: **watchdog behavior** (crash restart, backoff, port recovery bounce) |
-| ❌ TODO | `rookery-daemon`: **route handler integration tests** (axum test client) |
-| ❌ TODO | `rookery-daemon`: **SSE event stream tests** |
-| ❌ TODO | `rookery-cli`: **CLI argument parsing, output formatting** |
-| ❌ TODO | **End-to-end**: daemon startup → start → swap → agent lifecycle |
+| ✅ Done | `rookery-core`: config parsing, state serialization, reconciliation (now 50 tests) |
+| ✅ Done | `rookery-engine`: log buffer, model utils, is_pid_alive, version parsing, AgentManager (now 232 tests) |
+| ✅ Done | `rookery-engine`: **ProcessManager start/stop** — mock llama-server landed as `test_utils.rs` |
+| ✅ Done | `rookery-daemon`: **route handler integration tests** — `routes::tests::route_integration`, 59 tests via axum `oneshot` |
+| ✅ Done | `rookery-daemon`: **SSE event stream tests** (`sse.rs`, 9 tests) |
+| ✅ Done | `rookery-cli`: **CLI argument parsing, output formatting** (31 unit) + **exit codes** (`tests/exit_codes.rs`, 28 integration) |
+| ⚠️ Partial | `rookery-engine`: **watchdog behavior** — crash detection and error-pattern restart are covered; backoff timing and `depends_on_port` bounce are not |
+| ❌ TODO | **End-to-end**: daemon startup → start → swap → agent lifecycle as one flow |
+
+`ProcessManager::swap` and `start_and_wait` no longer appear here because the
+functions were deleted (LAN-1087); swap is orchestrated by the daemon route
+against the `InferenceBackend` trait.
 
 ---
 
@@ -27,267 +38,264 @@ The roadmap explicitly calls out these test gaps:
 
 ### 2.1 `rookery-engine::process` (process.rs)
 
-**Current tests: 4**
-- `test_is_pid_alive_current_process` — verifies current PID is alive
-- `test_is_pid_alive_nonexistent` — dead PID returns false
-- `test_is_pid_alive_pid_1` — init process is alive
-- `test_is_pid_alive_parses_stat` — parses /proc/self/stat correctly
+**Current tests: 20** (0.1.8: 22 — the drop is deleted code, not lost coverage:
+`ProcessManager::swap` and `start_and_wait` went away with LAN-1087 and took
+their tests with them.)
 
-**Untested behaviors:**
-1. `ProcessManager::start()` — spawns child, sets OOM adj, captures stdout/stderr, returns ProcessInfo
-2. `ProcessManager::stop()` — SIGTERM → 10s wait → SIGKILL for owned child
-3. `ProcessManager::stop()` orphan path — kill-by-PID when no child handle (SIGTERM → poll → SIGKILL)
-4. `ProcessManager::adopt()` — stores info, no child handle
-5. `ProcessManager::is_running()` — try_wait on child, or is_pid_alive for adopted
-6. `ProcessManager::to_server_state()` — maps process state to ServerState
-7. CUDA error detection in stderr → notifies the daemon error channel
-8. OOM score adj write failure (non-root)
-9. `start()` when already running returns error
-10. Empty command line returns error
+Now covered: `start()` return value and stdout capture, owned-child stop,
+adopted kill-by-PID, `adopt()`, `is_running()` for both paths,
+`to_server_state()` both directions, draining flag, CUDA and GGML CUDA error
+detection in stderr with no-false-positive controls, and double-start rejection.
 
-**Test types needed:** Mock-based unit tests using a **mock llama-server** (see §4).
+**Still untested:**
+1. OOM score adj write failure (non-root) — the failure path only logs a warning
+2. Empty command line returns an error before spawn
 
-**Estimated new tests: 12–15**
+**Estimated new tests: 2**
 
 ### 2.2 `rookery-engine::backend` (backend.rs)
 
-**Current tests: 60** (largest test module)
+**Current tests: 71** (0.1.8: 73) — still the largest test module. The two lost
+tests covered `subscribe_errors()`, which was removed from the trait.
 
-Comprehensive coverage of:
-- `InferenceBackend` trait object safety, Send+Sync
-- `BackendInfo` serde roundtrips (llama-server + vllm)
-- `LlamaServerBackend`: idle state, stop no-op, adopt, is_running, draining, start with real process, stop after adopt
-- `VllmBackend`: idle state, container checks, compose file writing, docker compose commands, log capture, CUDA error detection
-- `create_backend()` factory function
-- Conversion helpers: `process_info_to_backend_info`, `backend_info_to_process_info`
+Every gap previously listed here is closed:
+- `LlamaServerBackend::start()` against a real health endpoint, success and
+  failure, including process cleanup when health never comes up
+  (`test_llama_backend_start_then_health_succeeds_with_mock`,
+  `test_llama_backend_start_failing_health_cleans_up_process`)
+- `VllmBackend` full lifecycle, gated behind `ROOKERY_INTEGRATION=1`
+  (`test_integration_vllm_start_and_health`, `_stop_removes_container`,
+  `_is_running_lifecycle`, `_orphan_adoption`)
+- `VllmBackend::adopt()` container-id requirement and orphan adoption
+- `VllmBackend::stop()` error propagation on `docker compose down` failure
+- `is_cuda_error()` — 8 tests including five distinct false-positive controls
+- Swap drain lifecycle for both backends, plus backend replacement during swap
 
-**Untested behaviors:**
-1. `LlamaServerBackend::start()` with health check success/failure (current test uses `/bin/sleep` which doesn't have health endpoint)
-2. `VllmBackend::start()` full lifecycle (gated behind `ROOKERY_INTEGRATION=1`)
-3. `VllmBackend::adopt()` with running container
-4. `VllmBackend::stop()` error propagation on docker compose down failure (partially tested)
-5. `is_cuda_error()` edge cases (partially covered — 7 tests exist)
-6. Swap drain lifecycle across backend replacement
-
-**Estimated new tests: 5–8** (mostly mock-based start/health interaction)
+**Untested behaviors:** none material. This module is the coverage benchmark for
+the rest of the codebase.
 
 ### 2.3 `rookery-engine::health` (health.rs)
 
-**Current tests: 0**
+**Current tests: 17** (0.1.8: 15)
 
-Three public functions, all untested:
-1. `wait_for_health(port, timeout)` — exponential backoff polling until 200 or timeout
-2. `check_health(port, timeout)` — single-shot health check, returns bool
-3. `check_inference(port, timeout)` — sends minimal completion request, returns bool
+All six previously listed gaps are closed: `wait_for_health` success, timeout,
+exponential backoff, and recovery after initial failures; `check_health` on 200,
+500, connection refused, and timeout; `check_inference` on the same four; and
+`HealthError` display for both variants.
 
-**Untested behaviors:**
-1. `wait_for_health` succeeds when server responds 200
-2. `wait_for_health` times out and returns `HealthError::Timeout`
-3. `wait_for_health` exponential backoff timing (100ms → 200ms → ... → 5s cap)
-4. `check_health` returns true on 200, false on non-200, false on connection refused
-5. `check_inference` returns true on 200, false on non-200, false on timeout
-6. `HealthError` display messages
+Two tests cover behaviour that did not exist when this document was written:
+`test_check_inference_uses_served_model_name` and
+`test_check_inference_falls_back_when_models_endpoint_missing`. The canary now
+discovers the served model via `GET /v1/models` rather than sending a hardcoded
+`"test"`, which is what made every vLLM profile 404 and restart-loop.
 
-**Test types needed:** Mock HTTP server (use `axum` itself or `wiremock` or inline `hyper` server).
-
-**Estimated new tests: 8–10**
+**Untested behaviors:** none material.
 
 ### 2.4 `rookery-engine::agent` (agent.rs)
 
-**Current tests: 11**
-- `test_read_version_pyproject`, `_poetry`, `_cargo`, `_missing_file`, `_no_version_field` (5 version parsing tests)
-- `test_agent_manager_start_stop` — start + stop lifecycle
-- `test_agent_manager_already_running` — duplicate start error
-- `test_agent_manager_get_health` — health metrics
-- `test_agent_manager_remove_tracking` — untrack without signal
-- `test_agent_manager_record_restart` — restart counter tracking
-- `test_agent_fatal_error_pattern_detection` — stderr pattern triggers watch
-- `test_agent_no_false_fatal_trigger` — non-matching pattern doesn't trigger
+**Current tests: 37** (0.1.8: 29)
 
-**Untested behaviors:**
-1. `adopt()` — registers existing PID, no child handle
-2. `stop()` orphan path — kill-by-PID for adopted agents
-3. `stop_all()` — stops all agents
-4. `list()` — returns info with dead agent cleanup
-5. `persist_state()` — writes agents.json
-6. Crash count / exponential backoff in `spawn_watchdog()`
-7. Watchdog `depends_on_port` bounce logic (down→up transition)
-8. Watchdog healthy agent backoff reset after 5min
-9. `is_running()` for adopted (PID check) vs owned (try_wait)
-10. Agent env var passing
-11. Agent workdir setting
+Now covered: `adopt()` and its three refusal paths (dead PID, mismatched
+cmdline, missing config), adopted kill-by-PID, `stop_all()`, `list()` with dead
+agent cleanup, agent persistence roundtrip and reconcile, crash detection,
+error-count tracking and reset across restart, below-threshold non-restart,
+`is_running()` for adopted vs owned, env var passing, workdir setting,
+`get_health` reporting a dead agent as stopped, and pre-change database backups
+on the update and swap-bounce paths.
 
-**Estimated new tests: 8–12**
+**Still untested:**
+1. Watchdog `depends_on_port` bounce logic (down→up transition)
+2. Watchdog healthy-agent backoff reset after 5 min — the timing, specifically
+
+**Estimated new tests: 3–4** (both need a time-controlled runtime)
 
 ### 2.5 `rookery-engine::gpu` (gpu.rs)
 
-**Current tests: 0**
+**Current tests: 2** (0.1.8: 2)
 
-NVML-dependent, difficult to unit test without GPU:
-- `GpuMonitor::new()` — requires NVML
-- `GpuMonitor::stats()` — reads GPU stats
-- `GpuMonitor::find_orphan_llama_servers()` — finds untracked processes
-- `process_name()` — reads /proc/pid/comm
+`process_name()` is covered for both the live-process and nonexistent-PID cases.
 
-**Testable without NVML:**
-1. `process_name()` — can test with current process PID
-2. `find_orphan_llama_servers()` logic (would need to mock stats())
+**Still untested:**
+1. `find_orphan_llama_servers()` — needs a mockable `stats()`; NVML-dependent
+2. `GpuMonitor::new()` / `stats()` — require a real GPU
 
-**Estimated new tests: 1–2** (process_name, integration-gated GPU tests)
+Note that failed NVML queries are now distinguished from a machine with no GPU;
+that distinction is tested in `hardware.rs`
+(`test_try_live_vram_free_reports_unknown_not_zero`) and at the route layer
+(`test_route_hardware_vram_free_is_null_when_nvml_unavailable`), not here.
+
+**Estimated new tests: 1–2** (integration-gated)
 
 ### 2.6 `rookery-engine::logs` (logs.rs)
 
-**Current tests: 2**
-- `test_ring_buffer` — eviction at capacity
-- `test_last_n` — last N lines retrieval
+**Current tests: 5** (0.1.8: 5)
 
-**Untested behaviors:**
-1. `subscribe()` — returns broadcast receiver
-2. `len()` / `is_empty()` — size queries
-3. Concurrent push from multiple tasks
-4. Poison recovery (`unwrap_or_else(|e| e.into_inner())`)
-5. Broadcast receiver receives pushed messages
+`subscribe()`, `len()`/`is_empty()`, and concurrent push from multiple tasks are
+all covered. The mutex-poison recovery entry previously listed here no longer
+applies — the `unwrap_or_else(|e| e.into_inner())` pattern is gone from the
+codebase.
 
-**Estimated new tests: 3–4**
+**Untested behaviors:** none material.
 
 ### 2.7 `rookery-engine::compose` (compose.rs)
 
-**Current tests: ~17** (I count 17 compose::tests:: in the output)
-- Compose file path, YAML generation, GPU reservation, port mapping, model args, extra args, full config, error cases
+**Current tests: 20** (0.1.8: 18)
 
-**Good coverage. Untested:**
-1. Edge case: compose with `max_model_len` field
-2. Compose with all optional vLLM params set simultaneously
+Both previously listed edge cases are closed
+(`test_compose_with_max_model_len_field`,
+`test_compose_all_optional_vllm_params_set_simultaneously`).
 
-**Estimated new tests: 1–2**
+Two new tests cover the HuggingFace cache bind mount
+(`test_compose_mounts_hf_cache`, `test_hf_cache_volume_honours_hf_home`).
+Without that mount, `docker compose down` discarded the weights with the
+container's writable layer and every start re-downloaded the model.
+
+**Untested behaviors:** none material.
 
 ### 2.8 `rookery-engine::models` (models.rs)
 
-**Current tests: 4**
-- `test_cache_path`, `test_extract_quant_label`, `test_normalize_repo`, `test_extract_quants`
+**Current tests: 20** (0.1.8: 13)
 
-**Untested behaviors:**
-1. `HfClient::search()`, `list_files()`, `download_file()` — network-dependent
-2. `scan_cache()` — filesystem scan
-3. `recommend_quant()` — VRAM-aware selection logic
-4. `mark_downloaded()` — checks HF cache
-5. `attach_estimates()` — performance estimation
-6. Quant preference ordering (UD variants first)
+Now covered: `scan_cache()` on an empty directory, HF hub scanning
+(deterministic snapshot selection via `refs/main`, newest-mtime fallback,
+shard summing, subdirectory-packed quants), `recommend_quant()` across
+fits/partial-offload/nothing-fits, quant preference ordering, repo normalization
+edge cases, and `mark_downloaded` no longer leaking a cached quant across repos.
 
-**Estimated new tests: 5–8** (recommend_quant is pure logic, very testable)
+Network behaviour is covered at the boundary rather than end-to-end:
+`test_hf_client_bounds_connect_to_blackhole` pins the connect timeout, and
+`test_download_survives_body_longer_than_api_timeout` pins that downloads use a
+separate client with a read timeout and no total deadline.
+
+**Still untested:**
+1. `attach_estimates()` — performance estimation is pure logic and very testable
+
+**Estimated new tests: 2–3**
 
 ### 2.9 `rookery-daemon::routes` (routes.rs)
 
-**Current tests: 23**
-- Status response formatting (stopped/running/starting/stopping/failed) with backend field
-- Status JSON always has backend key
-- Profiles response includes backend field
-- Capacity gate skips vLLM
-- Swap drain flag cleanup on failure/success
-- Compose generation failure returns error
-- Model info response with/without props
-- Server stats response with/without slots
-- Start failure transitions to Failed state
-- HTTP status check logic
+**Current tests: 83** (0.1.8: 60), of which 59 are in the
+`routes::tests::route_integration` module using an axum test client.
 
-**Untested behaviors (need axum test client):**
-1. `get_status` route handler — full request/response cycle
-2. `post_start` — with real AppState, config, backend mock
-3. `post_stop` — with real AppState
-4. `post_swap` — drain → stop → new backend → start → health
-5. `get_profiles` — JSON response structure
-6. `get_health` — always returns 200
-7. `get_config` — redaction of agent env vars
-8. `put_profile` — sampling param updates, 404 on missing profile
-9. `get_model_info` — proxy to llama-server /v1/models and /props
-10. `post_chat` — rejects during drain (503), proxy passthrough, stream timeout
-11. `get_bench` — proxy to llama-server, result formatting
-12. `get_logs` — returns last N lines
-13. `get_agents`, `post_agent_start`, `post_agent_stop`, `get_agent_health`
-14. `get_dashboard` — serves embedded HTML, SPA fallback
-15. `get_models_search`, `get_models_quants`, `get_models_recommend`, `get_models_cached`, `post_models_pull`
-16. `get_hardware` — hardware profile with live data
-17. SSE connection limit (429 on overflow)
-18. SSE initial state event
-19. Body size limit enforcement (1MB)
+Every route previously listed as needing integration tests now has them:
+status, start (including idempotent same-profile and shutdown abort), stop
+(including both failure landings), swap (drain, unknown profile, shutdown
+abort), sleep/wake, profiles, health, config redaction, put_profile (update and
+404), model info, chat (running, draining 503, sleeping-wake, upstream error,
+stopped-path error counting, served model name), bench (timings, no timings,
+partial failure, failure surfacing, served model name), logs, agents
+(list, start/stop lifecycle, update success/failure/backup paths), dashboard
+(static asset and SPA fallback), hardware, metrics, reload, and the 1 MB body
+size limit returning 413.
 
-**Estimated new tests: 15–25** (route integration tests with axum test client)
+SSE connection limits and the initial state event moved to `sse.rs` and are
+covered there.
 
-### 2.10 `rookery-daemon::main` (main.rs) — Canary/Watchdog
+**Still untested:**
+1. `get_models_search`, `get_models_quants`, `get_models_recommend`,
+   `get_models_cached`, `post_models_pull` — the only route family without
+   integration coverage. `get_models_quants` is the one with real logic, since
+   it is what wires the repo-aware `mark_downloaded`.
 
-**Current tests: 0** (all logic is in `main()`, no extractable test functions)
+**Estimated new tests: 5–8**
 
-**Testable behaviors (would need extraction):**
-1. **Inference canary loop**: periodic check, retry-once, restart on double failure
-2. **Canary CUDA error trigger**: cuda_error_rx.changed() → immediate canary
-3. **Canary skip during drain**: draining=true → continue without checking
-4. **Canary op_lock serialization**: canary restart acquires op_lock
-5. **Canary re-subscribe**: after swap, canary re-subscribes to new backend error channel
-6. **Orphan cleanup**: find_orphan_llama_servers → SIGTERM → wait → SIGKILL
-7. **State reconciliation**: load → reconcile → adopt or mark stopped
-8. **Agent reconciliation**: load → reconcile → adopt → bounce restart_on_swap agents
-9. **Auto-start agents**: agents with auto_start=true start on daemon init
-10. **Graceful shutdown**: SIGTERM → stop agents → stop server → persist Stopped
+### 2.10 `rookery-daemon::canary` (canary.rs) and `main.rs`
 
-**Test types needed:** Extract canary logic into a testable function, or test via integration tests.
+**Current tests: 10 in `canary.rs`, 4 in `main.rs`** (0.1.8: 10 and 3)
 
-**Estimated new tests: 8–12** (after refactoring canary into testable unit)
+The canary was extracted from `main()` into its own module, exactly as this
+document proposed, and is now tested through the `InferenceBackend` trait.
+Covered: restart after two inference failures, healthy-backend no-restart,
+skip when draining, skip when not running, op_lock acquisition during restart,
+skip if stopped while waiting on the lock, restart state transitions
+(Running → stop → start → Running), restart failure landing Failed, start
+failure, operating through the trait interface, and the **busy-slot guard**
+(`test_canary_skips_restart_when_slots_busy`) — the canary no longer restarts a
+server that is merely busy serving a long request.
 
-### 2.11 `rookery-daemon::sse` (sse.rs)
+`main.rs` covers reconciliation liveness checks (PID check for llama-server,
+backend check for vLLM) and bounded shutdown op_lock acquisition.
 
-**Current tests: 0**
+The "canary re-subscribe after swap" entry is obsolete: `subscribe_errors()` was
+removed from the `InferenceBackend` trait (LAN-1087), so there is no per-backend
+error channel to re-subscribe to. CUDA error propagation is still tested inside
+`backend.rs`, and `test_cuda_error_skips_restart_for_stale_backend_event` covers
+the stale-event case.
 
-**Untested behaviors:**
-1. SSE merges GPU, state, and log streams
-2. SSE connection limit (MAX_SSE_CONNECTIONS = 16)
-3. SSE sends initial state event on connect
-4. SSE keep-alive interval (15s)
-5. Connection count decrement on disconnect
-
-**Estimated new tests: 3–5** (with axum test client)
-
-### 2.12 `rookery-core::config` (config.rs)
-
-**Current tests: 22**
-
-Excellent coverage of TOML parsing, backend types, validation, serialization roundtrips, command line resolution. 
-
-**Untested:**
-1. `Config::load()` — reads from filesystem (integration)
-2. `Config::save()` — atomic write (tempfile + rename)
-3. `Config::validate()` — missing default_profile error
-4. Edge case: model with both `path` and `repo` fields
-5. `resolve_profile_name()` — returns default when None
-
-**Estimated new tests: 3–5**
-
-### 2.13 `rookery-core::state` (state.rs)
-
-**Current tests: 8**
-
-Good coverage of serde roundtrip, reconciliation, backend fields, backward compat.
-
-**Untested:**
-1. `StatePersistence::load()` when file doesn't exist → returns Stopped
-2. `ServerState::profile_name()` for all variants
-3. `ServerState::is_running()` — false for non-Running variants
-4. `AgentPersistence` save/load/reconcile
-5. `is_process_alive()` with expected_exe check via /proc/pid/exe
+**Still untested:**
+1. Orphan cleanup: `find_orphan_llama_servers` → SIGTERM → wait → SIGKILL
+2. Auto-start agents on daemon init
+3. Full graceful shutdown sequence (SIGTERM → stop agents → stop server →
+   persist Stopped) — only the op_lock portion is covered
 
 **Estimated new tests: 4–6**
 
-### 2.14 `rookery-cli` (main.rs + client.rs)
+### 2.11 `rookery-daemon::sse` (sse.rs)
 
-**Current tests: 14**
+**Current tests: 9** (0.1.8: 7)
 
-All tests are StatusResponse/profile display formatting and JSON backward compat. No tests for:
-1. **CLI argument parsing** — clap derive correctness
-2. **DaemonClient** — HTTP request/response handling
-3. **Output formatting** — `format_count()`, GPU display, bench display, agent status display
-4. **Error handling** — daemon offline detection, HTTP errors
-5. **Logs follow mode** — SSE parsing
+All five previously listed gaps are closed: connection limit rejection at max,
+connection count increment, no counter leak on a rejected connection, initial
+state event on connect for both running and stopped, the keep-alive as a named
+`ping` event, the state event field set, and GPU events staying quiet without
+NVML.
 
-**Estimated new tests: 8–12**
+**Untested behaviors:** none material.
+
+### 2.12 `rookery-core::config` (config.rs)
+
+**Current tests: 32** (0.1.8: 27)
+
+All five previously listed gaps are closed: `Config::load()`/`save()` via a real
+filesystem roundtrip, `validate()` rejecting a missing default_profile,
+`resolve_profile_name()` returning the default when None, and model source
+validation across local/HF and both backends.
+
+Atomic write is covered separately in `rookery-core::atomic` (3 tests):
+contents replaced, parent directories created, no temp file left behind.
+
+`test_config_example_toml_parses` pins `config.example.toml` against the real
+schema, so a config-key rename cannot land without breaking a test.
+
+**Untested behaviors:** none material.
+
+### 2.13 `rookery-core::state` (state.rs)
+
+**Current tests: 15** (0.1.8: 14)
+
+Now covered: `StatePersistence::load()` on a missing file returning Stopped,
+`profile_name()` and `is_running()` across all variants, `AgentPersistence`
+save/load/reconcile plus missing-file, the Swapping state, and vLLM
+reconciliation with and without a container id.
+
+**Still untested:**
+1. `is_process_alive()` with the `expected_exe` check via `/proc/pid/exe` — the
+   PID-reuse guard. Dead-process reconciliation is tested, but not the case
+   where the PID is alive and belongs to a *different* binary.
+
+**Estimated new tests: 1–2**
+
+### 2.14 `rookery-cli` (main.rs + client.rs + tests/exit_codes.rs)
+
+**Current tests: 59** (0.1.8: 31) — 31 unit plus 28 integration in
+`tests/exit_codes.rs`.
+
+Now covered: clap parsing (all subcommands, global daemon flag, JSON flag,
+logs follow and line count, invalid subcommand rejection), output formatting
+(`format_count`, GPU, bench, agent status, profiles with backend prefixes and
+ctx sizes), daemon-offline error handling including naming the probed URL, and
+the full exit-code contract.
+
+The exit-code contract is the significant new surface: usage errors exit 2 so
+runtime failures can own 1; start/stop/swap/sleep/wake/agent-update/models-pull
+all exit non-zero when the daemon reports failure rather than reporting success;
+`--json` keeps printing parseable JSON on the error path and carries a shared
+`error` key on every error path; and failures go to stderr rather than stdout.
+
+**Still untested:**
+1. Logs follow mode — SSE stream parsing on the client side
+
+**Estimated new tests: 2–3**
 
 ---
 
@@ -295,59 +303,34 @@ All tests are StatusResponse/profile display formatting and JSON backward compat
 
 | Crate | Dev Dependencies |
 |-------|-----------------|
-| rookery-core | `tempfile = "3"` |
-| rookery-engine | `tempfile = "3"` |
-| rookery-daemon | (none) |
+| rookery-core | `tempfile` |
+| rookery-engine | `tempfile`, `axum`, `tokio` |
+| rookery-daemon | `tempfile`, `async-trait`, `tokio` (`test-util`), `tower` (`util`), `http-body-util` |
 | rookery-cli | (none) |
 
-### Missing Dependencies Needed
+The dependencies this document previously listed as missing are all in place.
+The key insight held: no external test framework was needed. Route tests use
+`tower::ServiceExt::oneshot()` against the real `Router`, with `http-body-util`
+to build and read bodies, and `tokio`'s `test-util` feature supplies time
+control.
 
-| Dependency | Purpose | Crate |
-|-----------|---------|-------|
-| `axum::test` (built-in) | Route handler testing via `axum::Router::oneshot()` | rookery-daemon |
-| `tower::ServiceExt` | `.oneshot()` helper for axum testing | rookery-daemon |
-| `hyper` | Building test requests for axum | rookery-daemon |
-| `tokio-test` (optional) | Async test utilities | rookery-engine |
-| (none needed) | Mock llama-server can be built with axum itself | rookery-engine |
-
-**Key insight:** Axum has built-in testing support via `Router::into_service()` + `tower::ServiceExt::oneshot()`. No external test framework like `axum-test` is needed. The daemon already depends on `axum` and `tower-http`.
+`rookery-cli` still has no dev-dependencies — `tests/exit_codes.rs` drives the
+built binary through `std::process::Command`.
 
 ---
 
-## 4. Mock llama-server Design
+## 4. Mock llama-server
 
-A mock llama-server is the key enabler for ProcessManager and route integration tests.
+**Built.** It lives at `crates/rookery-engine/src/test_utils.rs` — in-crate
+rather than the `tests/common/` helper originally sketched, so both the engine's
+own unit tests and the daemon's route tests can use it.
 
-### What it needs to implement:
-```
-GET  /health          → 200 OK (or configurable delay/failure)
-GET  /v1/models       → {"data":[{"id":"test-model","owned_by":"test"}]}
-GET  /props           → {"total_slots":1,"chat_template":"..."}
-GET  /slots           → [{"id":0,"state":"idle"}]
-POST /v1/chat/completions → {"choices":[...],"timings":{...}}
-```
+It has 9 tests of its own covering `/health`, `/v1/models`, `/props`, `/slots`,
+`/v1/chat/completions`, configurable health delay, configurable
+failure-after-N-requests, clean shutdown, and cleanup on drop.
 
-### Implementation approach:
-- Small axum server that binds to a random available port
-- Configurable behaviors: health delay, failure after N requests, slow responses
-- Returns realistic JSON responses matching llama-server's format
-- Can be a shared test utility in `rookery-engine/src/test_utils.rs` or a `tests/` helper
-
-### Shared test utilities:
-```rust
-// rookery-engine/tests/common/mock_server.rs
-pub struct MockLlamaServer {
-    port: u16,
-    shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    join_handle: tokio::task::JoinHandle<()>,
-}
-
-impl MockLlamaServer {
-    pub async fn start() -> Self { ... }
-    pub fn port(&self) -> u16 { ... }
-    pub async fn shutdown(self) { ... }
-}
-```
+This was the blocker for ProcessManager, backend start/health, and route
+integration tests. Unblocking it is most of why the suite grew.
 
 ---
 
@@ -355,87 +338,105 @@ impl MockLlamaServer {
 
 ### `test_is_pid_alive_parses_stat`
 
-**Status:** Fixed in commit `623ee92` — now accepts R, S, and D states.
+Fixed in commit `623ee92` — accepts R, S, and D states. Stable since.
 
-```rust
-assert!(
-    matches!(state, 'R' | 'S' | 'D'),
-    "test process should be alive (R/S/D), got '{state}'"
-);
-```
+### `test_cache_roundtrip`
 
-This is now stable. The fix was correct — the test process can be in Running, Sleeping, or Disk sleep states, all of which are valid "alive" states.
+Fixed in LAN-1151 — the test shared a temp directory with another test and could
+observe the other's cache file. It now gets its own unique tempdir.
 
----
+### Crash-detection test
 
-## 6. Priority Ranking for New Tests
+Fixed in LAN-1147 — the test raced `start()`'s fsync latency against a timer. It
+now kills the child explicitly rather than waiting a fixed interval.
 
-### Tier 1: High Impact, Moderate Effort (should do first)
-1. **Health check tests** (8–10) — zero tests today, used everywhere
-2. **Route integration tests** (15–25) — zero real handler tests, high risk surface
-3. **ProcessManager lifecycle** (12–15) — needs mock server but core functionality
-
-### Tier 2: Medium Impact, Lower Effort
-4. **AgentManager gaps** (8–12) — adopt, watchdog, crash backoff
-5. **SSE tests** (3–5) — connection limits, stream merging
-6. **CLI argument/output tests** (8–12) — clap parsing, display formatting
-7. **Canary behavior** (8–12) — needs extraction from main.rs
-
-### Tier 3: Incremental Value
-8. **LogBuffer subscribe/concurrent** (3–4)
-9. **Config edge cases** (3–5)
-10. **State persistence edge cases** (4–6)
-11. **Models recommend logic** (5–8)
-12. **GPU process_name** (1–2)
+Two of the three known flakes were fixed this release, both by removing a
+shared resource or a timing assumption rather than by widening a tolerance.
 
 ---
 
-## 7. Estimated Test Count by Area
+## 6. Remaining Work, Ranked
 
-| Area | Current | New Tests | Notes |
-|------|---------|-----------|-------|
-| health.rs | 0 | 8–10 | Mock HTTP server |
-| routes.rs (integration) | 23 | 15–25 | axum oneshot + AppState mock |
-| process.rs | 4 | 12–15 | Mock llama-server |
-| agent.rs | 11 | 8–12 | Adopt, watchdog, backoff |
-| sse.rs | 0 | 3–5 | axum test client |
-| canary (main.rs) | 0 | 8–12 | Extract to testable fn |
-| CLI | 14 | 8–12 | Clap parsing, formatting |
-| backend.rs | 60 | 5–8 | Start+health interaction |
-| logs.rs | 2 | 3–4 | Subscribe, concurrent |
-| config.rs | 22 | 3–5 | Edge cases |
-| state.rs | 8 | 4–6 | Agent persistence |
-| models.rs | 4 | 5–8 | recommend_quant logic |
-| compose.rs | 17 | 1–2 | Edge cases |
-| gpu.rs | 0 | 1–2 | process_name |
-| **TOTAL** | **171** | **84–126** | |
+### Tier 1: Real gaps worth closing
+1. **Models route family** (5–8) — the only route group with no integration
+   coverage, and `get_models_quants` carries real logic
+2. **Daemon lifecycle** (4–6) — orphan cleanup, agent auto-start, full graceful
+   shutdown
+3. **End-to-end flow** — daemon startup → start → swap → agent lifecycle as a
+   single test, the one roadmap item still fully open
+
+### Tier 2: Narrow and cheap
+4. **Watchdog timing** (3–4) — `depends_on_port` bounce, backoff reset; both
+   need `tokio::time` control
+5. **`attach_estimates`** (2–3) — pure logic
+6. **CLI logs follow** (2–3) — SSE parsing
+7. **`is_process_alive` PID-reuse guard** (1–2)
+
+### Tier 3: Low value
+8. **process.rs edge cases** (2) — OOM adj write failure, empty command line
+9. **gpu.rs orphan detection** (1–2) — integration-gated, needs a GPU
+
+---
+
+## 7. Test Count by Area
+
+Counts below are `#[test]` / `#[tokio::test]` attributes per file, comparing the
+0.1.8 tag against current. They sum slightly under the harness totals (356 vs
+358, 453 vs 457) because a few tests are generated rather than attributed
+one-per-function; use the harness numbers for the headline figure.
+
+| Area | 0.1.8 | Current | Notes |
+|------|-------|---------|-------|
+| backend.rs | 73 | 71 | −2: `subscribe_errors` tests removed with the trait method |
+| routes.rs | 60 | 83 | +23, and 59 of the total are axum integration tests |
+| agent.rs | 29 | 37 | adopt refusals, dead-agent health, pre-change backups |
+| config.rs | 27 | 32 | validation matrix across both backends |
+| cli (unit) | 31 | 31 | unchanged |
+| cli (exit codes) | 0 | 28 | **new file** — `tests/exit_codes.rs` |
+| process.rs | 22 | 20 | −2: `swap` / `start_and_wait` deleted with LAN-1087 |
+| models.rs | 13 | 20 | hub scanning, recommend, repo scoping, download client |
+| compose.rs | 18 | 20 | HF cache mount, optional param matrix |
+| health.rs | 15 | 17 | served-model-name discovery |
+| state.rs | 14 | 15 | vLLM reconcile |
+| backup.rs | 0 | 11 | **new module** |
+| releases.rs | 9 | 10 | connect-timeout bound |
+| canary.rs | 10 | 10 | unchanged count; busy-slot guard replaced an older test |
+| sse.rs | 7 | 9 | heartbeat naming, counter-leak guard |
+| test_utils.rs | 9 | 9 | unchanged — the mock llama-server |
+| integrity.rs | 0 | 8 | **new module** |
+| auth.rs | 6 | 6 | unchanged |
+| logs.rs | 5 | 5 | unchanged |
+| main.rs (daemon) | 3 | 4 | reconcile liveness, shutdown lock |
+| atomic.rs | 3 | 3 | unchanged |
+| gpu.rs | 2 | 2 | unchanged |
+| hardware.rs | 0 | 2 | **new module** — NVML unknown vs zero |
+| **TOTAL (harness)** | **358** | **457** | |
+
+The three genuinely new modules this release are `backup.rs`, `integrity.rs`,
+and `hardware.rs`, plus the new `tests/exit_codes.rs` integration file. Those
+four account for 49 of the 99 added tests; the rest is deepening on existing
+modules, chiefly `routes.rs`.
 
 ---
 
 ## 8. Architectural Notes
 
-### AppState for Route Tests
-Route handlers take `State<Arc<AppState>>`. Testing them requires constructing an AppState with:
-- A mock backend (`Box<dyn InferenceBackend>`)
-- A real `LogBuffer`
-- A `StatePersistence` pointed at a tempdir
-- A `broadcast::channel` for state_tx
-- A `Mutex<()>` for op_lock
-- Optional: mock GpuMonitor (None is fine for most tests)
+### AppState for route tests
 
-### Canary Extraction
-The canary logic in `main.rs` is a ~60-line `tokio::spawn` block. It should be extracted to:
-```rust
-pub async fn run_canary(
-    backend: Arc<Mutex<Box<dyn InferenceBackend>>>,
-    state_persistence: &StatePersistence,
-    config: Arc<RwLock<Config>>,
-    op_lock: &Mutex<()>,
-) { ... }
-```
-This makes it testable without starting the full daemon.
+Route handlers take `State<Arc<AppState>>`. The `route_integration` module
+builds one with a mock backend, a real `LogBuffer`, a `StatePersistence` on a
+tempdir, a `broadcast::channel` for `state_tx`, and a `Mutex<()>` op_lock.
+`GpuMonitor` is `None`, which is what
+`test_route_hardware_vram_free_is_null_when_nvml_unavailable` asserts against.
 
-### Test Organization
-- `rookery-engine/tests/common/mod.rs` — shared mock server, test config builders
-- `rookery-daemon/tests/routes_test.rs` — integration tests with axum oneshot
-- Each module's `#[cfg(test)] mod tests {}` for unit tests
+### Canary extraction
+
+Done. `crates/rookery-daemon/src/canary.rs` holds the loop, and its tests drive
+it through `Box<dyn InferenceBackend>` without starting a daemon.
+
+### Test organization
+
+- `rookery-engine/src/test_utils.rs` — mock llama-server, shared across crates
+- `rookery-daemon/src/routes.rs` → `tests::route_integration` — axum `oneshot`
+- `rookery-cli/tests/exit_codes.rs` — spawns the built binary, asserts exit codes
+- Everything else in each module's `#[cfg(test)] mod tests {}`

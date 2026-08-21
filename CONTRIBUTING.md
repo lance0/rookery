@@ -61,6 +61,18 @@ cp config.example.toml ~/.config/rookery/config.toml
 - No warnings allowed — `clippy --all-targets` must be clean
 - Prefer `Edit` tool over `sed` for file modifications (this is in our muscle memory after some incidents)
 
+**`rookery-dashboard` is excluded from the workspace**, so none of the commands
+above touch it — the root-level `cargo fmt --all` and `cargo clippy --all-targets`
+silently skip that crate (this is how it went unformatted for months). Format
+and lint it explicitly, targeting `wasm32-unknown-unknown`:
+
+```bash
+cargo fmt --manifest-path crates/rookery-dashboard/Cargo.toml --check
+cargo clippy --manifest-path crates/rookery-dashboard/Cargo.toml \
+  --target wasm32-unknown-unknown --all-targets -- -D warnings
+cd crates/rookery-dashboard && trunk build --release
+```
+
 ## Project Structure
 
 ```
