@@ -3,7 +3,8 @@
 ## Unit Tests
 
 ```bash
-cargo test --workspace    # 457 tests, no GPU required
+make test                 # canonical command — runs cargo test --workspace
+cargo test --workspace    # equivalent; 457 tests, no GPU required
 ```
 
 All tests use mock backends and temp directories — they never touch your real config or running daemon.

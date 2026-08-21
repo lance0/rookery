@@ -163,6 +163,16 @@ This builds both binaries, installs them to `/usr/local/bin`, and sets up a syst
 sudo make install PREFIX=/opt/rookery SERVICE_USER=myuser HF_HOME=/mnt/models
 ```
 
+### Testing
+
+After cloning, verify your build with the canonical test command:
+
+```bash
+make test          # runs cargo test --workspace, no GPU required
+```
+
+All tests use mock backends and temp directories — they never touch your real config or running daemon. See [docs/testing.md](docs/testing.md) for the chaos-test suite and the dashboard-specific gates.
+
 ## Configuration
 
 Config file: `~/.config/rookery/config.toml`
