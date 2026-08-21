@@ -1296,6 +1296,21 @@ use axum::response::IntoResponse;
 #[derive(Serialize)]
 pub struct BenchResult {
     pub tests: Vec<BenchTest>,
+    /// One entry per prompt that produced no measurement. Empty on a clean run.
+    ///
+    /// LAN-1094: these used to be logged server-side and dropped, so a bench
+    /// where every request timed out returned 200 `{"tests": []}` — byte
+    /// identical to a bench nobody ever started. Still 200 even when all three
+    /// fail: the partial case (some tests real, some failed) has to be 200
+    /// anyway, and a non-2xx loses the reason entirely on the dashboard, whose
+    /// `handle_response` discards the body and keeps only "HTTP 500".
+    pub errors: Vec<BenchError>,
+}
+
+#[derive(Serialize)]
+pub struct BenchError {
+    pub name: String,
+    pub error: String,
 }
 
 #[derive(Serialize)]
@@ -1356,6 +1371,7 @@ pub async fn get_bench(
     let model = rookery_engine::health::served_model_id(&client, port).await;
 
     let mut tests = Vec::new();
+    let mut errors = Vec::new();
     for (name, prompt) in prompts {
         let body = serde_json::json!({
             "model": model,
@@ -1363,32 +1379,60 @@ pub async fn get_bench(
             "max_tokens": 256,
         });
 
-        match client
+        // Every path that yields no measurement has to end up in `errors`.
+        // A silently dropped one reads to the caller as "never ran".
+        let outcome = match client
             .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
             .json(&body)
             .send()
             .await
         {
             Ok(resp) => {
-                if let Ok(data) = resp.json::<serde_json::Value>().await
-                    && let Some(timings) = data.get("timings")
-                {
-                    tests.push(BenchTest {
-                        name: name.to_string(),
-                        prompt_tokens: timings["prompt_n"].as_u64().unwrap_or(0),
-                        completion_tokens: timings["predicted_n"].as_u64().unwrap_or(0),
-                        pp_tok_s: timings["prompt_per_second"].as_f64().unwrap_or(0.0),
-                        gen_tok_s: timings["predicted_per_second"].as_f64().unwrap_or(0.0),
-                    });
+                let status = resp.status();
+                if !status.is_success() {
+                    // The body carries the actual reason ("model not found").
+                    let detail: String = resp
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect();
+                    Err(format!("HTTP {status}: {}", detail.trim()))
+                } else {
+                    match resp.json::<serde_json::Value>().await {
+                        // No `timings` block: a backend that does not report
+                        // them (vLLM) or a response shape we do not understand.
+                        Ok(data) => match data.get("timings") {
+                            Some(t) => Ok(BenchTest {
+                                name: name.to_string(),
+                                prompt_tokens: t["prompt_n"].as_u64().unwrap_or(0),
+                                completion_tokens: t["predicted_n"].as_u64().unwrap_or(0),
+                                pp_tok_s: t["prompt_per_second"].as_f64().unwrap_or(0.0),
+                                gen_tok_s: t["predicted_per_second"].as_f64().unwrap_or(0.0),
+                            }),
+                            None => Err("response carried no timings".to_string()),
+                        },
+                        Err(e) => Err(format!("malformed response: {e}")),
+                    }
                 }
             }
+            Err(e) => Err(e.to_string()),
+        };
+
+        match outcome {
+            Ok(test) => tests.push(test),
             Err(e) => {
                 tracing::error!(error = %e, test = name, "bench request failed");
+                errors.push(BenchError {
+                    name: name.to_string(),
+                    error: e,
+                });
             }
         }
     }
 
-    Ok(Json(BenchResult { tests }))
+    Ok(Json(BenchResult { tests, errors }))
 }
 
 // --- Helpers ---
@@ -5625,6 +5669,190 @@ mod tests {
                 "no quant fits in available memory",
                 "a measured 0 really is a full GPU"
             );
+        }
+
+        /// A llama-server-shaped mock whose first `ok_count` completion
+        /// requests answer with real timings; every later one replies with
+        /// `failure`. `ok_count = 0` is the total-failure case, `1` the
+        /// partial one (prompt order in `get_bench` is deterministic).
+        async fn spawn_bench_mock(
+            ok_count: usize,
+            failure: (StatusCode, serde_json::Value),
+        ) -> (u16, tokio::sync::oneshot::Sender<()>) {
+            use axum::response::Json as AxumJson;
+            use axum::routing::{get as aget, post as apost};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            let seen = std::sync::Arc::new(AtomicUsize::new(0));
+            let mock_app = Router::new()
+                .route("/health", aget(|| async { StatusCode::OK }))
+                .route(
+                    "/v1/models",
+                    aget(|| async {
+                        AxumJson(serde_json::json!({"data": [{"id": "mock-model"}]}))
+                    }),
+                )
+                .route(
+                    "/v1/chat/completions",
+                    apost(move || {
+                        let seen = seen.clone();
+                        let failure = failure.clone();
+                        async move {
+                            if seen.fetch_add(1, Ordering::SeqCst) >= ok_count {
+                                return (failure.0, AxumJson(failure.1));
+                            }
+                            (
+                                StatusCode::OK,
+                                AxumJson(serde_json::json!({
+                                    "choices": [{"index": 0, "message": {
+                                        "role": "assistant", "content": "hi"
+                                    }}],
+                                    "timings": {
+                                        "prompt_n": 5, "prompt_per_second": 500.0,
+                                        "predicted_n": 1, "predicted_per_second": 200.0
+                                    }
+                                })),
+                            )
+                        }
+                    }),
+                );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, mock_app)
+                    .with_graceful_shutdown(async {
+                        let _ = rx.await;
+                    })
+                    .await;
+            });
+            (port, tx)
+        }
+
+        async fn bench_json(mock_port: u16) -> serde_json::Value {
+            let (_dir, state) =
+                build_test_app_state(Some(Box::new(mock_backend_on_port(mock_port))));
+            sync_state_from_backend(&state).await;
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/bench")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "a partial result still has to reach the client, so the \
+                 handler stays 200 and reports failures in the body"
+            );
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        /// LAN-1094. Every request failing used to return `{"tests": []}` —
+        /// byte identical to a bench nobody ever ran, which the dashboard
+        /// renders as "no results yet".
+        #[tokio::test]
+        async fn test_route_bench_reports_failures_instead_of_empty_success() {
+            let (mock_port, shutdown_tx) = spawn_bench_mock(
+                0,
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"error": "upstream exploded"}),
+                ),
+            )
+            .await;
+
+            let json = bench_json(mock_port).await;
+
+            assert!(
+                json["tests"].as_array().expect("tests array").is_empty(),
+                "no test produced a measurement, got: {json}"
+            );
+            let errors = json["errors"].as_array().expect("errors array");
+            assert_eq!(
+                errors.len(),
+                3,
+                "a failed bench must be distinguishable from one never run, got: {json}"
+            );
+            assert!(
+                errors[0]["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("500"),
+                "the failure has to carry its reason, got: {}",
+                errors[0]
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        /// LAN-1094 partial case: one real measurement is a real (if
+        /// incomplete) result and still renders — but the two that failed
+        /// must not vanish into "that is all there was".
+        #[tokio::test]
+        async fn test_route_bench_partial_failure_keeps_results_and_errors() {
+            let (mock_port, shutdown_tx) = spawn_bench_mock(
+                1,
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"error": "upstream exploded"}),
+                ),
+            )
+            .await;
+
+            let json = bench_json(mock_port).await;
+
+            assert_eq!(
+                json["tests"].as_array().expect("tests array").len(),
+                1,
+                "the one test that succeeded must still be reported, got: {json}"
+            );
+            assert_eq!(
+                json["errors"].as_array().expect("errors array").len(),
+                2,
+                "the two that failed must be reported alongside it, got: {json}"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        /// LAN-1094, the other silent drop: a 200 whose body carries no
+        /// `timings` block fell through both `if let`s and was discarded
+        /// without even a log line.
+        #[tokio::test]
+        async fn test_route_bench_reports_response_without_timings() {
+            let (mock_port, shutdown_tx) = spawn_bench_mock(
+                0,
+                (
+                    StatusCode::OK,
+                    serde_json::json!({"choices": [{"index": 0, "message": {
+                        "role": "assistant", "content": "hi"
+                    }}]}),
+                ),
+            )
+            .await;
+
+            let json = bench_json(mock_port).await;
+
+            let errors = json["errors"].as_array().expect("errors array");
+            assert_eq!(
+                errors.len(),
+                3,
+                "a 200 with no timings is still no measurement, got: {json}"
+            );
+            assert!(
+                errors[0]["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("timings"),
+                "the reason must say what was missing, got: {}",
+                errors[0]
+            );
+
+            let _ = shutdown_tx.send(());
         }
     }
 }
