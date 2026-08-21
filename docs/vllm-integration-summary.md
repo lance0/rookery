@@ -2,7 +2,7 @@
 
 ## What Was Built
 
-vLLM is now supported as an alternative inference backend alongside llama-server. The implementation spans 21 files across all 5 crates (~6,800 lines added) with 171 tests (up from 26).
+vLLM is now supported as an alternative inference backend alongside llama-server. The implementation spans 21 files across all 5 crates (~6,800 lines added) with 171 tests (up from 26) at initial landing. The vLLM/compose area has grown since via follow-up fixes (see below): `backend.rs` alone is up to 71 tests, `compose.rs` 20.
 
 ### Milestone 1: Backend Abstraction (core refactoring)
 
@@ -14,8 +14,9 @@ vLLM is now supported as an alternative inference backend alongside llama-server
 
 ### Milestone 2: vLLM Backend
 
-- **Docker Compose generation** (`rookery-engine/src/compose.rs`) — generates compose.yml with NVIDIA GPU reservation, port mapping, HF_TOKEN passthrough, all vLLM flags from config
-- **VllmBackend** — full lifecycle: `docker compose up -d` with health polling, `docker compose down`, container adoption on daemon restart, log capture via `docker compose logs -f` with `[vllm]` prefix, CUDA error detection
+- **Docker Compose generation** (`rookery-engine/src/compose.rs`) — generates compose.yml with NVIDIA GPU reservation, port mapping, HF_TOKEN passthrough, all vLLM flags from config, and a **bind mount of the host HuggingFace cache** (`hf_cache_volume()`, honours `HF_HOME`, overridable per-invocation via `${HF_CACHE}`). Without it, `docker compose down` deletes the container's writable layer and every start re-downloaded the whole model
+- **VllmBackend** — full lifecycle: `docker compose up -d` with health polling (`VLLM_HEALTH_TIMEOUT` = **300s / 5 min**, vLLM-specific — a 27B's CUDA graph capture routinely takes 3-5 min, so this is not the 120s default inherited from the llama-server path), `docker compose down`, container adoption on daemon restart, log capture via `docker compose logs -f` with `[vllm]` prefix, CUDA error detection. `stop()` runs `docker compose down` **before** tearing down log capture — aborting the log task first meant a transient `down` failure left the container still serving with no log stream, so the CUDA-error channel went dead for the container's remaining lifetime
+- **Inference canary fix** (`rookery-engine/src/health.rs`) — `check_inference` now discovers the served model name via `GET /v1/models` instead of hardcoding `"test"`. vLLM 404s any completion request whose `model` doesn't match `--served-model-name`, so the hardcoded name made every vLLM profile fail the canary unconditionally and restart-loop
 - **Capacity gate** — vLLM profiles bypass VRAM check (vLLM manages its own memory)
 - **API graceful degradation** — `/api/model-info` and `/api/server-stats` return null for llama.cpp-specific `/props` and `/slots` endpoints when backend is vLLM
 - **Env-gated integration tests** (`ROOKERY_INTEGRATION=1`) for Docker lifecycle
@@ -159,8 +160,8 @@ These were identified during the mission but deferred per your request:
 
 | Item | Description | Priority |
 |------|-------------|----------|
-| **Flaky test** | `test_is_pid_alive_parses_stat` expects process state `R` but sometimes sees `S`/`D` due to scheduler timing. Pre-existing, not caused by this work. | Low |
-| **Canary stale receiver** | After backend swap, the inference canary holds the old backend's error receiver. CUDA errors from the new backend may not trigger the canary until next poll cycle. | Medium |
+| ~~**Flaky test**~~ | **Resolved.** `test_is_pid_alive_parses_stat` now accepts `R`/`S`/`D` (commit `623ee92`). | — |
+| ~~**Canary stale receiver**~~ | **Resolved.** `subscribe_errors()` was removed from the `InferenceBackend` trait, so the canary no longer holds a per-backend receiver across a swap; errors arrive on a single `watch` channel owned by `AppState`. A stale event from a replaced backend is now ignored rather than acted on — see `test_cuda_error_skips_restart_for_stale_backend_event`. | — |
 | **Compose --model validation** | Config validation doesn't reject vLLM profiles whose model has no `repo` field (would produce a compose file without `--model`). | Low |
-| **Integration test health timeout** | `ROOKERY_INTEGRATION=1` tests timeout at 120s because GPU is occupied by llama-server. Stop llama-server first, then run. | N/A (env) |
+| **Integration test health timeout** | `ROOKERY_INTEGRATION=1` tests now use `VLLM_HEALTH_TIMEOUT` (300s / 5 min, not the old 120s) but still fail fast if the GPU is occupied by llama-server. Stop llama-server first, then run. | N/A (env) |
 | **Manual E2E flows** | Start vLLM, swap between backends, daemon restart recovery, graceful shutdown — need manual verification with Docker + free GPU. | High |
