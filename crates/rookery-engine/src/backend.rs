@@ -204,6 +204,19 @@ impl InferenceBackend for LlamaServerBackend {
 
 // ── VllmBackend ───────────────────────────────────────────────────────
 
+/// How long to wait for a vLLM container to answer `/health` after `up -d`.
+///
+/// **Deliberately not shared with the llama-server path**, which stays at the
+/// 120s used by `app_state.rs` and `routes.rs`. llama-server mmaps a local
+/// GGUF and is serving in seconds; a vLLM cold start has to download weights,
+/// load them, run `torch.compile` and capture CUDA graphs — routinely 3-5 min
+/// for a 27B (the reference compose uses `start_period: 300s`).
+///
+/// Do NOT "unify" these: raising the llama-server timeout lengthens the
+/// worst-case `op_lock` hold during a swap, which already runs against
+/// `TimeoutStopSec=45` (LAN-1074).
+const VLLM_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Manages a vLLM inference backend via Docker Compose.
 ///
 /// Lifecycle:
@@ -408,7 +421,12 @@ impl VllmBackend {
             let _ = child.wait().await;
         });
 
-        *self.log_task.lock().await = Some(handle);
+        // Abort any handle we displace — a second start()/adopt() without an
+        // intervening stop() would otherwise leak a `docker compose logs -f`
+        // child that keeps tailing and double-reports CUDA errors.
+        if let Some(old) = self.log_task.lock().await.replace(handle) {
+            old.abort();
+        }
     }
 }
 
@@ -474,19 +492,21 @@ impl InferenceBackend for VllmBackend {
         *self.container_id.lock().await = Some(cid.clone());
         *self.info.lock().await = Some(backend_info.clone());
 
-        // Poll health endpoint with exponential backoff (same as llama-server)
-        match health::wait_for_health(prof.port, std::time::Duration::from_secs(120)).await {
+        // Poll health endpoint with exponential backoff, on the vLLM cold-start
+        // budget rather than llama-server's.
+        match health::wait_for_health(prof.port, VLLM_HEALTH_TIMEOUT).await {
             Ok(()) => {
                 tracing::info!(profile, port = prof.port, "vLLM health check passed");
             }
             Err(e) => {
-                tracing::error!(error = %e, "vLLM health check failed, stopping container");
+                tracing::error!(error = %e, "vLLM did not become healthy in time, stopping container");
                 // Stop on health failure
                 let _ = self.docker_compose_cmd(&["down"]).await;
                 *self.container_id.lock().await = None;
                 *self.info.lock().await = None;
                 return Err(Error::ConfigValidation(format!(
-                    "vLLM container started but health check failed: {e}"
+                    "vLLM container did not become healthy within {VLLM_HEALTH_TIMEOUT:?} \
+                     (weight download and CUDA graph capture can be slow on a cold cache): {e}"
                 )));
             }
         }
@@ -504,16 +524,19 @@ impl InferenceBackend for VllmBackend {
             return Ok(());
         }
 
-        // Terminate log capture task before stopping the container
-        if let Some(handle) = self.log_task.lock().await.take() {
-            handle.abort();
-        }
-
         tracing::info!("stopping vLLM via docker compose down");
 
         // Propagate docker compose down errors — do NOT clear state if the
         // container might still be running.
         self.docker_compose_cmd(&["down"]).await?;
+
+        // Only tear down log capture once the container is provably gone.
+        // Aborting first meant a transient `down` failure left a container
+        // still serving with no log stream, so `is_cuda_error` never saw
+        // another line and the CUDA-error channel was dead for its lifetime.
+        if let Some(handle) = self.log_task.lock().await.take() {
+            handle.abort();
+        }
 
         // Only clear internal state after successful docker compose down
         *self.container_id.lock().await = None;
@@ -1990,6 +2013,101 @@ mod tests {
         assert!(
             backend.log_task.lock().await.is_none(),
             "log_task should be cleared after stop"
+        );
+    }
+
+    // Regression: log capture must outlive a FAILED `docker compose down`.
+    //
+    // The abort used to run before `down`. When `down` failed transiently the
+    // container kept serving with no log stream, so `is_cuda_error` never saw
+    // another line and the CUDA-error channel was dead for its whole life.
+    #[tokio::test]
+    async fn test_vllm_stop_keeps_log_capture_when_down_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // Never written — `docker compose -f <missing> down` exits non-zero.
+        let missing_compose = dir.path().join("does-not-exist.yml");
+        let backend = VllmBackend::new(missing_compose, Arc::new(LogBuffer::new(100)));
+
+        *backend.container_id.lock().await = Some("test_container".into());
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        *backend.log_task.lock().await = Some(handle);
+
+        let result = backend.stop().await;
+        assert!(
+            result.is_err(),
+            "stop() should propagate a failed `docker compose down`"
+        );
+        assert!(
+            backend.log_task.lock().await.is_some(),
+            "log capture must survive a failed `down` — the container may still \
+             be running, and without the stream its CUDA errors go undetected"
+        );
+        assert!(
+            backend.container_id.lock().await.is_some(),
+            "state must not be cleared when the container may still be running"
+        );
+    }
+
+    // Regression: spawn_log_capture must abort the handle it displaces.
+    //
+    // Dropping a JoinHandle detaches the task rather than cancelling it, so
+    // overwriting the field leaked a `docker compose logs -f` child that kept
+    // tailing and double-reported CUDA errors.
+    #[tokio::test]
+    async fn test_vllm_spawn_log_capture_aborts_previous_handle() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = VllmBackend::new(
+            dir.path().join("vllm-compose.yml"),
+            Arc::new(LogBuffer::new(100)),
+        );
+
+        // The flag flips only if the task's future is dropped, i.e. aborted.
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(dropped.clone());
+        let stale = tokio::spawn(async move {
+            let _guard = guard;
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        *backend.log_task.lock().await = Some(stale);
+
+        backend.spawn_log_capture("new_container".into()).await;
+
+        // Let the runtime finish cancelling the aborted task.
+        for _ in 0..50 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the displaced log capture task should have been aborted, not detached"
+        );
+
+        if let Some(handle) = backend.log_task.lock().await.take() {
+            handle.abort();
+        }
+    }
+
+    // Regression: the vLLM health budget must cover a real cold start.
+    //
+    // 120s was copied from the llama-server path, which mmaps a local GGUF.
+    // It tore down containers that were starting perfectly fine.
+    #[test]
+    fn test_vllm_health_timeout_covers_cold_start() {
+        assert!(
+            VLLM_HEALTH_TIMEOUT >= std::time::Duration::from_secs(300),
+            "vLLM cold start is download + weight load + torch.compile + CUDA \
+             graph capture — routinely 3-5 min for a 27B, got {VLLM_HEALTH_TIMEOUT:?}"
         );
     }
 

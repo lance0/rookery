@@ -92,6 +92,28 @@ pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
         })
 }
 
+/// Fallback `model` value when the server won't say what it serves.
+/// llama-server ignores the field entirely, so this is harmless there.
+const FALLBACK_MODEL: &str = "test";
+
+/// Ask the server which model id it actually serves, via `GET /v1/models`.
+///
+/// vLLM validates `request.model` against its served name and returns 404 on a
+/// mismatch, so the canary cannot assert a name of its own — it has to ask.
+/// Returns `None` if the endpoint is unreachable or returns nothing usable.
+async fn served_model_id(client: &reqwest::Client, port: u16) -> Option<String> {
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body["data"][0]["id"].as_str().map(str::to_string)
+}
+
 /// Inference canary — sends a minimal completion request to verify the CUDA
 /// inference pipeline is functional, not just that the HTTP server responds.
 /// Returns true if the server generates at least one token within the timeout.
@@ -101,8 +123,15 @@ pub async fn check_inference(port: u16, timeout: Duration) -> bool {
         Err(_) => return false,
     };
 
+    // Discover the served name rather than hardcoding one: vLLM 404s every
+    // request whose `model` doesn't match `--served-model-name`, which made
+    // this canary fail unconditionally for vLLM profiles and restart-loop them.
+    let model = served_model_id(&client, port)
+        .await
+        .unwrap_or_else(|| FALLBACK_MODEL.to_string());
+
     let body = serde_json::json!({
-        "model": "test",
+        "model": model,
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1,
     });
@@ -352,6 +381,75 @@ mod tests {
         assert!(!result, "check_inference should return false on timeout");
 
         handle.abort();
+    }
+
+    /// Spawn a vLLM-shaped mock: `/v1/models` advertises one served name, and
+    /// `/v1/chat/completions` returns 404 for any other `model` value — which
+    /// is exactly what vLLM does when the request name doesn't match
+    /// `--served-model-name`.
+    async fn spawn_vllm_like_server(served: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(move || async move {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{"id": served, "object": "model"}],
+                    }))
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(move |Json(body): Json<serde_json::Value>| async move {
+                    if body["model"].as_str() == Some(served) {
+                        (StatusCode::OK, Json(serde_json::json!({"choices": []})))
+                    } else {
+                        (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({"error": "model not found"})),
+                        )
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, handle)
+    }
+
+    // Regression: the canary must ask the server what it serves.
+    // With a hardcoded `"model": "test"` this returns false for every vLLM
+    // profile, which restart-looped them forever.
+    #[tokio::test]
+    async fn test_check_inference_uses_served_model_name() {
+        let (port, handle) = spawn_vllm_like_server("org/Qwen3.8-27B").await;
+
+        let result = check_inference(port, Duration::from_secs(5)).await;
+        assert!(
+            result,
+            "check_inference must discover the served model name via /v1/models \
+             instead of hardcoding one that vLLM 404s on"
+        );
+
+        handle.abort();
+    }
+
+    // A server with no /v1/models (llama-server mocks, older builds) must keep
+    // working: the canary falls back and llama-server ignores `model` anyway.
+    #[tokio::test]
+    async fn test_check_inference_falls_back_when_models_endpoint_missing() {
+        let server = MockLlamaServer::start().await;
+        let result = check_inference(server.port(), Duration::from_secs(5)).await;
+        assert!(
+            result,
+            "check_inference should still pass when /v1/models is unavailable"
+        );
+        server.shutdown().await;
     }
 
     // ── HealthError display tests ─────────────────────────────────────
