@@ -3248,12 +3248,10 @@ mod tests {
             survives: bool,
             info: BackendInfo,
             draining: std::sync::atomic::AtomicBool,
-            cuda_error_tx: tokio::sync::watch::Sender<bool>,
         }
 
         impl StopFailsBackend {
             fn new(survives: bool) -> Self {
-                let (cuda_error_tx, _) = tokio::sync::watch::channel(false);
                 Self {
                     running: std::sync::atomic::AtomicBool::new(true),
                     survives,
@@ -3268,7 +3266,6 @@ mod tests {
                         exe_path: Some(std::path::PathBuf::from("/mock/llama-server")),
                     },
                     draining: std::sync::atomic::AtomicBool::new(false),
-                    cuda_error_tx,
                 }
             }
         }
@@ -3329,10 +3326,6 @@ mod tests {
             fn set_draining(&self, draining: bool) {
                 self.draining
                     .store(draining, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            fn subscribe_errors(&self) -> tokio::sync::watch::Receiver<bool> {
-                self.cuda_error_tx.subscribe()
             }
         }
 

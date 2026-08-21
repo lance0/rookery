@@ -685,6 +685,23 @@ body {
     filter: grayscale(1);
 }
 
+/* Degraded GPU read: same idea as staleness — refuse to present numbers we
+   can't back — but a different axis. The stream is Live; NVML is not, so
+   there are no numbers to dim and the panel says why instead. */
+.gpu-unavailable {
+    color: var(--amber);
+    font-size: 11px;
+    padding: 10px 0;
+}
+
+.gpu-unavailable-detail {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    margin-top: 4px;
+    word-break: break-word;
+}
+
 @media (prefers-reduced-motion: reduce) {
     .conn-chip .conn-dot { animation: none; }
 }
