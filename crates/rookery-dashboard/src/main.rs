@@ -1,10 +1,12 @@
 mod api;
 mod components;
+mod sse;
 
 use components::toast::{Toast, ToastKind, show_toast};
 use components::*;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
+use sse::{ConnState, SseHandles};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
@@ -226,93 +228,6 @@ fn load_dashboard_data(
     });
 }
 
-fn connect_sse(
-    event_source: ReadSignal<Option<web_sys::EventSource>>,
-    set_event_source: WriteSignal<Option<web_sys::EventSource>>,
-    set_connected: WriteSignal<bool>,
-    set_gpu: WriteSignal<GpuData>,
-    set_status: WriteSignal<ServerStatus>,
-    set_model_info: WriteSignal<ModelInfoData>,
-    set_logs: WriteSignal<Vec<String>>,
-) {
-    if let Some(existing) = event_source.get_untracked() {
-        existing.close();
-    }
-    set_event_source.set(None);
-
-    let Ok(es) = web_sys::EventSource::new(&api::events_url()) else {
-        set_connected.set(false);
-        return;
-    };
-
-    set_connected.set(true);
-
-    let set_gpu_sse = set_gpu;
-    let on_gpu = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-        if let Some(data) = e.data().as_string()
-            && let Ok(stats) = serde_json::from_str::<GpuData>(&data)
-        {
-            set_gpu_sse.set(stats);
-        }
-    });
-    let _ = es.add_event_listener_with_callback("gpu", on_gpu.as_ref().unchecked_ref());
-    on_gpu.forget();
-
-    let set_status_sse = set_status;
-    let set_model_info_sse = set_model_info;
-    let on_state = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-        if let Some(data) = e.data().as_string()
-            && let Ok(status) = serde_json::from_str::<ServerStatus>(&data)
-        {
-            let is_running = status.state == "running";
-            set_status_sse.set(status);
-            if is_running {
-                let set_model_info_retry = set_model_info_sse;
-                wasm_bindgen_futures::spawn_local(async move {
-                    gloo_timers::future::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Ok(model_info) = api::fetch_model_info().await {
-                        set_model_info_retry.set(model_info);
-                    }
-                });
-            } else {
-                set_model_info_sse.set(ModelInfoData::default());
-            }
-        }
-    });
-    let _ = es.add_event_listener_with_callback("state", on_state.as_ref().unchecked_ref());
-    on_state.forget();
-
-    let set_logs_sse = set_logs;
-    let on_log = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-        if let Some(data) = e.data().as_string() {
-            set_logs_sse.update(|lines| {
-                lines.push(data);
-                if lines.len() > 500 {
-                    lines.drain(..lines.len() - 500);
-                }
-            });
-        }
-    });
-    let _ = es.add_event_listener_with_callback("log", on_log.as_ref().unchecked_ref());
-    on_log.forget();
-
-    let set_conn_err = set_connected;
-    let on_error = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
-        set_conn_err.set(false);
-    });
-    es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
-    on_error.forget();
-
-    let set_conn_open = set_connected;
-    let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
-        set_conn_open.set(true);
-    });
-    es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
-    on_open.forget();
-
-    set_event_source.set(Some(es));
-}
-
 fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
@@ -325,7 +240,6 @@ fn App() -> impl IntoView {
     let (logs, set_logs) = signal(Vec::<String>::new());
     let (profiles, set_profiles) = signal(Vec::<ProfileInfo>::new());
     let (agents, set_agents) = signal(AgentsData::default());
-    let (connected, set_connected) = signal(false);
     let (model_info, set_model_info) = signal(ModelInfoData::default());
     let (tab, set_tab) = signal(Tab::Overview);
     let (toasts, set_toasts) = signal(Vec::<Toast>::new());
@@ -341,6 +255,20 @@ fn App() -> impl IntoView {
     let (server_stats, set_server_stats) = signal(Option::<serde_json::Value>::None);
     let (releases, set_releases) = signal(Option::<serde_json::Value>::None);
 
+    let conn = RwSignal::new(ConnState::default());
+    let stream = SseHandles {
+        event_source,
+        set_event_source,
+        set_gpu,
+        set_status,
+        set_model_info,
+        set_logs,
+        conn,
+        last_event_at: RwSignal::new(0.0),
+        retry_attempt: RwSignal::new(0),
+        retry_pending: RwSignal::new(false),
+    };
+
     load_dashboard_data(
         set_profiles,
         set_agents,
@@ -350,19 +278,11 @@ fn App() -> impl IntoView {
         set_load_error,
         set_auth_required,
     );
-    connect_sse(
-        event_source,
-        set_event_source,
-        set_connected,
-        set_gpu,
-        set_status,
-        set_model_info,
-        set_logs,
-    );
+    sse::connect_sse(stream);
+    sse::spawn_watchdog(stream);
 
     {
         let set_auth_required_evt = set_auth_required;
-        let set_connected_evt = set_connected;
         let event_source_evt = event_source;
         let set_event_source_evt = set_event_source;
         let set_auth_error_evt = set_auth_error;
@@ -373,7 +293,7 @@ fn App() -> impl IntoView {
                 existing.close();
             }
             set_event_source_evt.set(None);
-            set_connected_evt.set(false);
+            conn.set(ConnState::Disconnected);
             set_auth_error_evt.set(Some("Enter the API key to continue.".into()));
             set_loading_evt.set(false);
             set_auth_required_evt.set(true);
@@ -577,7 +497,7 @@ fn App() -> impl IntoView {
             existing.close();
         }
         set_event_source.set(None);
-        set_connected.set(false);
+        conn.set(ConnState::Disconnected);
         set_has_api_key.set(false);
         set_auth_input.set(String::new());
         set_auth_error.set(Some("API key cleared.".into()));
@@ -595,11 +515,6 @@ fn App() -> impl IntoView {
         let set_model_info_submit = set_model_info;
         let set_loading_submit = set_loading;
         let set_load_error_submit = set_load_error;
-        let event_source_submit = event_source;
-        let set_event_source_submit = set_event_source;
-        let set_connected_submit = set_connected;
-        let set_gpu_submit = set_gpu;
-        let set_status_submit = set_status;
 
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(error) = api::set_api_key(&key) {
@@ -622,15 +537,8 @@ fn App() -> impl IntoView {
                         set_load_error_submit,
                         set_auth_required_submit,
                     );
-                    connect_sse(
-                        event_source_submit,
-                        set_event_source_submit,
-                        set_connected_submit,
-                        set_gpu_submit,
-                        set_status_submit,
-                        set_model_info_submit,
-                        set_logs_submit,
-                    );
+                    stream.retry_attempt.set(0);
+                    sse::connect_sse(stream);
                 }
                 Err(error) if api::is_unauthorized(&error) => {
                     set_auth_error_submit.set(Some("Invalid API key.".into()));
@@ -644,7 +552,10 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        <div class="app">
+        // `data-stale` / `data-dead` dim every live number on the page, so a
+        // wedged stream can never present a four-minute-old VRAM reading as
+        // current. Driven from the root so no panel has to opt in.
+        <div class=move || format!("app{}", conn.get().data_class())>
             <div class="header">
                 <h1>"rookery"</h1>
                 <span class="subtitle">"local inference command center"</span>
@@ -664,9 +575,15 @@ fn App() -> impl IntoView {
                     <button class="theme-toggle" on:click=on_theme_toggle>
                         {move || if is_light.get() { "dark" } else { "light" }}
                     </button>
-                    <span class={move || if connected.get() { "conn-dot connected" } else { "conn-dot disconnected" }}></span>
-                    <span style="font-size:0.75em;color:var(--muted)">
-                        {move || if connected.get() { "connected" } else { "disconnected" }}
+                    // Persistent chip, not a toast: a toast says what happened
+                    // once, this says what is true now.
+                    <span
+                        class=move || format!("conn-chip {}", conn.get().css_class())
+                        title="Stream freshness. Numbers dim once no event has arrived for 3s."
+                        aria-live="polite"
+                    >
+                        <span class="conn-dot"></span>
+                        {move || conn.get().label()}
                     </span>
                 </span>
             </div>

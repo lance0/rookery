@@ -11,6 +11,19 @@ use crate::app_state::AppState;
 use crate::metrics::MAX_SSE_CONNECTIONS;
 use crate::metrics::sse_connection_guard;
 
+/// How often the stream proves it is still alive.
+///
+/// This has to be a *named* event rather than an SSE comment. Browsers never
+/// surface comments to JavaScript, so a comment can stop an intermediary
+/// timing the socket out — that is what the `KeepAlive` below is for — but it
+/// cannot tell the dashboard anything. A named event solves both halves at
+/// once: `EventSource.onmessage` only fires for the default `message` type, so
+/// `ping` is invisible to it and can never be mistaken for data, while an
+/// explicit `addEventListener("ping", …)` feeds the client's staleness clock.
+///
+/// Must stay comfortably under the dashboard's 3s freshness threshold.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
 pub async fn get_events(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, axum::http::StatusCode> {
@@ -33,6 +46,19 @@ pub async fn get_events(
                     .json_data(serde_json::json!({ "gpus": stats }))
                     .unwrap_or_else(|_| Event::default().event("gpu").data("{}")))
             });
+
+    // Heartbeat — fires on a fixed interval whether or not anything changed,
+    // so the dashboard can tell "quiet" from "wedged". The payload is the
+    // server clock, which is only there because an SSE event with an empty
+    // data buffer is never dispatched by the browser.
+    let heartbeat_stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+        HEARTBEAT_INTERVAL,
+    ))
+    .map(|_| {
+        Ok(Event::default()
+            .event("ping")
+            .data(chrono::Utc::now().timestamp_millis().to_string()))
+    });
 
     // State change stream — fires on start/stop/swap
     let state_rx = state.state_tx.subscribe();
@@ -68,18 +94,23 @@ pub async fn get_events(
     let stream_guard = guard.clone();
     let merged = initial_event
         .chain(futures_util::stream::select(
-            gpu_stream,
-            futures_util::stream::select(state_stream, log_stream),
+            heartbeat_stream,
+            futures_util::stream::select(
+                gpu_stream,
+                futures_util::stream::select(state_stream, log_stream),
+            ),
         ))
         .map(move |event| {
             let _guard = &stream_guard;
             event
         });
 
+    // Comment heartbeat (`: ping`) for intermediaries only — invisible to the
+    // client, and idle-triggered, so it costs nothing while events are flowing.
     Ok(Sse::new(merged).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
-            .text("keep-alive"),
+            .text("ping"),
     ))
 }
 
@@ -256,6 +287,41 @@ mod tests {
             assert!(
                 json.get(field).is_some(),
                 "state event JSON missing expected field '{field}', got: {json}"
+            );
+        }
+    }
+
+    // --- 3b. Heartbeat is a NAMED event, so it can never reach onmessage ---
+    //
+    // The staleness watchdog on the client is fed by this event, but it must
+    // never be read as data. `EventSource.onmessage` fires only for events
+    // with no `event:` line (type `message`), so the invariant to hold is:
+    // the heartbeat is present, and nothing on this stream is unnamed.
+    #[tokio::test]
+    async fn test_sse_heartbeat_is_a_named_ping_event() {
+        let (_dir, state) = build_test_app_state(None);
+        let app = sse_router(state);
+
+        let req = Request::builder()
+            .uri("/api/events")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_text = read_sse_body(resp.into_body(), 400).await;
+        let events = parse_sse_events(&body_text);
+
+        assert!(
+            events.iter().any(|(kind, _)| kind == "ping"),
+            "expected a heartbeat 'ping' event, got: {body_text}"
+        );
+
+        for block in body_text.split("\n\n").filter(|b| b.contains("data:")) {
+            assert!(
+                block.lines().any(|line| line.starts_with("event:")),
+                "unnamed event would surface via onmessage as data: {block:?}"
             );
         }
     }

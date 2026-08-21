@@ -46,7 +46,14 @@ pub fn StatusCard(
             "stopped" | "failed"
         )
     };
-    let can_stop = move || status.get().state != "stopped";
+    // `ServerStatus::default()` has an empty state, which is what we hold
+    // before the first `state` event lands — or forever, if the stream was
+    // never established. That is "we don't know", not "running", so it must
+    // not light up Stop on a panel that is receiving nothing.
+    let can_stop = move || {
+        let state = status.get().state;
+        !state.is_empty() && state != "stopped"
+    };
     let can_sleep = move || status.get().state == "running";
     let can_wake = move || status.get().state == "sleeping";
 
