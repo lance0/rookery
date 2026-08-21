@@ -534,9 +534,18 @@ async fn cmd_sleep(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
     let resp: serde_json::Value = client.post("/api/sleep", &EmptyBody {}).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
-    } else {
+    } else if resp["success"].as_bool().unwrap_or(false) {
         println!("{}", resp["message"].as_str().unwrap_or(""));
+    } else {
+        // Failures go to stderr in plain mode, same as `start` and `models pull`.
+        eprintln!("{}", resp["message"].as_str().unwrap_or(""));
     }
+    // Outside the if/else on purpose: the verdict is mode-independent, so
+    // plain and `--json` cannot drift the way LAN-1102 found them drifted.
+    // `already sleeping` is success:true at the daemon, so a repeat call still
+    // exits 0 — only "server is not running" fails, and from Stopped a later
+    // `wake` cannot succeed either.
+    exit_if_daemon_reported_failure(&resp);
     Ok(())
 }
 
@@ -549,9 +558,15 @@ async fn cmd_wake(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std::
     let resp: serde_json::Value = client.post("/api/wake", &EmptyBody {}).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
-    } else {
+    } else if resp["success"].as_bool().unwrap_or(false) {
         println!("{}", resp["message"].as_str().unwrap_or(""));
+    } else {
+        eprintln!("{}", resp["message"].as_str().unwrap_or(""));
     }
+    // `rookery wake && rookery bench` must not bench a server that never woke:
+    // the daemon reports a failed wake as HTTP 200 + success:false (both the
+    // "not sleeping" refusal and a wake whose health check never came up).
+    exit_if_daemon_reported_failure(&resp);
     Ok(())
 }
 
