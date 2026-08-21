@@ -1765,7 +1765,7 @@ pub async fn get_models_quants(
 
     let mut quants = rookery_engine::models::extract_quants(&files);
     let model_dirs = state.config.read().await.model_dirs.clone();
-    rookery_engine::models::mark_downloaded(&mut quants, &model_dirs);
+    rookery_engine::models::mark_downloaded_for_repo(&mut quants, &model_dirs, &repo);
 
     // Attach performance estimates
     let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
