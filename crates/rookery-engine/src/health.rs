@@ -96,12 +96,26 @@ pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
 /// llama-server ignores the field entirely, so this is harmless there.
 const FALLBACK_MODEL: &str = "test";
 
-/// Ask the server which model id it actually serves, via `GET /v1/models`.
+/// Ask the server which model id it actually serves, via `GET /v1/models`,
+/// falling back to [`FALLBACK_MODEL`] when it won't say.
 ///
 /// vLLM validates `request.model` against its served name and returns 404 on a
-/// mismatch, so the canary cannot assert a name of its own — it has to ask.
-/// Returns `None` if the endpoint is unreachable or returns nothing usable.
-async fn served_model_id(client: &reqwest::Client, port: u16) -> Option<String> {
+/// mismatch, so a caller cannot assert a name of its own — it has to ask.
+/// Shared by the inference canary and the `/api/chat` proxy: two copies of
+/// "what does this server serve" would drift.
+///
+/// ponytail: no cache. The result is only valid for the process currently on
+/// `port`, so caching it means invalidating on every swap — and a stale name
+/// here is precisely the 404 this function exists to prevent. One loopback GET
+/// the server answers from memory is noise next to the completion that follows.
+pub async fn served_model_id(client: &reqwest::Client, port: u16) -> String {
+    try_served_model_id(client, port)
+        .await
+        .unwrap_or_else(|| FALLBACK_MODEL.to_string())
+}
+
+/// `None` if `/v1/models` is unreachable or returns nothing usable.
+async fn try_served_model_id(client: &reqwest::Client, port: u16) -> Option<String> {
     let resp = client
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .send()
@@ -126,9 +140,7 @@ pub async fn check_inference(port: u16, timeout: Duration) -> bool {
     // Discover the served name rather than hardcoding one: vLLM 404s every
     // request whose `model` doesn't match `--served-model-name`, which made
     // this canary fail unconditionally for vLLM profiles and restart-loop them.
-    let model = served_model_id(&client, port)
-        .await
-        .unwrap_or_else(|| FALLBACK_MODEL.to_string());
+    let model = served_model_id(&client, port).await;
 
     let body = serde_json::json!({
         "model": model,

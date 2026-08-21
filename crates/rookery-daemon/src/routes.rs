@@ -1059,8 +1059,13 @@ pub async fn post_chat(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Ask the server what it serves instead of asserting a name: vLLM 404s
+    // every request whose `model` doesn't match `--served-model-name`, which
+    // made this proxy fail unconditionally for vLLM profiles.
+    let model = rookery_engine::health::served_model_id(&client, port).await;
+
     let body = serde_json::json!({
-        "model": "test",
+        "model": model,
         "messages": req.messages,
         "max_tokens": req.max_tokens,
         "stream": true,
@@ -1080,7 +1085,7 @@ pub async fn post_chat(
     // `.send()` only errors on transport failure — a non-2xx upstream response
     // arrives as Ok and would otherwise be streamed out under a hardcoded 200.
     // ponytail: always 502, never the upstream status. Even an upstream 400 can
-    // be our fault (the hardcoded "model" above 404s on vLLM), so forwarding it
+    // be our fault (a bad "model" name we resolved above), so forwarding it
     // would blame the caller for a proxy-side bug.
     if !resp.status().is_success() {
         state.metrics.inc_chat_error();
@@ -1346,10 +1351,14 @@ pub async fn get_bench(
         ("long", long_prompt),
     ];
 
+    // Same reason as post_chat: a hardcoded name 404s on every vLLM profile,
+    // which made /api/bench silently return zero tests there.
+    let model = rookery_engine::health::served_model_id(&client, port).await;
+
     let mut tests = Vec::new();
     for (name, prompt) in prompts {
         let body = serde_json::json!({
-            "model": "test",
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 256,
         });
@@ -1706,9 +1715,10 @@ pub async fn post_agent_update(
 pub async fn get_hardware(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut profile = serde_json::to_value(&state.hardware_profile).unwrap_or_default();
 
-    // Add live VRAM info
+    // Add live VRAM info. `null` when the NVML query failed — reporting 0 there
+    // is indistinguishable from a genuinely full GPU.
     if let Some(gpu) = profile.get_mut("gpu").and_then(|g| g.as_object_mut()) {
-        let free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+        let free = rookery_engine::hardware::try_live_vram_free_mb(state.gpu_monitor.as_ref());
         gpu.insert("vram_free_mb".into(), serde_json::json!(free));
     }
 
@@ -1722,6 +1732,16 @@ pub async fn get_hardware(State(state): State<Arc<AppState>>) -> Json<serde_json
 }
 
 // --- Model discovery ---
+
+/// Why no quant was recommended. "Nothing fits" is only meaningful if we know
+/// what we are fitting into — with `None`, VRAM was never read, and reporting
+/// that as a full GPU sends the user hunting a phantom leak.
+fn no_fit_message(vram_free: Option<u64>) -> &'static str {
+    match vram_free {
+        Some(_) => "no quant fits in available memory",
+        None => "could not read GPU VRAM (NVML query failed)",
+    }
+}
 
 #[derive(Deserialize)]
 pub struct ModelSearchQuery {
@@ -1767,17 +1787,21 @@ pub async fn get_models_quants(
     let model_dirs = state.config.read().await.model_dirs.clone();
     rookery_engine::models::mark_downloaded_for_repo(&mut quants, &model_dirs, &repo);
 
-    // Attach performance estimates
-    let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+    // Attach performance estimates. When NVML gave us nothing we still estimate
+    // against 0 (the engine takes a plain u64), but `vram_known: false` tells
+    // the UI those estimates are guesses, not measurements.
+    let vram_free = rookery_engine::hardware::try_live_vram_free_mb(state.gpu_monitor.as_ref());
     let ram_free = rookery_engine::hardware::read_ram_free_mb();
     rookery_engine::models::attach_estimates(
         &mut quants,
         &state.hardware_profile,
-        vram_free,
+        vram_free.unwrap_or(0),
         ram_free,
     );
 
-    Ok(Json(serde_json::json!({ "repo": repo, "quants": quants })))
+    Ok(Json(
+        serde_json::json!({ "repo": repo, "quants": quants, "vram_known": vram_free.is_some() }),
+    ))
 }
 
 pub async fn get_models_recommend(
@@ -1792,20 +1816,20 @@ pub async fn get_models_recommend(
     })?;
 
     let quants = rookery_engine::models::extract_quants(&files);
-    let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+    let vram_free = rookery_engine::hardware::try_live_vram_free_mb(state.gpu_monitor.as_ref());
     let ram_free = rookery_engine::hardware::read_ram_free_mb();
 
     match rookery_engine::models::recommend_quant(
         &quants,
         &state.hardware_profile,
-        vram_free,
+        vram_free.unwrap_or(0),
         ram_free,
     ) {
         Some(rec) => Ok(Json(
-            serde_json::json!({ "repo": repo, "recommendation": rec }),
+            serde_json::json!({ "repo": repo, "recommendation": rec, "vram_known": vram_free.is_some() }),
         )),
         None => Ok(Json(
-            serde_json::json!({ "repo": repo, "recommendation": null, "message": "no quant fits in available memory" }),
+            serde_json::json!({ "repo": repo, "recommendation": null, "vram_known": vram_free.is_some(), "message": no_fit_message(vram_free) }),
         )),
     }
 }
@@ -1862,19 +1886,20 @@ pub async fn post_models_pull(
     let quant_label = if let Some(q) = req.quant {
         q
     } else {
-        let vram_free = rookery_engine::hardware::live_vram_free_mb(state.gpu_monitor.as_ref());
+        let vram_free = rookery_engine::hardware::try_live_vram_free_mb(state.gpu_monitor.as_ref());
         let ram_free = rookery_engine::hardware::read_ram_free_mb();
         match rookery_engine::models::recommend_quant(
             &quants,
             &state.hardware_profile,
-            vram_free,
+            vram_free.unwrap_or(0),
             ram_free,
         ) {
             Some(rec) => rec.label,
             None => {
                 return Ok(Json(serde_json::json!({
                     "started": false,
-                    "message": "no quant fits in available memory"
+                    "vram_known": vram_free.is_some(),
+                    "message": no_fit_message(vram_free),
                 })));
             }
         }
@@ -5440,6 +5465,166 @@ mod tests {
 
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             assert!(!body.is_empty(), "CSS file should have non-empty content");
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // "we don't know" must not render as "we measured zero"
+        // ═══════════════════════════════════════════════════════════════
+
+        /// LAN-1130. The proxy used to hardcode `"model": "test"`, which vLLM
+        /// 404s because it validates against `--served-model-name`. The mock
+        /// below behaves the same way, so this fails on the hardcoded literal.
+        #[tokio::test]
+        async fn test_route_chat_uses_served_model_name() {
+            let (mock_port, shutdown_tx) = spawn_strict_model_mock("org/Qwen3.8-27B").await;
+
+            let (_dir, state) =
+                build_test_app_state(Some(Box::new(mock_backend_on_port(mock_port))));
+            sync_state_from_backend(&state).await;
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"messages":[{"role":"user"}]}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "chat proxy must send the name the server advertises on \
+                 /v1/models, not a hardcoded one vLLM rejects"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        /// LAN-1130, same defect in `/api/bench`: a hardcoded name means every
+        /// bench request 404s on vLLM and the handler reports zero tests.
+        #[tokio::test]
+        async fn test_route_bench_uses_served_model_name() {
+            let (mock_port, shutdown_tx) = spawn_strict_model_mock("org/Qwen3.8-27B").await;
+
+            let (_dir, state) =
+                build_test_app_state(Some(Box::new(mock_backend_on_port(mock_port))));
+            sync_state_from_backend(&state).await;
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/bench")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert!(
+                !json["tests"].as_array().expect("tests array").is_empty(),
+                "bench must not silently return zero results because the \
+                 hardcoded model name was rejected, got: {json}"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        /// A vLLM-shaped mock: `/v1/models` advertises one name and
+        /// `/v1/chat/completions` 404s anything else.
+        async fn spawn_strict_model_mock(
+            served: &'static str,
+        ) -> (u16, tokio::sync::oneshot::Sender<()>) {
+            use axum::response::Json as AxumJson;
+            use axum::routing::{get as aget, post as apost};
+
+            let mock_app =
+                Router::new()
+                    .route("/health", aget(|| async { StatusCode::OK }))
+                    .route(
+                        "/v1/models",
+                        aget(move || async move {
+                            AxumJson(serde_json::json!({"data": [{"id": served}]}))
+                        }),
+                    )
+                    .route(
+                        "/v1/chat/completions",
+                        apost(
+                            move |AxumJson(body): AxumJson<serde_json::Value>| async move {
+                                if body["model"].as_str() != Some(served) {
+                                    return (
+                                        StatusCode::NOT_FOUND,
+                                        AxumJson(serde_json::json!({"error": "model not found"})),
+                                    );
+                                }
+                                (
+                                    StatusCode::OK,
+                                    AxumJson(serde_json::json!({
+                                        "choices": [{"index": 0, "message": {
+                                            "role": "assistant", "content": "hi"
+                                        }}],
+                                        "timings": {
+                                            "prompt_n": 5, "prompt_per_second": 500.0,
+                                            "predicted_n": 1, "predicted_per_second": 200.0
+                                        }
+                                    })),
+                                )
+                            },
+                        ),
+                    );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, mock_app)
+                    .with_graceful_shutdown(async {
+                        let _ = rx.await;
+                    })
+                    .await;
+            });
+            (port, tx)
+        }
+
+        /// LAN-1127. `gpu_monitor: None` is a failed/absent NVML query. Serving
+        /// that as `vram_free_mb: 0` is indistinguishable from a genuinely full
+        /// GPU, so the user is told to free VRAM that was never measured.
+        #[tokio::test]
+        async fn test_route_hardware_vram_free_is_null_when_nvml_unavailable() {
+            let (_dir, state) = build_test_app_state(None);
+            assert!(state.gpu_monitor.is_none(), "test state has no NVML");
+            let app = test_router_full(state);
+
+            let req = Request::builder()
+                .uri("/api/hardware")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            assert!(
+                json["gpu"]["vram_free_mb"].is_null(),
+                "an unread VRAM figure must serialize as null, not 0, got: {}",
+                json["gpu"]["vram_free_mb"]
+            );
+        }
+
+        /// LAN-1127. The phantom-leak report: "no quant fits in available
+        /// memory" when in truth we never read the GPU.
+        #[test]
+        fn test_no_fit_message_distinguishes_unread_vram_from_full_gpu() {
+            assert_eq!(
+                super::no_fit_message(None),
+                "could not read GPU VRAM (NVML query failed)",
+                "an unread GPU must not be reported as a full one"
+            );
+            assert_eq!(
+                super::no_fit_message(Some(0)),
+                "no quant fits in available memory",
+                "a measured 0 really is a full GPU"
+            );
         }
     }
 }

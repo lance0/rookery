@@ -13,7 +13,7 @@ use rookery_core::error::Result;
 use rookery_core::state::{ServerState, StatePersistence};
 use rookery_engine::agent::AgentManager;
 use rookery_engine::backend::{BackendInfo, InferenceBackend};
-use rookery_engine::hardware::{CpuProfile, HardwareProfile};
+use rookery_engine::hardware::{CpuProfile, GpuProfile, HardwareProfile};
 use rookery_engine::logs::LogBuffer;
 use rookery_engine::models::HfClient;
 use std::collections::HashMap;
@@ -225,8 +225,15 @@ pub fn build_test_app_state(
     // Create a StatePersistence pointing at the tempdir
     let state_persistence = StatePersistence { path: state_path };
 
+    // A GPU in the static profile with `gpu_monitor: None` is exactly the shape
+    // that exposes "NVML failed" — the card is known, the live query is not.
     let hardware_profile = HardwareProfile {
-        gpu: None,
+        gpu: Some(GpuProfile {
+            name: "test-gpu".into(),
+            vram_total_mb: 32768,
+            compute_capability: (12, 0),
+            memory_bandwidth_gbps: 1792.0,
+        }),
         cpu: CpuProfile {
             name: "test-cpu".into(),
             cores: 4,
