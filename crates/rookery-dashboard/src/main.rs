@@ -720,7 +720,7 @@ fn App() -> impl IntoView {
                             </div>
 
                             <div class="section" style:display=move || panel_display(Tab::Agents)>
-                                <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts />
+                                <AgentsTab agents=agents set_agents=set_agents logs=logs set_toasts=set_toasts tab=tab />
                             </div>
 
                             <div class="section" style:display=move || panel_display(Tab::Chat)>

@@ -1,6 +1,12 @@
 use crate::components::toast::{Toast, ToastKind, show_toast};
-use crate::{AgentInfo, AgentsData, api};
+use crate::{AgentInfo, AgentsData, Tab, api};
 use leptos::prelude::*;
+
+fn agent_is_running(data: &AgentsData, name: &str) -> bool {
+    data.agents
+        .iter()
+        .any(|a| a.name == name && a.status == serde_json::json!("running"))
+}
 
 fn format_uptime(secs: i64) -> String {
     if secs < 60 {
@@ -20,14 +26,26 @@ pub fn AgentsTab(
     set_agents: WriteSignal<AgentsData>,
     logs: ReadSignal<Vec<String>>,
     set_toasts: WriteSignal<Vec<Toast>>,
+    /// LAN-1116: the panel stays mounted when hidden (LAN-1078), so the health
+    /// effect needs to know whether it is on screen.
+    tab: ReadSignal<Tab>,
 ) -> impl IntoView {
     let (updating_agent, set_updating_agent) = signal(Option::<String>::None);
     let (acting_agent, set_acting_agent) = signal(Option::<String>::None);
     let (health_details, set_health_details) =
         signal(std::collections::HashMap::<String, serde_json::Value>::new());
 
-    // Fetch health details for all running agents whenever agents signal changes
+    // Fetch health details for all running agents whenever agents signal changes.
+    //
+    // LAN-1116: bail before touching `agents` when the tab is hidden. Returning
+    // early leaves `agents` untracked, so the 10s `/api/agents` poll no longer
+    // drags a health GET per running agent along with it while the user is on
+    // another tab. `tab` is still tracked, so switching back re-runs this and
+    // refetches immediately — no stale window, and the panel stays mounted.
     Effect::new(move |_| {
+        if tab.get() != Tab::Agents {
+            return;
+        }
         let data = agents.get();
         let running_names: Vec<String> = data
             .agents
@@ -121,15 +139,43 @@ pub fn AgentsTab(
 
                             let click_name = name.clone();
                             let acting_name = name.clone();
-                            let running = is_running;
                             let set_agents_click = set_agents;
                             let set_toasts_click = set_toasts;
                             let on_click = move |_| {
                                 let n = click_name.clone();
                                 let sa = set_agents_click;
                                 let st = set_toasts_click;
+                                // LAN-1124: `disabled` is applied on a microtask, so a
+                                // synchronous second dispatch still lands here. The signal
+                                // itself is set synchronously below, so it is the airtight
+                                // in-flight flag — no extra state needed.
+                                if acting_agent.get_untracked().as_deref() == Some(n.as_str()) {
+                                    return;
+                                }
+                                // LAN-1124: fall back on the last known state only if the
+                                // re-read below fails.
+                                let assumed_running = agent_is_running(&agents.get_untracked(), &n);
                                 set_acting_agent.set(Some(n.clone()));
                                 wasm_bindgen_futures::spawn_local(async move {
+                                    // LAN-1124: decide the verb from the state as it is NOW,
+                                    // not from the value captured when this button was
+                                    // rendered. The watchdog, the CLI or another dashboard can
+                                    // flip the agent underneath a rendered button, and nothing
+                                    // pushes that: `agents` only refreshes on App's 10s poll
+                                    // (there is no agent event on the SSE stream), so the
+                                    // signal is just as capable of being stale as the closure
+                                    // was. One localhost GET closes the whole window, and the
+                                    // result is fed back into `agents` so the card is right
+                                    // too. (A desired-state intent the daemon reconciles would
+                                    // be sturdier still, but that needs a daemon-side change.)
+                                    let running = match api::fetch_agents().await {
+                                        Ok(fresh) => {
+                                            let running = agent_is_running(&fresh, &n);
+                                            sa.set(fresh);
+                                            running
+                                        }
+                                        Err(_) => assumed_running,
+                                    };
                                     let result = if running {
                                         api::stop_agent(&n).await
                                     } else {
