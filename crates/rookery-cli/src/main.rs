@@ -1319,7 +1319,9 @@ async fn cmd_models_list(
     let models = resp["models"].as_array().ok_or("no cached models")?;
 
     if models.is_empty() {
-        println!("no cached models in ~/.cache/llama.cpp/");
+        println!(
+            "no cached models in ~/.cache/llama.cpp/, $HF_HOME/hub/ (default ~/.cache/huggingface/hub/), or any configured model_dirs"
+        );
         return Ok(());
     }
 
