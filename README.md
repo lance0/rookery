@@ -51,6 +51,7 @@ See [Installation](#installation) below for setup instructions.
 
 - **Multi-backend** — manage llama-server (GGUF) and vLLM (safetensors, AWQ, GPTQ, NVFP4) from the same config
 - **Hot-swap** — switch between model profiles without restarting the daemon
+- **Config reload** — `rookery reload` re-reads the config file in place, so adding a profile or repointing a model no longer costs a daemon restart; a bad edit is rejected and the old config kept
 - **Live dashboard** — Leptos WASM frontend with 7 tabs: Overview, Settings, Agents, Chat, Bench, Logs, Models
 - **GPU monitoring** — real-time VRAM, temperature, utilization, power draw, per-process memory via NVML
 - **Agent management** — spawn, stop, update, and watchdog external processes like [Hermes](https://github.com/NousResearch/hermes-agent) (multi-platform AI agent with tool calling, web browsing, vision, and voice), coding assistants, or any service that depends on inference

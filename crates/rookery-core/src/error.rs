@@ -8,7 +8,12 @@ pub enum Error {
     #[error("config parse error: {0}")]
     ConfigParse(#[from] toml::de::Error),
 
-    #[error("profile not found: {0}")]
+    // The hint is part of the message because this is otherwise indistinguishable
+    // from a typo: a profile added to the file but not yet loaded by the running
+    // daemon fails exactly like a misspelt one.
+    #[error(
+        "profile not found: {0} (config is read at daemon start — POST /api/reload if you just added it)"
+    )]
     ProfileNotFound(String),
 
     #[error("model not found: {0}")]

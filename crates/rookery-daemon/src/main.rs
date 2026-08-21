@@ -760,6 +760,7 @@ async fn main() {
         .route("/agents/{name}/health", get(routes::get_agent_health))
         .route("/config", get(routes::get_config))
         .route("/config/profile/{name}", put(routes::put_profile))
+        .route("/reload", post(routes::post_reload))
         .route("/model-info", get(routes::get_model_info))
         .route("/server-stats", get(routes::get_server_stats))
         .route("/chat", post(routes::post_chat))

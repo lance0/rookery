@@ -57,8 +57,38 @@ When `api_key` is configured in `config.toml`, all API endpoints require `Author
 |----------|--------|-------------|
 | `/api/config` | GET | Full config, with `api_key`, `github_token` and agent env vars redacted |
 | `/api/config/profile/{name}` | PUT | Update profile sampling params |
+| `/api/reload` | POST | Re-read the config file from disk — see below |
 | `/api/model-info` | GET | Model ID, context window from llama-server |
 | `/api/server-stats` | GET | Slot status, request count |
+
+### `POST /api/reload`
+
+Re-reads the config file into the running daemon. Nothing is restarted: the
+live backend keeps its profile, port, PID and binary, and no agent is started,
+stopped or bounced. CLI equivalent: `rookery reload`.
+
+A reload changes what *future* operations see:
+
+| | |
+|---|---|
+| **Applied immediately** | `api_key` (checked per request), `idle_timeout` (re-read each 30s poll), `default_profile` |
+| **Applied on the next start/swap** | `profiles`, `models`, the `llama_server` binary path |
+| **Needs a daemon restart** | `listen` (socket already bound), `agents` (the watchdog holds the definitions it booted with), `auto_start`, `release_check_interval` |
+
+The response body repeats those three lists, plus `warnings` for anything this
+particular reload could not honour — a changed `listen`, edited `[agents]`, a
+port change on the live profile, or the live profile having been deleted from
+the file (which is allowed and stops nothing).
+
+Responses:
+
+- `200` — applied. `{"success": true, "profiles": [...], "warnings": [...], ...}`
+- `400` — the file is missing, unparseable, or fails the same validation the
+  daemon applies at boot. **The old config is kept and the daemon keeps
+  serving**; the error names the problem. A typo can never take the daemon
+  down, unlike at boot where an invalid config is a hard exit.
+- `409` — a start/stop/swap held `op_lock` for longer than 5s. Nothing changed;
+  retry once the operation finishes.
 
 ## Upstream Releases
 
