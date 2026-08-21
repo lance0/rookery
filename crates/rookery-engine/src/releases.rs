@@ -345,12 +345,14 @@ mod tests {
         state.update_available = true;
         state.checked_at = Some(Utc::now());
 
-        let tmp = std::env::temp_dir().join("rookery-test-releases.json");
+        // A fixed temp_dir() path is shared across concurrent `cargo test` runs
+        // in different worktrees, and they clobber each other's cache file.
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("releases.json");
         cache.save(&tmp).unwrap();
         let loaded = ReleaseCache::load(&tmp);
         assert_eq!(loaded.repos.len(), 1);
         assert!(loaded.repos[0].update_available);
-        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
