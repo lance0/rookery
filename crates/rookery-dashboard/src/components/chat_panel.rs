@@ -15,6 +15,25 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
     let (input, set_input) = signal(String::new());
     let (streaming, set_streaming) = signal(false);
     let (abort_ctrl, set_abort_ctrl) = signal(Option::<web_sys::AbortController>::None);
+    // Screen-reader announcements. Deliberately holds *state* strings only — never
+    // stream tokens, which would queue an announcement per delta (see chat-live-region
+    // below). Empty until the first send so the region is silent at page load.
+    let (announce, set_announce) = signal("");
+
+    let chat_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Auto-scroll, same rule as LogViewer/AgentsTab: only follow the stream if the
+    // user is already at the bottom, so scrolling up to read isn't yanked back.
+    Effect::new(move |_| {
+        let _msgs = messages.get();
+        if let Some(el) = chat_ref.get() {
+            let el: &web_sys::HtmlElement = &el;
+            let at_bottom = el.scroll_top() + el.client_height() >= el.scroll_height() - 50;
+            if at_bottom {
+                el.set_scroll_top(el.scroll_height());
+            }
+        }
+    });
 
     let send_message = move || {
         let text = input.get().trim().to_string();
@@ -46,6 +65,7 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
             });
         });
         set_streaming.set(true);
+        set_announce.set("Response started.");
 
         // Create AbortController for this request
         let controller = web_sys::AbortController::new().ok();
@@ -55,11 +75,14 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
 
         wasm_bindgen_futures::spawn_local(async move {
             match stream_chat(chat_msgs, set_messages, controller.as_ref()).await {
-                Ok(()) => {}
+                Ok(()) => set_announce.set("Response complete."),
                 Err(e) => {
                     // Don't show toast for user-initiated aborts
                     if !e.contains("abort") && !e.contains("Abort") {
                         show_toast(set_toasts, format!("chat error: {e}"), ToastKind::Error);
+                        set_announce.set("Response failed.");
+                    } else {
+                        set_announce.set("Response stopped.");
                     }
                     set_messages.update(|msgs| {
                         if let Some(last) = msgs.last()
@@ -104,7 +127,10 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
 
     view! {
         <div class="chat-container">
-            <div class="chat-messages" id="chat-scroll">
+            // No aria-live here on purpose: a token stream would queue one
+            // announcement per delta and drown the screen reader. State is
+            // announced by .chat-live-region below instead.
+            <div class="chat-messages" id="chat-scroll" node_ref=chat_ref>
                 {move || {
                     let msgs = messages.get();
                     if msgs.is_empty() {
@@ -163,6 +189,11 @@ pub fn ChatPanel(set_toasts: WriteSignal<Vec<Toast>>) -> impl IntoView {
                         "Clear"
                     </button>
                 </div>
+            </div>
+            // Present at page load (every tab is mounted, hidden with display:none),
+            // so the region is live before its text ever changes.
+            <div class="chat-live-region" aria-live="polite" aria-atomic="true">
+                {move || announce.get()}
             </div>
         </div>
     }

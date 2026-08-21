@@ -274,7 +274,19 @@ body {
 /* Agent Summary (Overview pill view) */
 .agent-summary { transition: border-color 0.15s; }
 .agent-summary:hover { border-color: var(--accent); }
-.agent-summary-link { float: right; font-size: 10px; color: var(--muted); font-weight: 400; }
+/* Real <button> so it is focusable/activatable; styled back to the old span. */
+.agent-summary-link {
+    float: right;
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 400;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    cursor: pointer;
+}
+.agent-summary-link:hover { color: var(--accent); }
 
 .agent-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -520,6 +532,7 @@ body {
     max-width: 360px;
     animation: toast-in 0.2s ease-out;
     pointer-events: auto;
+    cursor: pointer;
 }
 
 .toast.success { border-color: var(--green); color: var(--green); }
@@ -562,6 +575,21 @@ body {
     flex: 1;
     overflow-y: auto;
     padding: 12px;
+}
+
+/* Visually hidden, still announced. Not display:none / visibility:hidden — those
+   drop it out of the accessibility tree and the announcement never happens. */
+.chat-live-region {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
 }
 
 .chat-messages::-webkit-scrollbar { width: 4px; }
@@ -727,7 +755,15 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* LAN-1082's explicit kill for the infinite pulse, kept: the blanket rule below
+       reduces animations to 0.01ms but this states the intent for the one that loops. */
     .conn-chip .conn-dot { animation: none; }
+
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }
 
 /* Mobile */
