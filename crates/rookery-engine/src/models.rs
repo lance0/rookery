@@ -156,8 +156,15 @@ const QUANT_PATTERNS: &[&str] = &[
 
 // --- HfClient ---
 
+/// Max gap between body chunks before a download is considered stalled.
+const DOWNLOAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct HfClient {
+    /// API calls (search, file listing): small JSON, a 30s total deadline is right.
     client: reqwest::Client,
+    /// File downloads: no total deadline — a 25 GB GGUF legitimately takes minutes.
+    /// Stalls are bounded by `read_timeout` (gap between bytes) instead.
+    download_client: reqwest::Client,
 }
 
 impl Default for HfClient {
@@ -168,13 +175,27 @@ impl Default for HfClient {
 
 impl HfClient {
     pub fn new() -> Self {
+        let ua = format!("rookery/{}", env!("CARGO_PKG_VERSION"));
         let client = reqwest::Client::builder()
-            .user_agent(format!("rookery/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(ua.clone())
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        // `.timeout()` is a *total* deadline that covers the streamed body, so it
+        // aborts any download longer than it — deliberately absent here. Raising it
+        // would only move the cliff; `read_timeout` bounds "no bytes arrived
+        // recently" without bounding "this file is large".
+        let download_client = reqwest::Client::builder()
+            .user_agent(ua)
+            .read_timeout(DOWNLOAD_READ_TIMEOUT)
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            client,
+            download_client,
+        }
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<HfRepoInfo>, String> {
@@ -231,10 +252,21 @@ impl HfClient {
         progress_tx: Option<&tokio::sync::watch::Sender<DownloadProgress>>,
     ) -> Result<(), String> {
         let url = format!("https://huggingface.co/{}/resolve/main/{}", repo, filename);
+        self.download_url(&url, repo, filename, dest, progress_tx)
+            .await
+    }
 
+    async fn download_url(
+        &self,
+        url: &str,
+        repo: &str,
+        filename: &str,
+        dest: &Path,
+        progress_tx: Option<&tokio::sync::watch::Sender<DownloadProgress>>,
+    ) -> Result<(), String> {
         let resp = self
-            .client
-            .get(&url)
+            .download_client
+            .get(url)
             .send()
             .await
             .map_err(|e| format!("download request failed: {e}"))?;
@@ -790,6 +822,7 @@ pub fn recommend_quant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn test_normalize_repo() {
@@ -1215,20 +1248,101 @@ mod tests {
     }
 
     // ponytail: see the twin in releases.rs for the mechanism and its ceiling.
-    // This is the client `download_file` uses, so an unbounded connect here
-    // stalls a model pull for the full kernel SYN timeout.
+    // Both clients matter: an unbounded connect on either stalls a model pull
+    // for the full kernel SYN timeout.
     #[tokio::test]
     async fn test_hf_client_bounds_connect_to_blackhole() {
+        let hf = HfClient::new();
+        for (name, client) in [("api", &hf.client), ("download", &hf.download_client)] {
+            let started = std::time::Instant::now();
+            let _ = client.get("http://192.0.2.1:81/").send().await;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(10),
+                "{name} client: connect to a blackholed peer took {elapsed:?}; connect_timeout is not applied"
+            );
+        }
+    }
+
+    /// Serve one HTTP response whose body trickles out over `secs`, then exit.
+    /// Returns the bound URL and the exact body that will be sent.
+    async fn spawn_trickle_server(secs: u64) -> (String, Vec<u8>) {
+        const CHUNKS_PER_SEC: u64 = 4;
+        let chunks = secs * CHUNKS_PER_SEC;
+        let body: Vec<u8> = (0..chunks)
+            .flat_map(|i| format!("chunk{i:06}\n").into_bytes())
+            .collect();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/model.gguf", listener.local_addr().unwrap());
+        let served = body.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the request line/headers so the client's write completes.
+            let mut scratch = [0u8; 4096];
+            let _ = sock.read(&mut scratch).await;
+
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                served.len()
+            );
+            sock.write_all(head.as_bytes()).await.unwrap();
+            let gap = std::time::Duration::from_millis(1000 / CHUNKS_PER_SEC);
+            for chunk in served.chunks(12) {
+                if sock.write_all(chunk).await.is_err() {
+                    return;
+                }
+                let _ = sock.flush().await;
+                tokio::time::sleep(gap).await;
+            }
+        });
+        (url, body)
+    }
+
+    // LAN-1146: reqwest's `.timeout()` is a total deadline covering the streamed
+    // body, so the old shared 30s client aborted every download longer than 30s —
+    // i.e. every real GGUF. This drives the production download client against a
+    // slow-but-healthy body and asserts it completes.
+    //
+    // Default trickle is 3s to keep CI cheap: at that length it proves the whole
+    // streaming path (progress, .part, rename) works, but NOT the 30s cliff.
+    // Set ROOKERY_TEST_TRICKLE_SECS=35 to prove the cliff — that run fails at
+    // ~30.0s with "download stream error" if the total timeout comes back.
+    #[tokio::test]
+    async fn test_download_survives_body_longer_than_api_timeout() {
+        let secs: u64 = std::env::var("ROOKERY_TEST_TRICKLE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        let (url, body) = spawn_trickle_server(secs).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let (tx, rx) = tokio::sync::watch::channel(DownloadProgress {
+            repo: String::new(),
+            file: String::new(),
+            bytes_downloaded: 0,
+            bytes_total: 0,
+            done: false,
+        });
+
         let started = std::time::Instant::now();
-        let _ = HfClient::new()
-            .client
-            .get("http://192.0.2.1:81/")
-            .send()
-            .await;
-        let elapsed = started.elapsed();
+        HfClient::new()
+            .download_url(&url, "repo", "model.gguf", &dest, Some(&tx))
+            .await
+            .unwrap_or_else(|e| panic!("download failed after {:?}: {e}", started.elapsed()));
+
         assert!(
-            elapsed < std::time::Duration::from_secs(10),
-            "connect to a blackholed peer took {elapsed:?}; connect_timeout is not applied"
+            started.elapsed() >= std::time::Duration::from_secs(secs - 1),
+            "server did not actually trickle; test proves nothing"
         );
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(
+            !dir.path().join("model.gguf.part").exists(),
+            ".part was not renamed away"
+        );
+        let progress = rx.borrow();
+        assert!(progress.done);
+        assert_eq!(progress.bytes_downloaded, body.len() as u64);
     }
 }
