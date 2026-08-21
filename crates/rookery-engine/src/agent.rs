@@ -96,7 +96,13 @@ struct ManagedAgent {
 /// Where an agent's SQLite databases live: `data_dir`, falling back to
 /// `workdir`. Shared by the integrity sweep and the pre-change backup so the two
 /// can never disagree about which files they are talking about.
-fn db_root(config: &AgentConfig) -> Option<std::path::PathBuf> {
+///
+/// `pub` for LAN-1125: the update route has to back up an agent that is already
+/// stopped, and a stopped agent is not in the `agents` map, so it cannot reach
+/// the `backup_root` captured at start time. It derives the root from config
+/// through here rather than re-deriving it, which is exactly the disagreement
+/// this function exists to prevent.
+pub fn db_root(config: &AgentConfig) -> Option<std::path::PathBuf> {
     config
         .data_dir
         .as_ref()

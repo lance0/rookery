@@ -115,7 +115,12 @@ pub async fn post_start(
             && let Ok(stats) = monitor.stats()
             && let Some(gpu) = stats.first()
         {
-            let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
+            // LAN-1092: saturating. NVML should never report used > total, but
+            // if it does, debug panics inside a request handler and release
+            // wraps to ~1.8e19 — which silently passes the capacity gate on the
+            // next line, i.e. the check fails open exactly when the numbers are
+            // untrustworthy.
+            let free_mb = gpu.vram_total_mb.saturating_sub(gpu.vram_used_mb);
             if free_mb < estimated_mb as u64 {
                 return Ok(Json(ActionResponse {
                     success: false,
@@ -133,7 +138,10 @@ pub async fn post_start(
             && let Ok(stats) = monitor.stats()
             && let Some(gpu) = stats.first()
         {
-            let free_mb = gpu.vram_total_mb - gpu.vram_used_mb;
+            // LAN-1092: saturating, same reason as the gate above. Here the
+            // consequence is only a bogus warn line, but the debug panic is the
+            // same.
+            let free_mb = gpu.vram_total_mb.saturating_sub(gpu.vram_used_mb);
             if free_mb < estimated_mb as u64 {
                 tracing::warn!(
                     profile = %profile_name,
@@ -174,6 +182,11 @@ pub async fn post_start(
             tracing::error!(error = %e, "failed to start server");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+        // LAN-1128: bare 503, no body. This is the only 503 the handler can
+        // return, so the status alone says what happened, and `start_profile`
+        // has already logged it with the profile name. See post_wake for why
+        // the signature was not widened to post_swap's tuple.
+        Err(crate::app_state::StartServerError::Shutdown) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -325,6 +338,13 @@ pub async fn post_wake(
             tracing::error!(error = %e, profile = %profile, "wake start failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+        // LAN-1128: bare 503 rather than widening this handler (and post_start)
+        // to post_swap's `(StatusCode, Json<Value>)` shape. Neither client reads
+        // the body on this path — the dashboard collapses any non-2xx to
+        // `HTTP {status}` and the CLI's `ClientError::Status` already renders an
+        // empty body as plain "server returned status 503" — so the tuple would
+        // buy a constant string at the cost of changing two public signatures.
+        Err(crate::app_state::StartServerError::Shutdown) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -1569,13 +1589,42 @@ pub async fn post_agent_update(
         .and_then(rookery_engine::agent::read_version_file);
     let was_running = state.agent_manager.is_running(&name).await;
 
-    if was_running && let Err(e) = state.agent_manager.stop(&name).await {
-        return Ok(Json(AgentUpdateResponse {
-            success: false,
-            message: format!("failed to stop agent '{name}' before update: {e}"),
-            version: previous_version.clone(),
-            previous_version,
-        }));
+    if was_running {
+        if let Err(e) = state.agent_manager.stop(&name).await {
+            return Ok(Json(AgentUpdateResponse {
+                success: false,
+                message: format!("failed to stop agent '{name}' before update: {e}"),
+                version: previous_version.clone(),
+                previous_version,
+            }));
+        }
+    } else if let Some(root) = rookery_engine::agent::db_root(&agent_config) {
+        // LAN-1125: an already-stopped agent skips `stop()`, and `stop()` is
+        // where LAN-1088 hooked the pre-change backup — so the one flow that
+        // takes no copy is an update applied to a cold agent. The update runs
+        // and migrates config in place either way (`hermes update` does not care
+        // whether the gateway is up), so this branch needs the same copy the
+        // running branch gets for free.
+        //
+        // Backing up directly rather than through the choke point because a
+        // stopped agent has been removed from the `agents` map: `stop_inner`
+        // would return `NotFound` before reaching its backup call, and the
+        // `backup_root` it captures at start time is gone with the entry. Hence
+        // `db_root` off the config instead.
+        //
+        // Same shape as the `stop_inner` call: fail-open by construction —
+        // `backup::run` returns a tally and never an error, logging failures to
+        // both tracing and the agent log buffer, so a missing sqlite3 or a full
+        // disk cannot wedge every update. Retention and the `.bak`/nested-dir
+        // sweep exclusion live inside `run`, so they apply here unchanged.
+        rookery_engine::backup::run(
+            &state.log_buffer,
+            &name,
+            &root,
+            rookery_engine::integrity::SQLITE3,
+            "update",
+        )
+        .await;
     }
 
     tracing::info!(agent = %name, command = %update_command, "running agent update");
@@ -3649,6 +3698,136 @@ mod tests {
             let _ = shutdown_tx.send(());
         }
 
+        /// A health endpoint on a fresh port, so `start_profile` gets all the
+        /// way to `Running` when nothing stops it. Returns (port, shutdown_tx).
+        ///
+        /// The two shutdown-guard tests below need this rather than a dead port:
+        /// with a dead port an unguarded start would sit in the 120s health wait
+        /// and the test would time out instead of failing, which proves nothing.
+        /// With it, removing the guard turns both into a fast, loud 200/Running.
+        async fn spawn_health_endpoint() -> (u16, tokio::sync::oneshot::Sender<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = axum::Router::new().route("/health", get(|| async { StatusCode::OK }));
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            (port, tx)
+        }
+
+        // --- 10b. POST /api/start once shutdown has begun → 503, nothing spawned ---
+        //
+        // LAN-1128 regression test, the `post_start` half. Same race LAN-1120
+        // closed for swap: `begin_shutdown()` runs before `server_handle.abort()`,
+        // aborting axum does not cancel already-spawned handlers, and shutdown
+        // gives up on `op_lock` after 20s while the health wait runs for 120s —
+        // so an unguarded start spawns an llama-server the exiting daemon never
+        // supervises. Without the guard this returns 200/Running.
+        #[tokio::test]
+        async fn test_route_start_aborts_when_shutting_down() {
+            let (mock_port, shutdown_tx) = spawn_health_endpoint().await;
+
+            let (_dir, state) = build_test_app_state(None);
+            {
+                let mut config = state.config.write().await;
+                if let Some(profile) = config.profiles.get_mut("test") {
+                    profile.port = mock_port;
+                }
+            }
+
+            // What main.rs does on SIGTERM, before server_handle.abort().
+            state.agent_manager.begin_shutdown();
+
+            let app = test_router(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"test"}"#))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "start must abort with 503 once shutdown has begun"
+            );
+
+            // The whole point of the ticket: no orphaned process holding VRAM.
+            assert!(
+                !state.backend.lock().await.is_running().await,
+                "shutdown abort must not spawn a backend"
+            );
+            let after = state.current_state().await;
+            assert!(
+                matches!(after, rookery_core::state::ServerState::Stopped),
+                "aborted start must land Stopped, not linger on Starting — got {after:?}"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
+        // --- 10c. POST /api/wake once shutdown has begun → 503, nothing spawned ---
+        //
+        // The `post_wake` half. Worth its own test because wake enters from
+        // `Sleeping`, so it is the caller that would otherwise persist a
+        // transient state: a SIGKILL at TimeoutStopSec before main.rs writes
+        // `Stopped` would leave the next boot restoring a sleeping server that
+        // does not exist.
+        #[tokio::test]
+        async fn test_route_wake_aborts_when_shutting_down() {
+            let (mock_port, shutdown_tx) = spawn_health_endpoint().await;
+
+            let (_dir, state) = build_test_app_state(None);
+            {
+                let mut config = state.config.write().await;
+                if let Some(profile) = config.profiles.get_mut("test") {
+                    profile.port = mock_port;
+                }
+            }
+            state
+                .set_server_state(rookery_core::state::ServerState::Sleeping {
+                    profile: "test".into(),
+                    since: chrono::Utc::now(),
+                })
+                .await;
+
+            state.agent_manager.begin_shutdown();
+
+            let app = test_router(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/wake")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "wake must abort with 503 once shutdown has begun"
+            );
+
+            assert!(
+                !state.backend.lock().await.is_running().await,
+                "shutdown abort must not spawn a backend"
+            );
+            let after = state.current_state().await;
+            assert!(
+                matches!(after, rookery_core::state::ServerState::Stopped),
+                "aborted wake must not leave Sleeping behind — got {after:?}"
+            );
+
+            let _ = shutdown_tx.send(());
+        }
+
         // --- 11. Request body size limit → 413 on oversized payload ---
         #[tokio::test]
         async fn test_route_body_size_limit_returns_413() {
@@ -4720,6 +4899,162 @@ mod tests {
                     .as_str()
                     .unwrap_or("")
                     .contains("has no update_command configured")
+            );
+        }
+
+        // --- 22d. LAN-1125: updating an ALREADY-STOPPED agent still backs up ---
+        //
+        // LAN-1088 hooked the pre-change backup into `stop_inner`, which the
+        // update route only reaches `if was_running`. The update command runs
+        // regardless — `hermes update` migrates config in place whether or not
+        // the gateway is up — so the cold path was mutating the agent with no
+        // copy to restore from. Without the fix nothing creates `db-backups/`
+        // and `generations()` is empty.
+        #[tokio::test]
+        async fn test_route_agent_update_backs_up_when_agent_already_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let data_dir = tempfile::tempdir().unwrap();
+
+            let db = data_dir.path().join("state.db");
+            let made = std::process::Command::new(rookery_engine::integrity::SQLITE3)
+                .arg(&db)
+                .arg(
+                    "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); \
+                     INSERT INTO t(v) SELECT hex(randomblob(64)) FROM generate_series(1,200);",
+                )
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !made {
+                return; // no sqlite3 on this box
+            }
+
+            let agent_config = rookery_core::config::AgentConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-lc".into(), "sleep 60".into()],
+                workdir: Some(data_dir.path().to_path_buf()),
+                env: std::collections::HashMap::new(),
+                restart_on_swap: false,
+                restart_on_crash: false,
+                auto_start: false,
+                depends_on_port: None,
+                stop_timeout_secs: 30,
+                version_file: None,
+                // Stands in for the in-place config migration `hermes update`
+                // applies whether or not the gateway is running.
+                update_command: Some("echo migrated".into()),
+                update_workdir: Some(data_dir.path().to_path_buf()),
+                restart_on_error_patterns: vec![],
+                data_dir: Some(data_dir.path().to_path_buf()),
+            };
+
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert("hermes".into(), agent_config);
+            }
+
+            // Deliberately NOT started: this is the cold path.
+            assert!(!state.agent_manager.is_running("hermes").await);
+
+            let app = test_router_full(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/hermes/update")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let backups = data_dir.path().join(rookery_engine::backup::BACKUP_DIR);
+            let gens: Vec<std::path::PathBuf> = std::fs::read_dir(&backups)
+                .map(|entries| entries.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                gens.len(),
+                1,
+                "an update of a stopped agent must leave exactly one backup generation in {}",
+                backups.display()
+            );
+
+            // A copy that is not restorable is not a backup. Also pins the
+            // `.bak` suffix and the extra directory level, which are what keep
+            // LAN-1070's nightly integrity sweep from scanning these forever.
+            let copy = gens[0].join("state.db.bak");
+            assert!(copy.exists(), "expected {}", copy.display());
+            let out = std::process::Command::new(rookery_engine::integrity::SQLITE3)
+                .arg("-readonly")
+                .arg(&copy)
+                .arg("SELECT count(*) FROM t;")
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "200",
+                "the backup must be a usable database, not a torn copy"
+            );
+        }
+
+        // --- 22e. LAN-1125: a failed backup must not block the update ---
+        //
+        // Pins LAN-1088's fail-open property on the new path. The data_dir holds
+        // a file that is not a database, so `backup::run` reports a failure —
+        // and the update must still run and still report success, because a
+        // rookery that cannot update an agent is a worse outage than an update
+        // without a copy.
+        #[tokio::test]
+        async fn test_route_agent_update_survives_a_failing_backup_when_stopped() {
+            let (_dir, state) = build_test_app_state(None);
+            let data_dir = tempfile::tempdir().unwrap();
+            std::fs::write(data_dir.path().join("state.db"), b"not a database").unwrap();
+
+            let agent_config = rookery_core::config::AgentConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-lc".into(), "sleep 60".into()],
+                workdir: Some(data_dir.path().to_path_buf()),
+                env: std::collections::HashMap::new(),
+                restart_on_swap: false,
+                restart_on_crash: false,
+                auto_start: false,
+                depends_on_port: None,
+                stop_timeout_secs: 30,
+                version_file: None,
+                update_command: Some("echo migrated".into()),
+                update_workdir: Some(data_dir.path().to_path_buf()),
+                restart_on_error_patterns: vec![],
+                data_dir: Some(data_dir.path().to_path_buf()),
+            };
+
+            {
+                let mut config = state.config.write().await;
+                config.agents.insert("hermes".into(), agent_config);
+            }
+
+            let app = test_router_full(state.clone());
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/hermes/update")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json["success"], true,
+                "a failed backup must not block the update, got: {json}"
+            );
+
+            let logs = state.log_buffer.last_n(50).join("\n");
+            assert!(
+                logs.contains("[agent:hermes:update] migrated"),
+                "the update command must still have run, logs: {logs}"
+            );
+            // "Logged loudly" is the other half of fail-open, and asserting it
+            // is also what makes this test discriminating: without the fix no
+            // backup is attempted on this path, so the line is simply absent.
+            assert!(
+                logs.contains("[agent:hermes] db backup FAILED") && logs.contains("before update"),
+                "a failed backup must be logged loudly, not swallowed, logs: {logs}"
             );
         }
 
