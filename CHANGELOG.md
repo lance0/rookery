@@ -4,6 +4,34 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
+## 0.1.11 — 2026-08-21
+
+Finishes what 0.1.10 started. 0.1.10 stopped the *lie* — reporting "up to date"
+when the versions could not be compared. Deploying it revealed that the honest
+answer was then **"unknown" forever**, which for a tool whose whole job is to
+tell you when to upgrade is barely an improvement.
+
+### Fixed
+
+- **`rookery releases` now resolves llama.cpp again instead of reporting
+  "unknown" permanently.** When a server is running, the daemon reads its
+  version from `/props`, which exposes only `build_info: "b10566-bb4caa754"` —
+  a build number and a commit, no semver. Since llama.cpp's release tags are now
+  semver, the two sides had no shared scheme and every check came back
+  incomparable. The binary's own `--version` banner carries both halves
+  (`version: 0.2.0-dev (build 10566, commit bb4caa754)`), so the daemon now
+  borrows the semver from there.
+- **The borrow only happens when both sources agree on the build number.** A
+  binary that has been rebuilt but not yet restarted into is a *different* build
+  from the one actually serving; lending it its semver would describe the
+  running server as a version it is not. On a mismatch the comparison stays
+  honestly unknown rather than becoming confidently wrong — this is not
+  hypothetical, it is the exact state this box was in between building v0.2.0
+  and swapping it in.
+
+Three new tests covering the live case, the build-mismatch refusal, and the
+no-op paths. 466 tests total. (LAN-1153)
+
 ## 0.1.10 — 2026-08-21
 
 A single fix, cut same-day as 0.1.9 because it is the exact failure class 0.1.9

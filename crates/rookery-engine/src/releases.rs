@@ -275,6 +275,30 @@ pub fn compare_llama_versions(current: &VersionInfo, latest_tag: &str) -> Option
     None
 }
 
+/// Borrow the semver from a binary's `--version` banner for a version that only
+/// carries a build number.
+///
+/// `/props` reports `build_info` as `bNNNNN-sha` with no semver, but the release
+/// tags are now semver — so a running server can never be compared against a tag
+/// on its own. The binary's banner has both halves.
+///
+/// Only merges when the two agree on the build number. A binary rebuilt but not
+/// yet restarted into is a *different* build from the one actually serving, and
+/// lending it its semver would report the running server as a version it is not.
+/// Returns true if the merge happened.
+pub fn borrow_semver_from_binary(running: &mut VersionInfo, binary: &VersionInfo) -> bool {
+    if running.semver.is_some() || binary.semver.is_none() {
+        return false;
+    }
+    match (running.build_number, binary.build_number) {
+        (Some(a), Some(b)) if a == b => {
+            running.semver = binary.semver;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Detect llama-server version by running `--version`.
 ///
 /// llama-server writes its build banner to **stderr**, not stdout — stdout comes
@@ -461,6 +485,57 @@ mod tests {
         };
         assert_eq!(compare_llama_versions(&unparseable, "v0.2.0"), None);
         assert_eq!(compare_llama_versions(&unparseable, "b10600"), None);
+    }
+
+    /// The live case: /props gives "b10566-bb4caa754" (no semver) and the tag is
+    /// "v0.2.0", so on its own the running server is incomparable forever. With
+    /// the binary's banner merged in it resolves to a real answer.
+    #[test]
+    fn test_borrow_semver_makes_running_server_comparable() {
+        let mut running = parse_llama_build_info("b10566-bb4caa754");
+        assert_eq!(running.semver, None);
+        assert_eq!(compare_llama_versions(&running, "v0.2.0"), None);
+
+        let binary = parse_llama_build_info("version: 0.2.0-dev (build 10566, commit bb4caa754)");
+        assert!(borrow_semver_from_binary(&mut running, &binary));
+        assert_eq!(running.semver, Some((0, 2, 0)));
+        assert_eq!(
+            compare_llama_versions(&running, "v0.2.0"),
+            Some((false, false))
+        );
+        assert_eq!(
+            compare_llama_versions(&running, "v0.3.0"),
+            Some((true, false))
+        );
+    }
+
+    /// A binary rebuilt but not yet restarted into is a different build from the
+    /// one serving. Lending its semver would describe the running server as a
+    /// version it is not -- exactly the situation on this box between building
+    /// v0.2.0 and swapping it in.
+    #[test]
+    fn test_borrow_semver_refuses_on_build_mismatch() {
+        let mut running = parse_llama_build_info("b10380-0b1bad14f");
+        let newer_binary =
+            parse_llama_build_info("version: 0.2.0-dev (build 10566, commit bb4caa754)");
+        assert!(!borrow_semver_from_binary(&mut running, &newer_binary));
+        assert_eq!(running.semver, None);
+        // Still honestly incomparable rather than wrongly "up to date".
+        assert_eq!(compare_llama_versions(&running, "v0.2.0"), None);
+    }
+
+    #[test]
+    fn test_borrow_semver_noop_when_already_present_or_absent() {
+        // Already has semver: leave it alone.
+        let mut has = parse_llama_build_info("version: 0.2.0-dev (build 10566, commit bb4caa754)");
+        let other = parse_llama_build_info("version: 9.9.9-dev (build 10566, commit deadbeef)");
+        assert!(!borrow_semver_from_binary(&mut has, &other));
+        assert_eq!(has.semver, Some((0, 2, 0)));
+
+        // Binary has no semver to give (both on the legacy scheme).
+        let mut running = parse_llama_build_info("b10380-0b1bad14f");
+        let legacy = parse_llama_build_info("version: 10380 (0b1bad14f)");
+        assert!(!borrow_semver_from_binary(&mut running, &legacy));
     }
 
     /// An older cache has no version_comparable field; it must deserialize as

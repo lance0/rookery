@@ -659,7 +659,24 @@ async fn main() {
                     .unwrap_or(8081);
 
                 if current.is_running() {
-                    releases::detect_llama_version_from_props(port).await.ok()
+                    let mut v = releases::detect_llama_version_from_props(port).await.ok();
+                    // /props reports "bNNNNN-sha" with no semver, and llama.cpp's
+                    // release tags are semver as of v0.2.0 — so on its own the
+                    // running server can never be compared against a tag. Borrow
+                    // the semver off the binary's --version banner, but only when
+                    // both agree on the build number.
+                    if let Some(ref mut v) = v
+                        && v.semver.is_none()
+                        && let Ok(from_binary) =
+                            releases::detect_llama_version(&config.llama_server).await
+                        && releases::borrow_semver_from_binary(v, &from_binary)
+                    {
+                        tracing::debug!(
+                            build = ?v.build_number,
+                            "release monitor: took semver from the llama-server binary banner"
+                        );
+                    }
+                    v
                 } else {
                     releases::detect_llama_version(&config.llama_server)
                         .await
