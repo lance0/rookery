@@ -684,20 +684,30 @@ async fn main() {
                 Ok(Some((release, new_etag))) => {
                     let mut cache = release_state.release_cache.write().await;
                     let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
-                    let (update, ahead) = current_version
+                    let comparison = current_version
                         .as_ref()
-                        .map(|v| releases::compare_llama_versions(v, &release.tag_name))
-                        .unwrap_or((false, false));
+                        .and_then(|v| releases::compare_llama_versions(v, &release.tag_name));
+                    if comparison.is_none() {
+                        tracing::warn!(
+                            tag = %release.tag_name,
+                            current = current_version.as_ref().map(|v| v.raw.as_str()),
+                            "release monitor: cannot compare llama.cpp versions; \
+                             reporting unknown rather than up-to-date"
+                        );
+                    }
+                    let (update, ahead) = comparison.unwrap_or((false, false));
                     repo_state.latest = Some(release);
                     repo_state.current_version = current_version.clone();
                     repo_state.update_available = update;
                     repo_state.ahead_of_release = ahead;
+                    repo_state.version_comparable = comparison.is_some();
                     repo_state.checked_at = Some(chrono::Utc::now());
                     repo_state.etag = new_etag;
                     tracing::info!(
                         tag = repo_state.latest.as_ref().map(|r| r.tag_name.as_str()),
                         update_available = update,
                         ahead = ahead,
+                        comparable = comparison.is_some(),
                         "release monitor: checked llama.cpp"
                     );
                 }
@@ -706,14 +716,15 @@ async fn main() {
                     let mut cache = release_state.release_cache.write().await;
                     let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
                     if let Some(ref cv) = current_version {
-                        let (update, ahead) = repo_state
+                        let comparison = repo_state
                             .latest
                             .as_ref()
-                            .map(|r| releases::compare_llama_versions(cv, &r.tag_name))
-                            .unwrap_or((false, false));
+                            .and_then(|r| releases::compare_llama_versions(cv, &r.tag_name));
+                        let (update, ahead) = comparison.unwrap_or((false, false));
                         repo_state.current_version = Some(cv.clone());
                         repo_state.update_available = update;
                         repo_state.ahead_of_release = ahead;
+                        repo_state.version_comparable = comparison.is_some();
                     }
                     repo_state.checked_at = Some(chrono::Utc::now());
                 }

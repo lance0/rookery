@@ -4,6 +4,44 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
+## 0.1.10 — 2026-08-21
+
+A single fix, cut same-day as 0.1.9 because it is the exact failure class 0.1.9
+was about — and because it was actively lying on the maintainer's own box.
+
+### Fixed
+
+- **`rookery releases` reported "✓ up to date" for llama.cpp while 193 commits
+  behind.** On 2026-08-21 ggml-org moved from `bNNNNN` release tags to semver
+  (`v0.2.0`), and **both** halves of the comparison stopped parsing at once. The
+  binary's own banner changed from `version: 10380 (0b1bad14f)` to
+  `version: 0.2.0-dev (build 10566, commit bb4caa754)`, so `build_number` came
+  back `None`; and `parse_tag_build_number("v0.2.0")` returned `None` because it
+  only ever stripped a leading `b`. Either failure alone made
+  `compare_llama_versions` return `(false, false)` — indistinguishable, to every
+  caller, from a genuine match. The CLI's final `else` then printed
+  "✓ up to date".
+- **The root cause was the signature, not the parsers.** `(bool, bool)` had no
+  way to say "could not compare", so a parse failure had to borrow the encoding
+  meaning "current". `compare_llama_versions` now returns
+  `Option<(bool, bool)>`, `RepoReleaseState` carries `version_comparable`, and
+  the CLI renders the unknown case as **`? unknown (version schemes differ)`**.
+  A future upstream format change now surfaces as unknown instead of going
+  quiet again.
+- **Semver support fixes vLLM's row too.** vLLM has always tagged `vX.Y.Z`, so
+  its comparison never worked — 0.1.9's changelog documented that as a known
+  limitation rather than a bug. Both repos now compare correctly.
+- Prerelease suffixes are **discarded rather than ordered**: llama.cpp stamps
+  `-dev` even on a build made from the release tag itself, so treating
+  `0.2.0-dev < 0.2.0` would have reported an update forever while sitting
+  exactly on the release. The trade-off is noted in the source.
+- `version_comparable` defaults to `true` when absent, so a release cache
+  written by an older daemon does not turn every row into "unknown" on upgrade.
+
+Six new tests, including the exact banner and tag strings that produced the
+false negative, and one asserting an old `bNNNNN` binary against a semver tag
+reports unknown rather than either answer. (LAN-1152)
+
 ## 0.1.9 — 2026-08-21
 
 The largest release on the 0.1.x line: 44 tickets over 86 commits. One theme

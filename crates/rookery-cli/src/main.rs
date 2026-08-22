@@ -1176,7 +1176,12 @@ async fn cmd_releases(client: &DaemonClient, json: bool) -> Result<(), Box<dyn s
         let current = repo["current_version"]["raw"].as_str().unwrap_or("unknown");
         let latest = repo["latest"]["tag_name"].as_str().unwrap_or("unknown");
 
-        let status = if repo["ahead_of_release"].as_bool().unwrap_or(false) {
+        // version_comparable defaults true so a daemon that predates the field
+        // keeps its old output; false means the two version schemes could not be
+        // compared, which is NOT the same as being up to date.
+        let status = if !repo["version_comparable"].as_bool().unwrap_or(true) {
+            "\x1b[33m? unknown (version schemes differ)\x1b[0m"
+        } else if repo["ahead_of_release"].as_bool().unwrap_or(false) {
             "\x1b[34m✓ ahead of latest release\x1b[0m"
         } else if repo["update_available"].as_bool().unwrap_or(false) {
             "\x1b[33m⬆ update available\x1b[0m"
