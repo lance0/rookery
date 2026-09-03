@@ -242,9 +242,8 @@ pub struct SglangConfig {
     // ── container plumbing ───────────────────────────────────────────
     /// Host HuggingFace cache, bind-mounted to `/hf` with `HF_HOME` pointed at it.
     ///
-    /// Unset resolves at launch to `$HF_HOME`, else `~/.cache/huggingface` —
-    /// the standard locations. Set it explicitly only if your models live
-    /// somewhere else.
+    /// Unset resolves at launch to `$HF_HOME`, else `~/.cache/huggingface`.
+    /// Set it explicitly only if your models live somewhere else.
     #[serde(default)]
     pub hf_cache: Option<String>,
 

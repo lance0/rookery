@@ -14,10 +14,10 @@ HF_HOME ?= $(HOME)/.cache/huggingface
 build:
 	cargo build --release
 
-# --remap-path-prefix keeps the builder's absolute paths out of the artifact.
-# dist/ is COMMITTED (rookeryd embeds it via include_dir!), and rustc bakes source
-# paths into dependency panic messages -- so without this the repo carries 68
-# copies of whoever's $HOME last ran `make dashboard`.
+# --remap-path-prefix keeps absolute build paths out of the artifact. dist/ is
+# committed (rookeryd embeds it via include_dir!) and rustc bakes source paths
+# into dependency panic messages, so without this the checked-in bundle carries
+# the build machine's directory layout.
 dashboard:
 	cd crates/rookery-dashboard && \
 	RUSTFLAGS="--remap-path-prefix=$(HOME)/.cargo/registry=/cargo/registry --remap-path-prefix=$(HOME)/.rustup=/rustup --remap-path-prefix=$(CURDIR)=/build $$RUSTFLAGS" \

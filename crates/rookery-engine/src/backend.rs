@@ -787,8 +787,7 @@ impl SglangBackend {
         })?;
 
         // Resolve the host HF cache: explicit config, else $HF_HOME, else the
-        // standard ~/.cache/huggingface. Never a hardcoded absolute path — this
-        // is a library default that ships to everyone.
+        // standard ~/.cache/huggingface.
         let hf_cache = cfg
             .hf_cache
             .clone()
