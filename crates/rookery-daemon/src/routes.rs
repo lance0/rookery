@@ -606,7 +606,16 @@ pub async fn get_profiles(State(state): State<Arc<AppState>>) -> Json<serde_json
                 "name": name,
                 "model": p.model,
                 "port": p.port,
-                "ctx_size": ls.as_ref().map(|c| c.ctx_size),
+                // Container backends have no llama_server sub-table, so fall back
+                // to their own context setting rather than reporting none —
+                // `rookery profiles` renders an SGLang row with no context
+                // otherwise, which reads like a broken profile.
+                "ctx_size": ls.as_ref().map(|c| c.ctx_size).or_else(|| {
+                    p.sglang
+                        .as_ref()
+                        .and_then(|s| s.context_length)
+                        .map(|c| c as u32)
+                }),
                 "reasoning_budget": ls.as_ref().map(|c| c.reasoning_budget),
                 "backend": p.backend_type().to_string(),
                 "default": is_default,
