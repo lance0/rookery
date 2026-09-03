@@ -737,3 +737,176 @@ mod tests {
         );
     }
 }
+
+// --- Backend-aware release tracking ---
+
+/// The upstream repo for a backend.
+///
+/// Only the running backend's repo is worth checking: a box serving SGLang does
+/// not care that llama.cpp shipped a build an hour ago, and showing three rows
+/// where two are inert trains you to ignore the panel.
+pub fn repo_for_backend(backend: rookery_core::config::BackendType) -> &'static str {
+    use rookery_core::config::BackendType as B;
+    match backend {
+        B::LlamaServer => "ggml-org/llama.cpp",
+        B::Vllm => "vllm-project/vllm",
+        B::Sglang => "sgl-project/sglang",
+    }
+}
+
+/// Parse SGLang's PEP 440 version, e.g. `0.0.0.dev1+g07c8f7294.d20260901`.
+///
+/// Nightly images report `0.0.0.dev<n>`, so the semver carries no information at
+/// all — the git hash and the build date are the only real identity. The date is
+/// what makes a comparison against a release possible.
+pub fn parse_sglang_version(raw: &str) -> VersionInfo {
+    let raw = raw.trim().to_string();
+
+    let commit_hash = raw
+        .split('+')
+        .nth(1)
+        .and_then(|s| s.split('.').find(|p| p.starts_with('g')))
+        .map(|s| s.trim_start_matches('g').to_string());
+
+    // `.dYYYYMMDD` — the only monotonic field a nightly gives us.
+    let build_number = raw
+        .split('.')
+        .find(|p| p.starts_with('d') && p.len() == 9 && p[1..].chars().all(|c| c.is_ascii_digit()))
+        .and_then(|s| s[1..].parse::<u32>().ok());
+
+    let semver = parse_semver(&raw);
+    let is_dev = raw.contains(".dev") || raw.contains('+');
+
+    VersionInfo {
+        raw,
+        build_number,
+        commit_hash,
+        semver,
+        is_dev,
+    }
+}
+
+/// Compare a container backend's build against its newest release.
+///
+/// Returns `Some((update_available, ahead_of_release))`, or `None` when the two
+/// cannot be compared honestly.
+///
+/// A nightly reports `0.0.0.dev1`, which is not a version anyone can order
+/// against `v0.5.18` — so semver is useless here and the build DATE is compared
+/// against the release's publish date instead. That is a real signal: a nightly
+/// built after the newest release genuinely is ahead of it.
+pub fn compare_dated_build(
+    current: &VersionInfo,
+    latest_tag: &str,
+    latest_published: Option<DateTime<Utc>>,
+) -> Option<(bool, bool)> {
+    // A real semver on both sides (a tagged image, not a nightly) orders normally.
+    if let (Some(cur), Some(latest)) = (current.semver, parse_semver(latest_tag))
+        && cur != (0, 0, 0)
+    {
+        return Some((cur < latest, cur > latest));
+    }
+
+    // Otherwise fall back to build date vs release date.
+    let built = current.build_number?; // YYYYMMDD
+    let published = latest_published?;
+    let rel: u32 = published.format("%Y%m%d").to_string().parse().ok()?;
+    Some((built < rel, built > rel))
+}
+
+#[cfg(test)]
+mod backend_release_tests {
+    use super::*;
+    use rookery_core::config::BackendType;
+
+    #[test]
+    fn maps_each_backend_to_its_own_upstream() {
+        assert_eq!(
+            repo_for_backend(BackendType::LlamaServer),
+            "ggml-org/llama.cpp"
+        );
+        assert_eq!(repo_for_backend(BackendType::Vllm), "vllm-project/vllm");
+        assert_eq!(repo_for_backend(BackendType::Sglang), "sgl-project/sglang");
+    }
+
+    /// The exact string our running SGLang reports.
+    #[test]
+    fn parses_sglang_nightly_version() {
+        let v = parse_sglang_version("0.0.0.dev1+g07c8f7294.d20260901");
+        assert_eq!(v.commit_hash.as_deref(), Some("07c8f7294"));
+        assert_eq!(
+            v.build_number,
+            Some(20260901),
+            "the date is the only ordering we get"
+        );
+        assert!(v.is_dev);
+    }
+
+    /// A nightly built after the newest release is ahead of it — reporting
+    /// "update available" there would send you backwards, which is exactly the
+    /// mistake the llama.cpp row was making with v0.3.0.
+    #[test]
+    fn nightly_newer_than_latest_release_reads_as_ahead() {
+        let v = parse_sglang_version("0.0.0.dev1+g07c8f7294.d20260901");
+        let published = "2026-08-22T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            compare_dated_build(&v, "v0.5.18", Some(published)),
+            Some((false, true))
+        );
+    }
+
+    #[test]
+    fn nightly_older_than_latest_release_reads_as_update() {
+        let v = parse_sglang_version("0.0.0.dev1+gabc.d20260801");
+        let published = "2026-08-22T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            compare_dated_build(&v, "v0.5.18", Some(published)),
+            Some((true, false))
+        );
+    }
+
+    /// No date and no usable semver means no honest answer.
+    #[test]
+    fn undatable_build_is_incomparable_not_up_to_date() {
+        let v = parse_sglang_version("0.0.0.dev1");
+        assert_eq!(compare_dated_build(&v, "v0.5.18", None), None);
+    }
+
+    /// A properly tagged image still orders by semver rather than by date.
+    #[test]
+    fn tagged_image_uses_semver() {
+        let v = parse_sglang_version("0.5.17");
+        assert_eq!(
+            compare_dated_build(&v, "v0.5.18", None),
+            Some((true, false))
+        );
+    }
+}
+
+/// Read the running SGLang's version from `/get_server_info`.
+///
+/// Nightly images report `0.0.0.dev1+g<hash>.d<YYYYMMDD>`; see
+/// [`parse_sglang_version`] for why the date rather than the semver is the
+/// usable half.
+pub async fn detect_sglang_version(port: u16) -> Result<VersionInfo, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("build client: {e}"))?;
+
+    let resp: serde_json::Value = client
+        .get(format!("http://127.0.0.1:{port}/get_server_info"))
+        .send()
+        .await
+        .map_err(|e| format!("get_server_info request: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("get_server_info parse: {e}"))?;
+
+    let v = resp["version"]
+        .as_str()
+        .ok_or_else(|| "get_server_info: no version field".to_string())?;
+
+    Ok(parse_sglang_version(v))
+}

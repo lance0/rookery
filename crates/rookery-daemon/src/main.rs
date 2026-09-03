@@ -655,8 +655,10 @@ async fn main() {
                 return;
             }
 
-            // Detect current llama-server version
-            let current_version = {
+            // Which upstream matters is whatever is actually running. A box
+            // serving SGLang does not care that llama.cpp shipped a build an
+            // hour ago, and rendering inert rows trains you to ignore the panel.
+            let (active_backend, active_port) = {
                 let current = release_state.current_state().await;
                 let config = release_state.config.read().await;
                 let port = current
@@ -664,98 +666,194 @@ async fn main() {
                     .and_then(|p| config.profiles.get(p))
                     .map(|p| p.port)
                     .unwrap_or(8081);
-
-                if current.is_running() {
-                    let mut v = releases::detect_llama_version_from_props(port).await.ok();
-                    // /props reports "bNNNNN-sha" with no semver, and llama.cpp's
-                    // release tags are semver as of v0.2.0 — so on its own the
-                    // running server can never be compared against a tag. Borrow
-                    // the semver off the binary's --version banner, but only when
-                    // both agree on the build number.
-                    if let Some(ref mut v) = v
-                        && v.semver.is_none()
-                        && let Ok(from_binary) =
-                            releases::detect_llama_version(&config.llama_server).await
-                        && releases::borrow_semver_from_binary(v, &from_binary)
-                    {
-                        tracing::debug!(
-                            build = ?v.build_number,
-                            "release monitor: took semver from the llama-server binary banner"
-                        );
-                    }
-                    v
-                } else {
-                    releases::detect_llama_version(&config.llama_server)
-                        .await
-                        .ok()
-                }
+                let backend = match &current {
+                    rookery_core::state::ServerState::Running { backend_type, .. } => *backend_type,
+                    // Nothing running: fall back to what the default profile
+                    // would start, so the panel is still about this machine.
+                    _ => config
+                        .profiles
+                        .get(&config.default_profile)
+                        .map(|p| p.backend_type())
+                        .unwrap_or_default(),
+                };
+                (backend, port)
             };
+            let active_repo = releases::repo_for_backend(active_backend);
 
-            // Clone etag before the GitHub API call to avoid holding read lock
-            let cached_etag = release_state
-                .release_cache
-                .read()
-                .await
-                .get("ggml-org/llama.cpp")
-                .and_then(|s| s.etag.clone());
+            // Container backends report their own version; only llama.cpp needs
+            // the /props-plus-binary-banner dance below.
+            if active_backend != rookery_core::config::BackendType::LlamaServer {
+                let current_version = match active_backend {
+                    rookery_core::config::BackendType::Sglang => {
+                        releases::detect_sglang_version(active_port).await.ok()
+                    }
+                    _ => None,
+                };
+                let cached_etag = release_state
+                    .release_cache
+                    .read()
+                    .await
+                    .get(active_repo)
+                    .and_then(|s| s.etag.clone());
 
-            // Check llama.cpp
-            match release_state
-                .github_client
-                .latest_release("ggml-org/llama.cpp", cached_etag.as_deref())
-                .await
-            {
-                Ok(Some((release, new_etag))) => {
-                    let mut cache = release_state.release_cache.write().await;
-                    let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
-                    let comparison = current_version
-                        .as_ref()
-                        .and_then(|v| releases::compare_llama_versions(v, &release.tag_name));
-                    if comparison.is_none() {
-                        tracing::warn!(
-                            tag = %release.tag_name,
-                            current = current_version.as_ref().map(|v| v.raw.as_str()),
-                            "release monitor: cannot compare llama.cpp versions; \
-                             reporting unknown rather than up-to-date"
+                match release_state
+                    .github_client
+                    .latest_release(active_repo, cached_etag.as_deref())
+                    .await
+                {
+                    Ok(Some((release, new_etag))) => {
+                        let mut cache = release_state.release_cache.write().await;
+                        let st = cache.get_or_insert(active_repo);
+                        let cmp = current_version.as_ref().and_then(|v| {
+                            releases::compare_dated_build(
+                                v,
+                                &release.tag_name,
+                                release.published_at,
+                            )
+                        });
+                        if cmp.is_none() {
+                            tracing::warn!(
+                                repo = active_repo,
+                                tag = %release.tag_name,
+                                current = current_version.as_ref().map(|v| v.raw.as_str()),
+                                "release monitor: cannot compare versions; reporting unknown"
+                            );
+                        }
+                        let (update, ahead) = cmp.unwrap_or((false, false));
+                        st.latest = Some(release);
+                        st.current_version = current_version.clone();
+                        st.update_available = update;
+                        st.ahead_of_release = ahead;
+                        st.version_comparable = cmp.is_some();
+                        st.checked_at = Some(chrono::Utc::now());
+                        st.etag = new_etag;
+                        tracing::info!(
+                            repo = active_repo,
+                            update_available = update,
+                            ahead,
+                            comparable = cmp.is_some(),
+                            "release monitor: checked container backend"
                         );
                     }
-                    let (update, ahead) = comparison.unwrap_or((false, false));
-                    repo_state.latest = Some(release);
-                    repo_state.current_version = current_version.clone();
-                    repo_state.update_available = update;
-                    repo_state.ahead_of_release = ahead;
-                    repo_state.version_comparable = comparison.is_some();
-                    repo_state.checked_at = Some(chrono::Utc::now());
-                    repo_state.etag = new_etag;
-                    tracing::info!(
-                        tag = repo_state.latest.as_ref().map(|r| r.tag_name.as_str()),
-                        update_available = update,
-                        ahead = ahead,
-                        comparable = comparison.is_some(),
-                        "release monitor: checked llama.cpp"
-                    );
+                    Ok(None) => {
+                        let mut cache = release_state.release_cache.write().await;
+                        let st = cache.get_or_insert(active_repo);
+                        st.checked_at = Some(chrono::Utc::now());
+                    }
+                    Err(e) => {
+                        tracing::warn!(repo = active_repo, error = %e,
+                            "release monitor: failed to check container backend");
+                    }
                 }
-                Ok(None) => {
-                    // 304 Not Modified — update timestamp and current version only
-                    let mut cache = release_state.release_cache.write().await;
-                    let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
-                    if let Some(ref cv) = current_version {
-                        let comparison = repo_state
-                            .latest
+            }
+
+            // The llama.cpp path below is skipped for container backends, but we
+            // must NOT `continue` past the loop tail: it owns cache persistence
+            // and the shutdown-aware sleep, so skipping it would make the
+            // monitor ignore shutdown.
+            if active_backend == rookery_core::config::BackendType::LlamaServer {
+                // Detect current llama-server version
+                let current_version = {
+                    let current = release_state.current_state().await;
+                    let config = release_state.config.read().await;
+                    let port = current
+                        .profile_name()
+                        .and_then(|p| config.profiles.get(p))
+                        .map(|p| p.port)
+                        .unwrap_or(8081);
+
+                    if current.is_running() {
+                        let mut v = releases::detect_llama_version_from_props(port).await.ok();
+                        // /props reports "bNNNNN-sha" with no semver, and llama.cpp's
+                        // release tags are semver as of v0.2.0 — so on its own the
+                        // running server can never be compared against a tag. Borrow
+                        // the semver off the binary's --version banner, but only when
+                        // both agree on the build number.
+                        if let Some(ref mut v) = v
+                            && v.semver.is_none()
+                            && let Ok(from_binary) =
+                                releases::detect_llama_version(&config.llama_server).await
+                            && releases::borrow_semver_from_binary(v, &from_binary)
+                        {
+                            tracing::debug!(
+                                build = ?v.build_number,
+                                "release monitor: took semver from the llama-server binary banner"
+                            );
+                        }
+                        v
+                    } else {
+                        releases::detect_llama_version(&config.llama_server)
+                            .await
+                            .ok()
+                    }
+                };
+
+                // Clone etag before the GitHub API call to avoid holding read lock
+                let cached_etag = release_state
+                    .release_cache
+                    .read()
+                    .await
+                    .get("ggml-org/llama.cpp")
+                    .and_then(|s| s.etag.clone());
+
+                // Check llama.cpp
+                match release_state
+                    .github_client
+                    .latest_release("ggml-org/llama.cpp", cached_etag.as_deref())
+                    .await
+                {
+                    Ok(Some((release, new_etag))) => {
+                        let mut cache = release_state.release_cache.write().await;
+                        let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
+                        let comparison = current_version
                             .as_ref()
-                            .and_then(|r| releases::compare_llama_versions(cv, &r.tag_name));
+                            .and_then(|v| releases::compare_llama_versions(v, &release.tag_name));
+                        if comparison.is_none() {
+                            tracing::warn!(
+                                tag = %release.tag_name,
+                                current = current_version.as_ref().map(|v| v.raw.as_str()),
+                                "release monitor: cannot compare llama.cpp versions; \
+                                 reporting unknown rather than up-to-date"
+                            );
+                        }
                         let (update, ahead) = comparison.unwrap_or((false, false));
-                        repo_state.current_version = Some(cv.clone());
+                        repo_state.latest = Some(release);
+                        repo_state.current_version = current_version.clone();
                         repo_state.update_available = update;
                         repo_state.ahead_of_release = ahead;
                         repo_state.version_comparable = comparison.is_some();
+                        repo_state.checked_at = Some(chrono::Utc::now());
+                        repo_state.etag = new_etag;
+                        tracing::info!(
+                            tag = repo_state.latest.as_ref().map(|r| r.tag_name.as_str()),
+                            update_available = update,
+                            ahead = ahead,
+                            comparable = comparison.is_some(),
+                            "release monitor: checked llama.cpp"
+                        );
                     }
-                    repo_state.checked_at = Some(chrono::Utc::now());
+                    Ok(None) => {
+                        // 304 Not Modified — update timestamp and current version only
+                        let mut cache = release_state.release_cache.write().await;
+                        let repo_state = cache.get_or_insert("ggml-org/llama.cpp");
+                        if let Some(ref cv) = current_version {
+                            let comparison = repo_state
+                                .latest
+                                .as_ref()
+                                .and_then(|r| releases::compare_llama_versions(cv, &r.tag_name));
+                            let (update, ahead) = comparison.unwrap_or((false, false));
+                            repo_state.current_version = Some(cv.clone());
+                            repo_state.update_available = update;
+                            repo_state.ahead_of_release = ahead;
+                            repo_state.version_comparable = comparison.is_some();
+                        }
+                        repo_state.checked_at = Some(chrono::Utc::now());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "release monitor: failed to check llama.cpp");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "release monitor: failed to check llama.cpp");
-                }
-            }
+            } // end llama.cpp-only branch
 
             // Persist cache
             let cache = release_state.release_cache.read().await;
