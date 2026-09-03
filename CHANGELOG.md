@@ -7,6 +7,36 @@
 
 
 
+
+## 0.1.14
+
+### Fixed
+
+- **`make install` no longer generates a systemd unit that runs the daemon as
+  root.** `install` needs root to write `/usr/local/bin` and
+  `/etc/systemd/system`, so it is normally run under `sudo` — where `whoami` is
+  `root` and `$(HOME)` is `/root`. Both were substituted into the unit, so the
+  daemon started as root, failed to find config at
+  `/root/.config/rookery/config.toml`, and crash-looped until systemd gave up
+  with "start request repeated too quickly". `SERVICE_USER` now prefers
+  `SUDO_USER`, and `HF_HOME` resolves against the invoking user's home. A
+  non-sudo install still falls back to `whoami`.
+- **`make install` now prints the `User` and `HF_HOME` it baked into the unit.**
+  Both were substituted silently, and a wrong `HF_HOME` is not merely cosmetic:
+  container backends bind-mount it, so pointing it at root's home hides every
+  model on the machine. Both are overridable:
+  `sudo make install SERVICE_USER=you HF_HOME=/path/to/models`.
+- **The releases view shows only the running backend's upstream.** The cache is
+  keyed by repo and entries persist, so serving it whole left a row for whatever
+  engine was running at each past check. A backend not yet polled returns an
+  explicit not-yet-checked row rather than the previous engine's numbers.
+
+### Notes
+
+- `make install` has always advised `systemctl daemon-reload` afterwards; it now
+  says the unit changed and the reload is required. Skipping it leaves systemd
+  running a cached unit that has silently diverged from the installed one.
+
 ## 0.1.13
 
 ### Fixed

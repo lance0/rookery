@@ -1,8 +1,20 @@
 PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 SYSTEMD_DIR = /etc/systemd/system
-SERVICE_USER ?= $(shell whoami)
-HF_HOME ?= $(HOME)/.cache/huggingface
+# `install` needs root to write /usr/local/bin and /etc/systemd/system, so it is
+# normally run under sudo -- where `whoami` is root and $(HOME) is /root. Baking
+# those into the unit makes the daemon run as root and look for config in
+# /root/.config/rookery, which does not exist; it then crash-loops until systemd
+# gives up with "start request repeated too quickly".
+#
+# SUDO_USER is the invoking user, so prefer it. Falling back to `whoami` keeps a
+# non-sudo install (a custom PREFIX in $HOME) working.
+SERVICE_USER ?= $(or $(SUDO_USER),$(shell whoami))
+# Likewise resolve HF_HOME against the invoking user's home, not root's -- a
+# container backend bind-mounts this, so /root/.cache/huggingface would also
+# hide every model on the box.
+SERVICE_HOME ?= $(shell getent passwd $(SERVICE_USER) | cut -d: -f6)
+HF_HOME ?= $(if $(SERVICE_HOME),$(SERVICE_HOME),$(HOME))/.cache/huggingface
 
 .PHONY: build install uninstall enable disable restart dashboard clean test chaos-test
 
@@ -46,10 +58,17 @@ install: dashboard build
 	install -m 644 rookery.service.generated $(DESTDIR)$(SYSTEMD_DIR)/rookery.service
 	@rm -f rookery.service.generated
 	@echo "Installed rookery.service to $(SYSTEMD_DIR)"
+	@echo "  User=$(SERVICE_USER)"
+	@echo "  HF_HOME=$(HF_HOME)"
+	@echo ""
+	@echo "  ^ check both. The daemon reads config from ~USER/.config/rookery and"
+	@echo "    bind-mounts HF_HOME for container backends; wrong values crash-loop"
+	@echo "    or hide your models. Override with:"
+	@echo "      sudo make install SERVICE_USER=you HF_HOME=/path/to/models"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  sudo systemctl daemon-reload"
-	@echo "  sudo systemctl enable --now rookery"
+	@echo "  sudo systemctl daemon-reload   # REQUIRED: the unit changed on disk"
+	@echo "  sudo systemctl restart rookery"
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/rookeryd
