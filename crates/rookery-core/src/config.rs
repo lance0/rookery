@@ -233,6 +233,12 @@ pub struct SglangConfig {
     #[serde(default = "default_true")]
     pub trust_remote_code: bool,
 
+    /// Exposes Prometheus `/metrics`, which the dashboard scrapes for KV and
+    /// GDN-state-pool utilisation, accept length, and cache hit rate. SGLang
+    /// serves nothing useful on /metrics without it. Cheap; on by default.
+    #[serde(default = "default_true")]
+    pub enable_metrics: bool,
+
     // ── container plumbing ───────────────────────────────────────────
     /// Host HF cache, bind-mounted to /hf with HF_HOME pointed at it.
     #[serde(default = "default_sglang_hf_cache")]

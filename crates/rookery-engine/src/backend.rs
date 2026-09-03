@@ -875,6 +875,10 @@ impl SglangBackend {
         opt!("--reasoning-parser", cfg.reasoning_parser);
         opt!("--tool-call-parser", cfg.tool_call_parser);
 
+        if cfg.enable_metrics {
+            a.push("--enable-metrics".into());
+        }
+
         if cfg.language_model_only {
             a.push("--json-model-override-args".into());
             // ONE argv element, inner quotes intact.
@@ -4028,6 +4032,7 @@ mod sglang_tests {
             tool_call_parser: Some("qwen3_coder".into()),
             language_model_only: true,
             trust_remote_code: true,
+            enable_metrics: true,
             hf_cache: "/home/lance/models/cache".into(),
             shm_size: "16g".into(),
             env: HashMap::new(),
@@ -4093,6 +4098,7 @@ mod sglang_tests {
     fn argv_carries_the_measured_working_flags() {
         let argv = SglangBackend::build_docker_argv("qwen38_sglang", &sglang_profile()).unwrap();
         let joined = argv.join(" ");
+        assert!(joined.contains("--enable-metrics"));
         for expected in [
             "--speculative-algorithm DFLASH",
             "--speculative-num-draft-tokens 8",

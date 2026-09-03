@@ -11,13 +11,17 @@ pub(crate) enum StatsCard {
     Slot(serde_json::Value),
 }
 
-/// Why we have no slot data. vLLM has no `/slots` endpoint at all; llama-server
-/// can still miss it (`--no-slots`, 404, or the port gone mid-swap).
-fn no_slots_reason(is_vllm: bool) -> &'static str {
-    if is_vllm {
-        "N/A — vLLM does not expose /slots"
-    } else {
-        "N/A — stats unavailable"
+/// Why we have no slot data.
+///
+/// `/slots` is a llama-server endpoint. Container backends do not implement it
+/// at all, so "unavailable" there is the normal steady state, not a fault —
+/// saying so plainly stops it reading like something is broken. llama-server
+/// itself can still miss it (`--no-slots`, 404, or the port gone mid-swap).
+fn no_slots_reason(backend: Option<&str>) -> &'static str {
+    match backend {
+        Some("vllm") => "N/A — vLLM does not expose /slots",
+        Some("sglang") => "N/A — SGLang does not expose /slots",
+        _ => "N/A — stats unavailable",
     }
 }
 
@@ -28,13 +32,13 @@ fn no_slots_reason(is_vllm: bool) -> &'static str {
 /// missing on every backend.
 pub(crate) fn stats_card(
     is_running: bool,
-    is_vllm: bool,
+    backend: Option<&str>,
     stats: Option<&serde_json::Value>,
 ) -> StatsCard {
     let Some(s) = stats else {
         // No payload at all — only "not running" if the server really is.
         return if is_running {
-            StatsCard::Unavailable(no_slots_reason(is_vllm))
+            StatsCard::Unavailable(no_slots_reason(backend))
         } else {
             StatsCard::NotRunning
         };
@@ -46,7 +50,7 @@ pub(crate) fn stats_card(
         .and_then(|a| a.first())
     {
         Some(slot) => StatsCard::Slot(slot.clone()),
-        None => StatsCard::Unavailable(no_slots_reason(is_vllm)),
+        None => StatsCard::Unavailable(no_slots_reason(backend)),
     }
 }
 
@@ -85,9 +89,20 @@ pub fn ServerStats(
     let content = move || {
         let current_status = status.get();
         let is_running = current_status.state == "running";
-        let is_vllm = current_status.backend.as_deref() == Some("vllm");
+        let backend = current_status.backend.as_deref();
 
-        let slot = match stats_card(is_running, is_vllm, stats.get().as_ref()) {
+        // SGLang exposes no /slots, but its Prometheus scrape carries strictly
+        // more than llama-server's slot payload — including mamba_usage, the
+        // GDN state pool, which is the resource that actually runs out first on
+        // a 32GB card. Render that instead of an "unavailable" placeholder.
+        if backend == Some("sglang")
+            && let Some(m) = stats.get().as_ref().and_then(|s| s.get("sglang").cloned())
+            && m.as_object().is_some_and(|o| !o.is_empty())
+        {
+            return sglang_card(&m);
+        }
+
+        let slot = match stats_card(is_running, backend, stats.get().as_ref()) {
             StatsCard::Slot(slot) => slot,
             StatsCard::Unavailable(reason) => return unavailable(reason),
             StatsCard::NotRunning => {
@@ -158,6 +173,104 @@ pub fn ServerStats(
     view! { <div>{content}</div> }
 }
 
+/// Render SGLang's telemetry. Separate from the llama-server slot card because
+/// the shape is different, not merely the field names.
+fn sglang_card(m: &serde_json::Value) -> leptos::prelude::AnyView {
+    use leptos::prelude::*;
+
+    let num = |k: &str| m.get(k).and_then(|v| v.as_f64());
+    let pct = |v: Option<f64>| match v {
+        Some(x) if x.is_finite() => format!("{:.1}%", x * 100.0),
+        _ => "—".to_string(),
+    };
+    let int = |v: Option<f64>| match v {
+        Some(x) if x.is_finite() => {
+            // thousands separators; a bare 137735 is hard to read at a glance
+            let n = x as i64;
+            let sgn = if n < 0 { "-" } else { "" };
+            let d: Vec<char> = n.abs().to_string().chars().collect();
+            let mut out = String::new();
+            for (i, c) in d.iter().enumerate() {
+                if i > 0 && (d.len() - i).is_multiple_of(3) {
+                    out.push(',');
+                }
+                out.push(*c);
+            }
+            format!("{sgn}{out}")
+        }
+        _ => "—".to_string(),
+    };
+    let f2 = |v: Option<f64>| match v {
+        Some(x) if x.is_finite() => format!("{x:.2}"),
+        _ => "—".to_string(),
+    };
+
+    let kv_used = int(num("kv_used"));
+    let kv_total = int(num("kv_total"));
+    let kv_usage = pct(num("kv_usage"));
+    // The binding constraint on this card, so it gets its own tile.
+    let mamba = pct(num("mamba_usage"));
+    let accept_len = f2(num("accept_length"));
+    let accept_rate = pct(num("accept_rate"));
+    let cache_hit = pct(num("cache_hit_rate"));
+    let running = int(num("running_reqs"));
+    let queued = int(num("queued_reqs"));
+    let kv_gb = f2(num("kv_cache_gb"));
+
+    let busy = num("running_reqs").unwrap_or(0.0) > 0.0;
+    let status_text = if busy { "processing" } else { "idle" };
+    let status_class = if busy {
+        "badge running"
+    } else {
+        "badge stopped"
+    };
+
+    view! {
+        <div class="card">
+            <h2>"Server Stats"</h2>
+            <div class="stat-grid">
+                <div class="stat">
+                    <div class="stat-label">"Status"</div>
+                    <div><span class=status_class>{status_text}</span></div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"KV Used"</div>
+                    <div class="stat-value mono">{format!("{kv_used} / {kv_total}")}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"KV Usage"</div>
+                    <div class="stat-value mono">{kv_usage}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"GDN State Pool"</div>
+                    <div class="stat-value mono">{mamba}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"Accept Length"</div>
+                    <div class="stat-value mono">{accept_len}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"Accept Rate"</div>
+                    <div class="stat-value mono">{accept_rate}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"Prefix Cache Hit"</div>
+                    <div class="stat-value mono">{cache_hit}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"Requests"</div>
+                    <div class="stat-value mono">{format!("{running} run / {queued} queued")}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">"KV Cache"</div>
+                    <div class="stat-value mono">{format!("{kv_gb} GB")}</div>
+                </div>
+            </div>
+        </div>
+    }
+    .into_any()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +284,7 @@ mod tests {
     fn llama_server_null_slots_is_unavailable_not_zeros() {
         let stats = json!({"available": true, "slots": null});
         assert_eq!(
-            stats_card(true, false, Some(&stats)),
+            stats_card(true, Some("llama-server"), Some(&stats)),
             StatsCard::Unavailable("N/A — stats unavailable"),
             "missing slot data must not render as real zeros on llama-server"
         );
@@ -181,8 +294,29 @@ mod tests {
     fn vllm_null_slots_keeps_its_specific_reason() {
         let stats = json!({"available": true, "slots": null});
         assert_eq!(
-            stats_card(true, true, Some(&stats)),
+            stats_card(true, Some("vllm"), Some(&stats)),
             StatsCard::Unavailable("N/A — vLLM does not expose /slots")
+        );
+    }
+
+    /// SGLang is container-backed and has no `/slots`, same as vLLM. Falling
+    /// through to llama-server's generic "stats unavailable" would imply
+    /// something failed, when in fact the endpoint simply does not exist.
+    #[test]
+    fn sglang_null_slots_gets_its_own_reason() {
+        let stats = json!({"available": true, "slots": null});
+        assert_eq!(
+            stats_card(true, Some("sglang"), Some(&stats)),
+            StatsCard::Unavailable("N/A — SGLang does not expose /slots")
+        );
+    }
+
+    #[test]
+    fn unknown_backend_falls_back_to_generic_reason() {
+        let stats = json!({"available": true, "slots": null});
+        assert_eq!(
+            stats_card(true, None, Some(&stats)),
+            StatsCard::Unavailable("N/A — stats unavailable")
         );
     }
 
@@ -190,7 +324,7 @@ mod tests {
     fn empty_slots_array_is_also_unavailable() {
         let stats = json!({"available": true, "slots": []});
         assert_eq!(
-            stats_card(true, false, Some(&stats)),
+            stats_card(true, Some("llama-server"), Some(&stats)),
             StatsCard::Unavailable("N/A — stats unavailable")
         );
     }
@@ -199,7 +333,7 @@ mod tests {
     fn real_slot_data_still_renders() {
         let stats = json!({"available": true, "slots": [{"id": 0, "n_ctx": 131072}]});
         assert_eq!(
-            stats_card(true, false, Some(&stats)),
+            stats_card(true, Some("llama-server"), Some(&stats)),
             StatsCard::Slot(json!({"id": 0, "n_ctx": 131072}))
         );
     }
@@ -207,7 +341,7 @@ mod tests {
     #[test]
     fn no_payload_while_running_is_unavailable_on_any_backend() {
         assert_eq!(
-            stats_card(true, false, None),
+            stats_card(true, Some("llama-server"), None),
             StatsCard::Unavailable("N/A — stats unavailable"),
             "'server not running' is a lie when status says it is running"
         );
@@ -215,6 +349,9 @@ mod tests {
 
     #[test]
     fn no_payload_while_stopped_is_not_running() {
-        assert_eq!(stats_card(false, false, None), StatsCard::NotRunning);
+        assert_eq!(
+            stats_card(false, Some("llama-server"), None),
+            StatsCard::NotRunning
+        );
     }
 }

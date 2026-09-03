@@ -1135,8 +1135,10 @@ pub async fn get_server_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let current = state.current_state().await;
-    let port = match current {
-        rookery_core::state::ServerState::Running { port, .. } => port,
+    let (port, backend) = match current {
+        rookery_core::state::ServerState::Running {
+            port, backend_type, ..
+        } => (port, backend_type),
         _ => {
             return Ok(Json(serde_json::json!({ "available": false })));
         }
@@ -1147,7 +1149,7 @@ pub async fn get_server_stats(
         .build()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Fetch /slots (llama.cpp-specific — returns 404 for vLLM)
+    // Fetch /slots (llama.cpp-specific — returns 404 for vLLM and SGLang)
     let slots = if let Ok(resp) = client
         .get(format!("http://127.0.0.1:{port}/slots"))
         .send()
@@ -1159,10 +1161,82 @@ pub async fn get_server_stats(
         None
     };
 
+    // SGLang has no /slots, but exposes richer telemetry than llama-server does
+    // on Prometheus /metrics — including `mamba_usage`, which is the GDN state
+    // pool and the resource that actually runs out first on a 32GB card.
+    // Requires the server to have been started with --enable-metrics; absent
+    // that the scrape simply yields nothing and the field stays null.
+    let sglang = if backend == rookery_core::config::BackendType::Sglang {
+        match client
+            .get(format!("http://127.0.0.1:{port}/metrics"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                resp.text().await.ok().map(|b| parse_sglang_metrics(&b))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     Ok(Json(serde_json::json!({
         "available": true,
         "slots": slots,
+        "sglang": sglang,
     })))
+}
+
+/// Pull the handful of scalar gauges worth showing out of a Prometheus scrape.
+///
+/// Deliberately ignores histograms and `_bucket` series: they are most of the
+/// payload and none of the signal for a single-user dashboard. Labels are
+/// stripped, so a metric emitted per-engine collapses to its last value — fine
+/// here because we run one engine.
+fn parse_sglang_metrics(body: &str) -> serde_json::Value {
+    const WANTED: &[(&str, &str)] = &[
+        ("sglang:max_total_num_tokens", "kv_total"),
+        ("sglang:kv_used_tokens", "kv_used"),
+        ("sglang:kv_available_tokens", "kv_available"),
+        ("sglang:full_token_usage", "kv_usage"),
+        ("sglang:mamba_usage", "mamba_usage"),
+        ("sglang:mamba_used_tokens", "mamba_used"),
+        ("sglang:mamba_available_tokens", "mamba_available"),
+        ("sglang:cache_hit_rate", "cache_hit_rate"),
+        ("sglang:gen_throughput", "gen_throughput"),
+        ("sglang:spec_accept_length", "accept_length"),
+        ("sglang:spec_accept_rate", "accept_rate"),
+        ("sglang:num_running_reqs", "running_reqs"),
+        ("sglang:num_queue_reqs", "queued_reqs"),
+        ("sglang:context_len", "context_len"),
+        ("sglang:kv_cache_memory_usage_gb", "kv_cache_gb"),
+        ("sglang:weight_memory_usage_gb", "weight_gb"),
+        ("sglang:generation_tokens_total", "generated_total"),
+    ];
+
+    let mut out = serde_json::Map::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.contains("_bucket") {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.rsplit_once(' ') else {
+            continue;
+        };
+        let name = lhs.split('{').next().unwrap_or(lhs).trim();
+        let Some((_, key)) = WANTED.iter().find(|(m, _)| *m == name) else {
+            continue;
+        };
+        // NaN/Inf are real in this scrape (e.g. fwd_occupancy before traffic);
+        // drop them rather than emitting invalid JSON.
+        if let Ok(v) = rhs.trim().parse::<f64>()
+            && v.is_finite()
+            && let Some(n) = serde_json::Number::from_f64(v)
+        {
+            out.insert((*key).to_string(), serde_json::Value::Number(n));
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 // --- Logs ---
@@ -5870,5 +5944,60 @@ mod tests {
 
             let _ = shutdown_tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod sglang_metrics_tests {
+    use super::parse_sglang_metrics;
+
+    /// A trimmed but byte-faithful sample of what SGLang 0.5.18 actually emits,
+    /// including the parts that break naive parsers: HELP/TYPE comments, label
+    /// sets, histogram buckets, and a real NaN.
+    const SAMPLE: &str = r#"# HELP sglang:max_total_num_tokens Total KV tokens
+# TYPE sglang:max_total_num_tokens gauge
+sglang:max_total_num_tokens{engine_type="unified",model_name="qwen3.8-27b"} 137735.0
+sglang:kv_used_tokens{engine_type="unified",model_name="qwen3.8-27b"} 35.0
+sglang:mamba_usage{engine_type="unified",model_name="qwen3.8-27b"} 0.5
+sglang:spec_accept_length{engine_type="unified",model_name="qwen3.8-27b"} 6.22
+sglang:cache_hit_rate{engine_type="unified",model_name="qwen3.8-27b"} 0.0
+sglang:fwd_occupancy{engine_type="unified",model_name="qwen3.8-27b"} NaN
+sglang:uncached_prompt_tokens_histogram_bucket{le="100.0",model_name="qwen3.8-27b"} 2.0
+sglang:not_a_metric_we_want{model_name="x"} 99.0
+"#;
+
+    #[test]
+    fn extracts_the_gauges_we_render() {
+        let v = parse_sglang_metrics(SAMPLE);
+        assert_eq!(v["kv_total"], 137735.0);
+        assert_eq!(v["kv_used"], 35.0);
+        assert_eq!(v["mamba_usage"], 0.5);
+        assert_eq!(v["accept_length"], 6.22);
+        assert_eq!(v["cache_hit_rate"], 0.0);
+    }
+
+    /// NaN is real in this scrape before any traffic. serde_json cannot
+    /// represent it, so it must be dropped rather than panicking or emitting
+    /// invalid JSON.
+    #[test]
+    fn drops_non_finite_values() {
+        let v = parse_sglang_metrics(SAMPLE);
+        assert!(v.get("fwd_occupancy").is_none());
+    }
+
+    #[test]
+    fn ignores_histograms_comments_and_unwanted_series() {
+        let v = parse_sglang_metrics(SAMPLE);
+        let obj = v.as_object().unwrap();
+        assert!(!obj.keys().any(|k| k.contains("bucket")));
+        assert!(!obj.keys().any(|k| k.contains("not_a_metric")));
+        assert!(obj.len() >= 5, "expected the wanted gauges, got {obj:?}");
+    }
+
+    /// An SGLang started without --enable-metrics serves an empty body; that
+    /// must be an empty object, not a parse failure.
+    #[test]
+    fn empty_scrape_is_empty_object() {
+        assert_eq!(parse_sglang_metrics(""), serde_json::json!({}));
     }
 }

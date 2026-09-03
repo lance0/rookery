@@ -70,6 +70,7 @@ pub fn StatusCard(
         s.backend.as_ref().map(|b| {
             let label = match b.as_str() {
                 "vllm" => "vLLM",
+                "sglang" => "SGLang",
                 "llama-server" => "llama.cpp",
                 other => other,
             };
