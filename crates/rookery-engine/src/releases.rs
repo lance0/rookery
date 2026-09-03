@@ -19,6 +19,13 @@ pub struct GitHubRelease {
     pub html_url: String,
     #[serde(default)]
     pub body: String,
+    /// ggml-org ships `bNNNNN` build tags as prereleases alongside stable semver
+    /// tags, so this is not a "skip it" flag — it is how the newest build is
+    /// labelled. Kept so callers can show which kind a tag is.
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 /// Parsed version info from a llama-server or vLLM binary.
@@ -31,6 +38,14 @@ pub struct VersionInfo {
     /// this with v0.2.0 (2026-08-21); older builds only had a build number.
     #[serde(default)]
     pub semver: Option<(u32, u32, u32)>,
+    /// Whether the reported version carried a prerelease/dev suffix (`0.3.0-dev`).
+    ///
+    /// Load-bearing for comparison, not cosmetic: llama.cpp stamps `X.Y.Z-dev` on
+    /// master both BEFORE X.Y.Z ships and AFTER, so an equal-looking `-dev` build
+    /// can sit on either side of the tag. Without this flag the suffix is dropped
+    /// and a Sep-3 build 154 commits past v0.3.0 compares exactly equal to it.
+    #[serde(default)]
+    pub is_dev: bool,
 }
 
 /// Cached release state for one tracked repo.
@@ -127,12 +142,22 @@ impl GitHubClient {
 
     /// Fetch latest release for a repo. Returns None on 304 (cache hit).
     /// On success, returns the release and the new ETag.
+    ///
+    /// 🔴 Uses `/releases` (newest-first, prereleases INCLUDED), not
+    /// `/releases/latest`, which returns only the newest NON-prerelease.
+    ///
+    /// ggml-org publishes both schemes at once: semver tags (`v0.3.0`) as stable
+    /// and build tags (`b10778`) as prereleases. `/releases/latest` therefore
+    /// reported `v0.3.0` — a tag from Aug 25 that PREDATES DFlash2 — as "latest"
+    /// while b10778 sat 154 commits ahead of it, and a box running the newer
+    /// build was told it was up to date. Picking the newest release of either
+    /// kind is what makes that row mean anything.
     pub async fn latest_release(
         &self,
         repo: &str,
         etag: Option<&str>,
     ) -> Result<Option<(GitHubRelease, Option<String>)>, String> {
-        let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
 
         let mut req = self.client.get(&url);
         if let Some(etag) = etag {
@@ -158,10 +183,19 @@ impl GitHubClient {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let release: GitHubRelease = resp
+        let releases: Vec<GitHubRelease> = resp
             .json()
             .await
             .map_err(|e| format!("github {repo} parse: {e}"))?;
+
+        // GitHub returns newest-first by creation date, which is what we want:
+        // it makes no assumption about which tag scheme is "higher", and a repo
+        // publishing both semver and build tags is exactly the case that broke
+        // the old comparison.
+        let release = releases
+            .into_iter()
+            .find(|r| !r.draft)
+            .ok_or_else(|| format!("github {repo}: no releases"))?;
 
         Ok(Some((release, new_etag)))
     }
@@ -180,6 +214,10 @@ pub fn parse_llama_build_info(raw: &str) -> VersionInfo {
     if let Some(rest) = raw.strip_prefix("version: ")
         && let Some(semver) = parse_semver(rest.split_whitespace().next().unwrap_or(""))
     {
+        let token = rest.split_whitespace().next().unwrap_or("");
+        // `0.3.0-dev` vs `0.3.0` — the suffix decides whether this is a tagged
+        // release or a build off master, which changes what a comparison means.
+        let is_dev = token.contains('-') || token.contains('+');
         let build_number = rest
             .split("build ")
             .nth(1)
@@ -194,6 +232,7 @@ pub fn parse_llama_build_info(raw: &str) -> VersionInfo {
             build_number,
             commit_hash,
             semver: Some(semver),
+            is_dev,
         };
     }
 
@@ -209,6 +248,7 @@ pub fn parse_llama_build_info(raw: &str) -> VersionInfo {
             build_number,
             commit_hash,
             semver: None,
+            is_dev: false,
         };
     }
 
@@ -223,6 +263,7 @@ pub fn parse_llama_build_info(raw: &str) -> VersionInfo {
         build_number,
         commit_hash,
         semver: None,
+        is_dev: false,
     }
 }
 
@@ -293,6 +334,9 @@ pub fn borrow_semver_from_binary(running: &mut VersionInfo, binary: &VersionInfo
     match (running.build_number, binary.build_number) {
         (Some(a), Some(b)) if a == b => {
             running.semver = binary.semver;
+            // Carry the dev flag with the semver it belongs to, or the running
+            // server looks like a tagged release it is not.
+            running.is_dev = binary.is_dev;
             true
         }
         _ => false,
@@ -366,6 +410,59 @@ pub fn default_cache_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_suffix_is_recorded_when_parsing_the_banner() {
+        let v = parse_llama_build_info("version: 0.3.0-dev (build 1, commit 5ec4eab69)");
+        assert!(v.is_dev, "0.3.0-dev must be flagged as a dev build");
+        assert_eq!(v.semver, Some((0, 3, 0)));
+        let rel = parse_llama_build_info("version: 0.3.0 (build 10700, commit abc123)");
+        assert!(!rel.is_dev, "a tagged release must not be flagged dev");
+    }
+
+    /// Regression for the false "up to date" on 2026-09-03.
+    ///
+    /// The panel showed `current b1-5ec4eab69 -> latest v0.3.0  up to date` on a
+    /// box running a Sep-3 build 154 commits PAST v0.3.0 — a build containing
+    /// DFlash2, which v0.3.0 predates. Root cause was `/releases/latest`, which
+    /// returns only the newest NON-prerelease; ggml-org ships bNNNNN builds as
+    /// prereleases, so the real newest release was invisible.
+    #[test]
+    fn release_list_deserializes_prerelease_and_draft() {
+        let body = r#"[
+          {"tag_name":"b10786","name":"b10786","published_at":"2026-09-03T12:44:27Z",
+           "html_url":"https://x","body":"","prerelease":true,"draft":false},
+          {"tag_name":"v0.3.0","name":"v0.3.0","published_at":"2026-08-25T10:22:58Z",
+           "html_url":"https://y","body":"","prerelease":false,"draft":false}
+        ]"#;
+        let rs: Vec<GitHubRelease> = serde_json::from_str(body).expect("must parse");
+        assert_eq!(rs.len(), 2);
+        assert!(
+            rs[0].prerelease,
+            "bNNNNN builds are published as prereleases"
+        );
+        assert!(!rs[0].draft);
+
+        // Newest-first ordering is what we select on: the build tag must win
+        // over the older stable tag, or the row reports a version that predates
+        // what is already installed.
+        let picked = rs.iter().find(|r| !r.draft).expect("a non-draft release");
+        assert_eq!(picked.tag_name, "b10786");
+    }
+
+    /// Drafts are the one kind we skip: they are unpublished and not installable.
+    #[test]
+    fn drafts_are_skipped_but_prereleases_are_not() {
+        let body = r#"[
+          {"tag_name":"b99999","name":"d","published_at":null,"html_url":"https://x",
+           "body":"","prerelease":true,"draft":true},
+          {"tag_name":"b10786","name":"b","published_at":null,"html_url":"https://y",
+           "body":"","prerelease":true,"draft":false}
+        ]"#;
+        let rs: Vec<GitHubRelease> = serde_json::from_str(body).unwrap();
+        let picked = rs.iter().find(|r| !r.draft).unwrap();
+        assert_eq!(picked.tag_name, "b10786");
+    }
 
     #[test]
     fn test_parse_version_line() {
@@ -453,6 +550,7 @@ mod tests {
     #[test]
     fn test_semver_comparison_covers_vllm_style_tags() {
         let current = VersionInfo {
+            is_dev: false,
             raw: "0.19.0".into(),
             build_number: None,
             commit_hash: None,
@@ -469,6 +567,7 @@ mod tests {
     #[test]
     fn test_incomparable_versions_return_none() {
         let semver_only = VersionInfo {
+            is_dev: false,
             raw: "0.2.0".into(),
             build_number: None,
             commit_hash: None,
@@ -478,6 +577,7 @@ mod tests {
         assert_eq!(compare_llama_versions(&semver_only, "b10600"), None);
 
         let unparseable = VersionInfo {
+            is_dev: false,
             raw: "garbage".into(),
             build_number: None,
             commit_hash: None,
@@ -552,6 +652,7 @@ mod tests {
     #[test]
     fn test_compare_update_available() {
         let current = VersionInfo {
+            is_dev: false,
             raw: "b8640".into(),
             build_number: Some(8640),
             commit_hash: None,
@@ -566,6 +667,7 @@ mod tests {
     #[test]
     fn test_compare_ahead_of_release() {
         let current = VersionInfo {
+            is_dev: false,
             raw: "b8650".into(),
             build_number: Some(8650),
             commit_hash: None,
@@ -580,6 +682,7 @@ mod tests {
     #[test]
     fn test_compare_up_to_date() {
         let current = VersionInfo {
+            is_dev: false,
             raw: "b8650".into(),
             build_number: Some(8650),
             commit_hash: None,
