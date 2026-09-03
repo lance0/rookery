@@ -14,6 +14,7 @@ pub enum BackendType {
     #[default]
     LlamaServer,
     Vllm,
+    Sglang,
 }
 
 impl std::fmt::Display for BackendType {
@@ -21,6 +22,7 @@ impl std::fmt::Display for BackendType {
         match self {
             BackendType::LlamaServer => write!(f, "llama-server"),
             BackendType::Vllm => write!(f, "vllm"),
+            BackendType::Sglang => write!(f, "sglang"),
         }
     }
 }
@@ -140,6 +142,120 @@ fn default_gpu_memory_utilization() -> f64 {
     0.9
 }
 
+/// SGLang backend configuration (the `[profiles.<name>.sglang]` sub-table).
+///
+/// SGLang runs as a Docker container, like vLLM, but via plain `docker run`
+/// rather than compose — there is no compose file for it.
+///
+/// The defaults here are the configuration measured working on a single RTX 5090
+/// 32GB (Sep 3 2026): 285.7 tok/s short, 143.5 at 23K, 137,735 usable KV tokens.
+/// Two of them are counter-intuitive and load-bearing:
+///   * `context_length` 131072, NOT 262144. Asking for more sizes prefill
+///     activations and the draft pool for a context that cannot fit, and
+///     *starves* the KV cache it is meant to size (measured 1,560 tokens).
+///   * `SGLANG_ENABLE_POST_CAPTURE_KV_SIZING` must be "0". It re-sizes KV from
+///     memory measured *after* CUDA-graph capture, when almost nothing is left.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SglangConfig {
+    pub docker_image: String,
+
+    /// HF repo id or absolute path, resolved inside the container.
+    pub model_path: String,
+
+    #[serde(default)]
+    pub served_model_name: Option<String>,
+
+    // ── speculative decoding ─────────────────────────────────────────
+    #[serde(default)]
+    pub speculative_algorithm: Option<String>,
+
+    #[serde(default)]
+    pub draft_model_path: Option<String>,
+
+    /// For DFLASH this is the drafter's block_size. SGLang does NOT clamp it: it
+    /// logs a warning and rewrites the grouped conv, running out of
+    /// distribution. The DFlash paper's own ablation shows 8→16 is already a net
+    /// loss, so do not raise it above the checkpoint's block_size.
+    #[serde(default)]
+    pub speculative_num_draft_tokens: Option<u32>,
+
+    // ── memory / capacity ────────────────────────────────────────────
+    #[serde(default)]
+    pub mem_fraction_static: Option<f64>,
+
+    #[serde(default)]
+    pub context_length: Option<u64>,
+
+    /// Units are GDN *state slots*, not requests or bytes. Setting this
+    /// explicitly bypasses `--mamba-full-memory-ratio` and hands all remaining
+    /// memory to KV, which is the single biggest lever on a 32GB card.
+    #[serde(default)]
+    pub max_mamba_cache_size: Option<u32>,
+
+    #[serde(default)]
+    pub mamba_ssm_dtype: Option<String>,
+
+    #[serde(default)]
+    pub mamba_radix_cache_strategy: Option<String>,
+
+    #[serde(default)]
+    pub kv_cache_dtype: Option<String>,
+
+    #[serde(default)]
+    pub chunked_prefill_size: Option<u32>,
+
+    #[serde(default)]
+    pub cuda_graph_max_bs: Option<u32>,
+
+    /// "disabled" frees ~1 GB and is what makes mem_fraction_static 0.93 safe.
+    #[serde(default)]
+    pub cuda_graph_backend_prefill: Option<String>,
+
+    #[serde(default)]
+    pub max_running_requests: Option<u32>,
+
+    // ── model / serving behaviour ────────────────────────────────────
+    #[serde(default)]
+    pub attention_backend: Option<String>,
+
+    #[serde(default)]
+    pub reasoning_parser: Option<String>,
+
+    #[serde(default)]
+    pub tool_call_parser: Option<String>,
+
+    /// Drops the (unquantized, BF16) vision tower and hands that memory to KV.
+    /// Emitted as `--json-model-override-args {"language_model_only":true}`.
+    /// Multimodal requests are then rejected.
+    #[serde(default)]
+    pub language_model_only: bool,
+
+    #[serde(default = "default_true")]
+    pub trust_remote_code: bool,
+
+    // ── container plumbing ───────────────────────────────────────────
+    /// Host HF cache, bind-mounted to /hf with HF_HOME pointed at it.
+    #[serde(default = "default_sglang_hf_cache")]
+    pub hf_cache: String,
+
+    #[serde(default = "default_sglang_shm_size")]
+    pub shm_size: String,
+
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+fn default_sglang_hf_cache() -> String {
+    "/home/lance/models/cache".to_string()
+}
+
+fn default_sglang_shm_size() -> String {
+    "16g".to_string()
+}
+
 // ── Config ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +357,9 @@ pub struct Profile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vllm: Option<VllmConfig>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sglang: Option<SglangConfig>,
+
     // ── Legacy flat fields (backward compat with old configs) ────────
     // These are only used when no sub-table is present.
     // When llama_server sub-table IS present, these are ignored.
@@ -305,14 +424,51 @@ pub struct Profile {
 impl Profile {
     /// Returns which backend this profile uses.
     ///
+    /// - If `sglang` sub-table is present → `Sglang`
     /// - If `vllm` sub-table is present → `Vllm`
     /// - If `llama_server` sub-table is present, OR no sub-table (legacy) → `LlamaServer`
+    ///
+    /// Declaring more than one container backend is a config error; call
+    /// [`Profile::validate_backends`] to surface it rather than silently
+    /// resolving by precedence.
     pub fn backend_type(&self) -> BackendType {
-        if self.vllm.is_some() {
+        if self.sglang.is_some() {
+            BackendType::Sglang
+        } else if self.vllm.is_some() {
             BackendType::Vllm
         } else {
             BackendType::LlamaServer
         }
+    }
+
+    /// Rejects profiles declaring two backend sub-tables at once.
+    ///
+    /// Silently picking one by precedence would start the wrong engine on the
+    /// same port, which is the kind of thing you only notice via a confusing
+    /// throughput number an hour later.
+    pub fn validate_backends(&self, name: &str) -> std::result::Result<(), String> {
+        let declared: Vec<&str> = [
+            self.sglang.is_some().then_some("sglang"),
+            self.vllm.is_some().then_some("vllm"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if declared.len() > 1 {
+            return Err(format!(
+                "profile '{name}' declares multiple backend sub-tables ({}); \
+                 exactly one of [profiles.{name}.sglang] or [profiles.{name}.vllm] \
+                 may be present",
+                declared.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the effective SglangConfig for this profile, if any.
+    pub fn sglang_config(&self) -> Option<SglangConfig> {
+        self.sglang.clone()
     }
 
     /// Returns the effective LlamaServerConfig for this profile.
@@ -320,7 +476,7 @@ impl Profile {
     /// If an explicit `[llama_server]` sub-table exists, returns it.
     /// Otherwise, constructs one from the legacy flat fields.
     pub fn llama_server_config(&self) -> Option<LlamaServerConfig> {
-        if self.vllm.is_some() {
+        if self.vllm.is_some() || self.sglang.is_some() {
             return None;
         }
 
@@ -613,6 +769,19 @@ impl Config {
         match profile.backend_type() {
             BackendType::LlamaServer => self.resolve_llama_server_command_line(profile, model),
             BackendType::Vllm => self.resolve_vllm_command_line(profile, model),
+            // The SGLang argv is a `docker run` invocation owned by
+            // SglangBackend::build_docker_argv, which needs the container
+            // plumbing (mounts, env, name) that this signature has no place for.
+            // Report the served command rather than fabricating a partial one.
+            BackendType::Sglang => Ok(vec![
+                "docker".to_string(),
+                "run".to_string(),
+                profile
+                    .sglang
+                    .as_ref()
+                    .map(|c| c.docker_image.clone())
+                    .unwrap_or_default(),
+            ]),
         }
     }
 
@@ -1245,6 +1414,7 @@ gpu_memory_utilization = 0.9
                 profiles: HashMap::from([(
                     "v".into(),
                     Profile {
+                        sglang: None,
                         model: "m".into(),
                         port: 8081,
                         llama_server: None,
@@ -1786,6 +1956,7 @@ ctx_size = 262144
                         ..LlamaServerConfig::default()
                     }),
                     vllm: None,
+                    sglang: None,
                     ctx_size: default_ctx_size(),
                     threads: default_threads(),
                     threads_batch: default_threads_batch(),
@@ -1849,6 +2020,7 @@ ctx_size = 262144
             profiles: HashMap::from([(
                 "existing".into(),
                 Profile {
+                    sglang: None,
                     model: "m".into(),
                     port: 8081,
                     llama_server: None,

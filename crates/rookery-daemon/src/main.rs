@@ -65,7 +65,11 @@ async fn reconciled_backend_alive(
         rookery_core::config::BackendType::LlamaServer => {
             rookery_engine::process::is_pid_alive(running_pid)
         }
-        rookery_core::config::BackendType::Vllm => backend.is_running().await,
+        // Container-backed backends have no host PID to probe, so liveness is a
+        // container query rather than a /proc check.
+        rookery_core::config::BackendType::Vllm | rookery_core::config::BackendType::Sglang => {
+            backend.is_running().await
+        }
     }
 }
 
@@ -264,7 +268,10 @@ async fn main() {
                                         rookery_core::config::BackendType::LlamaServer => {
                                             Some(running_pid)
                                         }
-                                        rookery_core::config::BackendType::Vllm => None,
+                                        // Container-backed: identity is the
+                                        // container id, not a host PID.
+                                        rookery_core::config::BackendType::Vllm
+                                        | rookery_core::config::BackendType::Sglang => None,
                                     },
                                     container_id: container_id.clone(),
                                     port,

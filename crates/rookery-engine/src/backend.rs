@@ -654,12 +654,539 @@ fn user_friendly_io_error(e: &std::io::Error) -> String {
     }
 }
 
+// ── SGLang backend ───────────────────────────────────────────────────
+
+/// SGLang cold start is weight load + CUDA graph capture. Measured 60-90 s on a
+/// 5090 with a 20 GB NVFP4 checkpoint and a DFlash2 drafter; the budget is
+/// deliberately well above that and must NOT inherit llama-server's, which is
+/// tuned for an mmap'd local binary.
+const SGLANG_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Docker-based SGLang backend, driven by plain `docker run` rather than compose.
+///
+/// Unlike [`VllmBackend`] there is no compose file: the container is fully
+/// described by the `[profiles.<name>.sglang]` sub-table, and the argv is built
+/// as a `Vec<String>` and handed straight to `docker`. That is load-bearing, not
+/// stylistic — `--json-model-override-args {"language_model_only":true}` must
+/// reach the process as ONE argv element with its inner double quotes intact.
+/// Routing it through a shell strips them and SGLang dies in `json.loads`.
+pub struct SglangBackend {
+    /// Container name we reserve, derived from the profile.
+    container_name: Mutex<Option<String>>,
+    container_id: Mutex<Option<String>>,
+    log_buffer: Arc<LogBuffer>,
+    draining: AtomicBool,
+    daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+    info: Mutex<Option<BackendInfo>>,
+    log_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl SglangBackend {
+    pub fn new(log_buffer: Arc<LogBuffer>) -> Self {
+        Self::new_with_error_notifier(log_buffer, None)
+    }
+
+    pub fn new_with_error_notifier(
+        log_buffer: Arc<LogBuffer>,
+        daemon_error_tx: Option<watch::Sender<Option<BackendErrorEvent>>>,
+    ) -> Self {
+        Self {
+            container_name: Mutex::new(None),
+            container_id: Mutex::new(None),
+            log_buffer,
+            draining: AtomicBool::new(false),
+            daemon_error_tx,
+            info: Mutex::new(None),
+            log_task: Mutex::new(None),
+        }
+    }
+
+    /// `docker version` — we need the engine, not the compose plugin.
+    async fn check_docker_available() -> Result<()> {
+        match tokio::process::Command::new("docker")
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(Error::ConfigValidation(
+                "The Docker daemon is not responding. Start it to use SGLang profiles.".into(),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::ConfigValidation(
+                "Docker is not installed. Install Docker to use SGLang profiles.".into(),
+            )),
+            Err(_) => Err(Error::ConfigValidation(
+                "Docker is not available. Ensure the Docker daemon is running to use SGLang profiles.".into(),
+            )),
+        }
+    }
+
+    fn container_name_for(profile: &str) -> String {
+        format!("rookery-sglang-{profile}")
+    }
+
+    /// Remove any stale container holding our name.
+    ///
+    /// The daemon can hold a name reservation for an already-exited container,
+    /// where `docker run` fails on the name while `inspect`/`rm` both report
+    /// "no such container". Best-effort: failures here are not fatal.
+    async fn remove_stale_container(name: &str) {
+        let _ = tokio::process::Command::new("docker")
+            .args(["rm", "-f", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    async fn is_container_running_named(name: &str) -> bool {
+        match tokio::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.State.Running}}", name])
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim() == "true"
+            }
+            _ => false,
+        }
+    }
+
+    async fn container_id_for(name: &str) -> Result<String> {
+        let out = tokio::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.Id}}", name])
+            .output()
+            .await
+            .map_err(Error::Io)?;
+        if !out.status.success() {
+            return Err(Error::ConfigValidation(format!(
+                "SGLang container '{name}' started but its ID could not be read: {}",
+                sanitize_docker_error(&String::from_utf8_lossy(&out.stderr))
+            )));
+        }
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if id.is_empty() {
+            return Err(Error::ConfigValidation(
+                "SGLang container started but no container ID returned".into(),
+            ));
+        }
+        Ok(id)
+    }
+
+    /// Build the full `docker run` argv.
+    ///
+    /// Returned as a `Vec<String>` and never joined into a shell string — see
+    /// the type-level note on [`SglangBackend`].
+    pub fn build_docker_argv(profile_name: &str, prof: &Profile) -> Result<Vec<String>> {
+        let cfg = prof.sglang.as_ref().ok_or_else(|| {
+            Error::ConfigValidation(format!(
+                "profile '{profile_name}' has no [profiles.{profile_name}.sglang] sub-table"
+            ))
+        })?;
+
+        let name = Self::container_name_for(profile_name);
+        let port = prof.port.to_string();
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "--rm".into(),
+            "--name".into(),
+            name,
+            "--device".into(),
+            "nvidia.com/gpu=all".into(),
+            format!("--shm-size={}", cfg.shm_size),
+            "--ipc=host".into(),
+            "-v".into(),
+            format!("{}:/hf", cfg.hf_cache),
+            "-e".into(),
+            "HF_HOME=/hf".into(),
+            "-e".into(),
+            "HF_HUB_OFFLINE=1".into(),
+            "-e".into(),
+            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True".into(),
+        ];
+
+        // Off unless the operator overrides it. Enabling it re-sizes the KV pool
+        // from memory measured AFTER cuda-graph capture, when almost nothing is
+        // left: measured 137,735 -> 1,560 usable tokens.
+        if !cfg.env.contains_key("SGLANG_ENABLE_POST_CAPTURE_KV_SIZING") {
+            a.push("-e".into());
+            a.push("SGLANG_ENABLE_POST_CAPTURE_KV_SIZING=0".into());
+        }
+        let mut env_keys: Vec<&String> = cfg.env.keys().collect();
+        env_keys.sort(); // deterministic argv for tests and log diffing
+        for k in env_keys {
+            a.push("-e".into());
+            a.push(format!("{k}={}", cfg.env[k]));
+        }
+
+        a.push("-p".into());
+        a.push(format!("{port}:{port}"));
+        a.push(cfg.docker_image.clone());
+
+        a.push("python3".into());
+        a.push("-m".into());
+        a.push("sglang.launch_server".into());
+        if cfg.trust_remote_code {
+            a.push("--trust-remote-code".into());
+        }
+        a.push("--model-path".into());
+        a.push(cfg.model_path.clone());
+
+        let served = cfg
+            .served_model_name
+            .clone()
+            .unwrap_or_else(|| profile_name.to_string());
+        a.push("--served-model-name".into());
+        a.push(served);
+
+        macro_rules! opt {
+            ($flag:literal, $val:expr) => {
+                if let Some(v) = &$val {
+                    a.push($flag.into());
+                    a.push(v.to_string());
+                }
+            };
+        }
+        opt!("--kv-cache-dtype", cfg.kv_cache_dtype);
+        opt!("--mem-fraction-static", cfg.mem_fraction_static);
+        opt!("--attention-backend", cfg.attention_backend);
+        opt!("--max-running-requests", cfg.max_running_requests);
+        opt!("--cuda-graph-max-bs", cfg.cuda_graph_max_bs);
+        opt!(
+            "--cuda-graph-backend-prefill",
+            cfg.cuda_graph_backend_prefill
+        );
+        opt!("--chunked-prefill-size", cfg.chunked_prefill_size);
+        opt!("--context-length", cfg.context_length);
+        opt!("--max-mamba-cache-size", cfg.max_mamba_cache_size);
+        opt!("--mamba-ssm-dtype", cfg.mamba_ssm_dtype);
+        opt!(
+            "--mamba-radix-cache-strategy",
+            cfg.mamba_radix_cache_strategy
+        );
+        opt!("--speculative-algorithm", cfg.speculative_algorithm);
+        opt!("--speculative-draft-model-path", cfg.draft_model_path);
+        opt!(
+            "--speculative-num-draft-tokens",
+            cfg.speculative_num_draft_tokens
+        );
+        opt!("--reasoning-parser", cfg.reasoning_parser);
+        opt!("--tool-call-parser", cfg.tool_call_parser);
+
+        if cfg.language_model_only {
+            a.push("--json-model-override-args".into());
+            // ONE argv element, inner quotes intact.
+            a.push(r#"{"language_model_only":true}"#.into());
+        }
+
+        a.extend(cfg.extra_args.iter().cloned());
+
+        a.push("--host".into());
+        a.push("0.0.0.0".into());
+        a.push("--port".into());
+        a.push(port);
+
+        Ok(a)
+    }
+
+    async fn spawn_log_capture(&self, name: String, container_id: String) {
+        let log_buffer = self.log_buffer.clone();
+        let daemon_error_tx = self.daemon_error_tx.clone();
+
+        let handle = tokio::spawn(async move {
+            let child_result = tokio::process::Command::new("docker")
+                .args(["logs", "-f", "--tail", "0", &name])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn();
+
+            let mut child = match child_result {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to spawn docker logs for SGLang");
+                    return;
+                }
+            };
+
+            // SGLang writes its startup and per-batch lines to stderr, so both
+            // streams must be tailed or the interesting half is invisible.
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+            for stream in [
+                stdout.map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+                stderr.map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let lb = log_buffer.clone();
+                let tx = daemon_error_tx.clone();
+                let cid = container_id.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut lines = BufReader::new(stream).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if is_cuda_error(&line) {
+                            tracing::error!("CUDA error detected in SGLang logs: {line}");
+                            if let Some(tx) = &tx {
+                                let _ = tx.send(Some(BackendErrorEvent {
+                                    backend_type: BackendType::Sglang,
+                                    pid: None,
+                                    container_id: Some(cid.clone()),
+                                }));
+                            }
+                        }
+                        lb.push(format!("[sglang] {line}"));
+                    }
+                }));
+            }
+
+            let _ = child.wait().await;
+            for t in tasks {
+                t.abort();
+            }
+            tracing::info!("SGLang log capture stream ended (container stopped)");
+        });
+
+        if let Some(old) = self.log_task.lock().await.replace(handle) {
+            old.abort();
+        }
+    }
+}
+
+#[async_trait]
+impl InferenceBackend for SglangBackend {
+    async fn start(&self, config: &Config, profile: &str) -> Result<BackendInfo> {
+        let prof = config
+            .profiles
+            .get(profile)
+            .ok_or_else(|| Error::ProfileNotFound(profile.into()))?;
+
+        // Config errors before any Docker work, matching VllmBackend's ordering.
+        prof.validate_backends(profile)
+            .map_err(Error::ConfigValidation)?;
+        let argv = Self::build_docker_argv(profile, prof)?;
+
+        Self::check_docker_available().await?;
+
+        let name = Self::container_name_for(profile);
+        Self::remove_stale_container(&name).await;
+
+        tracing::info!(profile, container = %name, "starting SGLang via docker run");
+
+        let mut child = tokio::process::Command::new("docker")
+            .args(&argv)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(false)
+            .spawn()
+            .map_err(Error::Io)?;
+
+        // `docker run` without -d stays attached; detach the supervisor task and
+        // let readiness be decided by the health endpoint.
+        let name_for_wait = name.clone();
+        tokio::spawn(async move {
+            if let Some(stderr) = child.stderr.take() {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    tracing::debug!(container = %name_for_wait, "docker run: {l}");
+                }
+            }
+            let _ = child.wait().await;
+        });
+
+        let cid = {
+            // The container needs a moment to exist before inspect succeeds.
+            let mut last_err = None;
+            let mut found = None;
+            for _ in 0..30 {
+                match Self::container_id_for(&name).await {
+                    Ok(id) => {
+                        found = Some(id);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            match found {
+                Some(id) => id,
+                None => {
+                    Self::remove_stale_container(&name).await;
+                    return Err(last_err.unwrap_or_else(|| {
+                        Error::ConfigValidation(
+                            "SGLang container did not appear after docker run".into(),
+                        )
+                    }));
+                }
+            }
+        };
+        tracing::info!(container_id = %cid, "SGLang container started");
+
+        let backend_info = BackendInfo {
+            pid: None,
+            container_id: Some(cid.clone()),
+            port: prof.port,
+            profile: profile.to_string(),
+            started_at: Utc::now(),
+            backend_type: BackendType::Sglang,
+            command_line: argv.clone(),
+            exe_path: None,
+        };
+
+        *self.container_name.lock().await = Some(name.clone());
+        *self.container_id.lock().await = Some(cid.clone());
+        *self.info.lock().await = Some(backend_info.clone());
+
+        self.spawn_log_capture(name.clone(), cid.clone()).await;
+
+        match health::wait_for_health(prof.port, SGLANG_HEALTH_TIMEOUT).await {
+            Ok(()) => tracing::info!(profile, port = prof.port, "SGLang health check passed"),
+            Err(e) => {
+                tracing::error!(error = %e, "SGLang did not become healthy in time, stopping container");
+                Self::remove_stale_container(&name).await;
+                if let Some(t) = self.log_task.lock().await.take() {
+                    t.abort();
+                }
+                *self.container_name.lock().await = None;
+                *self.container_id.lock().await = None;
+                *self.info.lock().await = None;
+                return Err(Error::ConfigValidation(format!(
+                    "SGLang container did not become healthy within {SGLANG_HEALTH_TIMEOUT:?} \
+                     (weight load plus CUDA graph capture is routinely 60-90 s, longer on a \
+                     cold page cache): {e}"
+                )));
+            }
+        }
+
+        Ok(backend_info)
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let name = self.container_name.lock().await.clone();
+        let Some(name) = name else {
+            return Ok(());
+        };
+
+        tracing::info!(container = %name, "stopping SGLang container");
+
+        let out = tokio::process::Command::new("docker")
+            .args(["stop", "-t", "20", &name])
+            .output()
+            .await
+            .map_err(Error::Io)?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Already gone is success; anything else must not clear state, or we
+            // would forget a container that is still holding the GPU.
+            let lower = stderr.to_ascii_lowercase();
+            if !(lower.contains("no such container") || lower.contains("is not running")) {
+                return Err(Error::ConfigValidation(format!(
+                    "failed to stop SGLang container: {}",
+                    sanitize_docker_error(&stderr)
+                )));
+            }
+        }
+
+        // --rm handles removal, but be explicit so a crashed container does not
+        // hold the name reservation.
+        Self::remove_stale_container(&name).await;
+
+        if let Some(t) = self.log_task.lock().await.take() {
+            t.abort();
+        }
+        *self.container_name.lock().await = None;
+        *self.container_id.lock().await = None;
+        *self.info.lock().await = None;
+
+        Ok(())
+    }
+
+    async fn is_running(&self) -> bool {
+        let name = self.container_name.lock().await.clone();
+        match name {
+            Some(n) => Self::is_container_running_named(&n).await,
+            None => false,
+        }
+    }
+
+    async fn process_info(&self) -> Option<BackendInfo> {
+        self.info.lock().await.clone()
+    }
+
+    async fn adopt(&self, info: BackendInfo) -> Result<()> {
+        let cid = info.container_id.clone().ok_or_else(|| {
+            Error::ConfigValidation("container_id required for SglangBackend adopt".into())
+        })?;
+        let name = Self::container_name_for(&info.profile);
+
+        tracing::info!(container_id = %cid, profile = %info.profile, "adopting existing SGLang container");
+
+        if !Self::is_container_running_named(&name).await {
+            return Err(Error::ConfigValidation(format!(
+                "cannot adopt SGLang container '{name}': container is not running"
+            )));
+        }
+
+        let running_id = Self::container_id_for(&name).await?;
+        // Short (12-char) vs full (64-char) IDs, either direction.
+        if !running_id.starts_with(cid.as_str()) && !cid.starts_with(running_id.as_str()) {
+            return Err(Error::ConfigValidation(format!(
+                "cannot adopt SGLang container '{name}': running container ID '{running_id}' \
+                 does not match recorded '{cid}'"
+            )));
+        }
+
+        *self.container_name.lock().await = Some(name.clone());
+        *self.container_id.lock().await = Some(cid.clone());
+        *self.info.lock().await = Some(info);
+
+        self.spawn_log_capture(name, cid).await;
+
+        Ok(())
+    }
+
+    async fn to_server_state(&self) -> ServerState {
+        let container_running = self.is_running().await;
+        let info = self.info.lock().await.clone();
+
+        match (container_running, info) {
+            (true, Some(info)) => ServerState::Running {
+                profile: info.profile,
+                pid: 0, // container-based backend, no host PID
+                port: info.port,
+                since: info.started_at,
+                command_line: info.command_line,
+                exe_path: None,
+                backend_type: BackendType::Sglang,
+                container_id: info.container_id,
+            },
+            _ => ServerState::Stopped,
+        }
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::SeqCst);
+    }
+}
+
 // ── Backend factory ──────────────────────────────────────────────────
 
 /// Create the appropriate backend implementation based on the profile's backend type.
 ///
-/// Returns `LlamaServerBackend` for `LlamaServer` profiles.
-/// Returns `VllmBackend` for `Vllm` profiles.
+/// Returns `LlamaServerBackend` for `LlamaServer` profiles,
+/// `VllmBackend` for `Vllm`, and `SglangBackend` for `Sglang`.
 pub fn create_backend(
     profile: &Profile,
     log_buffer: Arc<LogBuffer>,
@@ -686,6 +1213,10 @@ pub fn create_backend_with_error_notifier(
                 daemon_error_tx,
             )))
         }
+        BackendType::Sglang => Ok(Box::new(SglangBackend::new_with_error_notifier(
+            log_buffer,
+            daemon_error_tx,
+        ))),
     }
 }
 
@@ -1010,6 +1541,7 @@ mod tests {
             port: 8081,
             llama_server: None,
             vllm: None,
+            sglang: None,
             ctx_size: 4096,
             threads: 4,
             threads_batch: 24,
@@ -1045,6 +1577,7 @@ mod tests {
         let log_buffer = Arc::new(LogBuffer::new(100));
 
         let profile = Profile {
+            sglang: None,
             model: "test".into(),
             port: 8081,
             llama_server: None,
@@ -1480,6 +2013,7 @@ mod tests {
             profiles: HashMap::from([(
                 "vllm_test".into(),
                 Profile {
+                    sglang: None,
                     model: "test_model".into(),
                     port: 19999,
                     llama_server: None,
@@ -1595,6 +2129,7 @@ mod tests {
             profiles: HashMap::from([(
                 "vllm_test".into(),
                 Profile {
+                    sglang: None,
                     model: "test_model".into(),
                     port: 19999,
                     llama_server: None,
@@ -1940,6 +2475,7 @@ mod tests {
             profiles: HashMap::from([(
                 "vllm_test".into(),
                 Profile {
+                    sglang: None,
                     model: "test_model".into(),
                     port: 19999,
                     llama_server: None,
@@ -2217,6 +2753,7 @@ mod tests {
             profiles: HashMap::from([(
                 "bad".into(),
                 Profile {
+                    sglang: None,
                     model: "nonexistent".into(), // <-- references missing model
                     port: 8081,
                     llama_server: None,
@@ -2354,6 +2891,7 @@ mod tests {
             profiles: HashMap::from([(
                 "vllm_test".into(),
                 Profile {
+                    sglang: None,
                     model: "test_model".into(),
                     port: 19998,
                     llama_server: None,
@@ -2555,6 +3093,7 @@ mod tests {
                     port,
                     llama_server: None,
                     vllm: None,
+                    sglang: None,
                     ctx_size: 1024,
                     threads: 1,
                     threads_batch: 1,
@@ -2948,6 +3487,7 @@ mod tests {
             port: 8081,
             llama_server: None,
             vllm: None,
+            sglang: None,
             ctx_size: 4096,
             threads: 4,
             threads_batch: 24,
@@ -2979,6 +3519,7 @@ mod tests {
 
         // VllmBackend profile
         let vllm_profile = Profile {
+            sglang: None,
             model: "test".into(),
             port: 8082,
             llama_server: None,
@@ -3079,6 +3620,7 @@ mod tests {
             profiles: HashMap::from([(
                 "integration_vllm".into(),
                 Profile {
+                    sglang: None,
                     model: "opt_125m".into(),
                     port,
                     llama_server: None,
@@ -3423,5 +3965,181 @@ mod tests {
                 // Acceptable — compose project fully cleaned up
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sglang_tests {
+    use super::*;
+    use rookery_core::config::SglangConfig;
+    use std::collections::HashMap;
+
+    /// Profile has no Default impl, and adding one to the public API just for
+    /// tests would be a wider change than this needs.
+    fn bare_profile() -> Profile {
+        Profile {
+            model: "qwen38".into(),
+            port: 30000,
+            llama_server: None,
+            vllm: None,
+            sglang: None,
+            ctx_size: 4096,
+            threads: 4,
+            threads_batch: 24,
+            batch_size: 4096,
+            ubatch_size: 1024,
+            gpu_layers: -1,
+            gpu_index: None,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            flash_attention: true,
+            reasoning_budget: 0,
+            chat_template: None,
+            temp: 0.7,
+            top_p: 0.8,
+            top_k: 20,
+            min_p: 0.0,
+            aliases: vec![],
+            extra_args: vec![],
+        }
+    }
+
+    fn sglang_profile() -> Profile {
+        let mut p = bare_profile();
+        p.sglang = Some(SglangConfig {
+            docker_image: "lmsysorg/sglang:dev-cu12".into(),
+            model_path: "QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4".into(),
+            served_model_name: Some("qwen3.8-27b".into()),
+            speculative_algorithm: Some("DFLASH".into()),
+            draft_model_path: Some("incoai/Qwen3.8-27B-DFlash2".into()),
+            speculative_num_draft_tokens: Some(8),
+            mem_fraction_static: Some(0.93),
+            context_length: Some(131072),
+            max_mamba_cache_size: Some(4),
+            mamba_ssm_dtype: Some("bfloat16".into()),
+            mamba_radix_cache_strategy: Some("extra_buffer_lazy".into()),
+            kv_cache_dtype: Some("fp8_e4m3".into()),
+            chunked_prefill_size: Some(1024),
+            cuda_graph_max_bs: Some(1),
+            cuda_graph_backend_prefill: Some("disabled".into()),
+            max_running_requests: Some(1),
+            attention_backend: Some("flashinfer".into()),
+            reasoning_parser: Some("qwen3".into()),
+            tool_call_parser: Some("qwen3_coder".into()),
+            language_model_only: true,
+            trust_remote_code: true,
+            hf_cache: "/home/lance/models/cache".into(),
+            shm_size: "16g".into(),
+            env: HashMap::new(),
+            extra_args: vec![],
+        });
+        p
+    }
+
+    /// The JSON override must survive as ONE argv element with its inner double
+    /// quotes intact. Routing it through a shell strips them, SGLang receives
+    /// `{language_model_only:true}` and dies in json.loads. Observed for real.
+    #[test]
+    fn json_model_override_is_one_intact_argv_element() {
+        let argv = SglangBackend::build_docker_argv("qwen38_sglang", &sglang_profile()).unwrap();
+        let i = argv
+            .iter()
+            .position(|a| a == "--json-model-override-args")
+            .expect("override flag must be emitted when language_model_only is set");
+        let val = &argv[i + 1];
+        assert_eq!(
+            val, r#"{"language_model_only":true}"#,
+            "override value must be a single element with quotes intact, got {val:?}"
+        );
+        assert!(val.contains('"'), "inner double quotes were stripped");
+    }
+
+    #[test]
+    fn omits_override_when_vision_kept() {
+        let mut p = sglang_profile();
+        p.sglang.as_mut().unwrap().language_model_only = false;
+        let argv = SglangBackend::build_docker_argv("p", &p).unwrap();
+        assert!(!argv.iter().any(|a| a == "--json-model-override-args"));
+    }
+
+    /// Enabling post-capture KV sizing re-sizes the pool from memory measured
+    /// *after* graph capture, when almost nothing remains: measured 137,735 ->
+    /// 1,560 usable tokens. Default it off, but let an operator override.
+    #[test]
+    fn post_capture_kv_sizing_defaults_off_and_is_overridable() {
+        let argv = SglangBackend::build_docker_argv("p", &sglang_profile()).unwrap();
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "SGLANG_ENABLE_POST_CAPTURE_KV_SIZING=0"),
+            "must default the post-capture KV sizing env var to 0"
+        );
+
+        let mut p = sglang_profile();
+        p.sglang
+            .as_mut()
+            .unwrap()
+            .env
+            .insert("SGLANG_ENABLE_POST_CAPTURE_KV_SIZING".into(), "1".into());
+        let argv = SglangBackend::build_docker_argv("p", &p).unwrap();
+        assert!(
+            !argv
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "SGLANG_ENABLE_POST_CAPTURE_KV_SIZING=0"),
+            "an explicit operator override must not be shadowed by the default"
+        );
+    }
+
+    #[test]
+    fn argv_carries_the_measured_working_flags() {
+        let argv = SglangBackend::build_docker_argv("qwen38_sglang", &sglang_profile()).unwrap();
+        let joined = argv.join(" ");
+        for expected in [
+            "--speculative-algorithm DFLASH",
+            "--speculative-num-draft-tokens 8",
+            "--mem-fraction-static 0.93",
+            "--context-length 131072",
+            "--max-mamba-cache-size 4",
+            "--cuda-graph-backend-prefill disabled",
+            "--chunked-prefill-size 1024",
+            "--attention-backend flashinfer",
+        ] {
+            assert!(joined.contains(expected), "argv missing {expected:?}");
+        }
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--rm".to_string()));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-p" && w[1] == "30000:30000")
+        );
+        // container name is derived from the profile, not the model
+        assert!(argv.contains(&"rookery-sglang-qwen38_sglang".to_string()));
+    }
+
+    #[test]
+    fn errors_without_sglang_subtable() {
+        let p = bare_profile();
+        assert!(SglangBackend::build_docker_argv("p", &p).is_err());
+    }
+
+    #[test]
+    fn sglang_profile_selects_sglang_backend() {
+        assert_eq!(sglang_profile().backend_type(), BackendType::Sglang);
+        assert!(sglang_profile().llama_server_config().is_none());
+    }
+
+    /// SGLang cold start is 60-90 s (weight load + graph capture). Inheriting a
+    /// llama-server-tuned timeout would declare a healthy server dead.
+    #[test]
+    fn health_timeout_covers_cold_start() {
+        assert!(
+            SGLANG_HEALTH_TIMEOUT >= std::time::Duration::from_secs(300),
+            "SGLang needs a generous readiness budget, got {SGLANG_HEALTH_TIMEOUT:?}"
+        );
+    }
+
+    #[test]
+    fn sglang_backend_is_object_safe() {
+        let lb = Arc::new(LogBuffer::new(16));
+        let _b: Box<dyn InferenceBackend> = Box::new(SglangBackend::new(lb));
     }
 }

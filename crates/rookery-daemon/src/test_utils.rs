@@ -187,6 +187,7 @@ pub fn build_test_app_state(
         profiles: HashMap::from([(
             "test".into(),
             Profile {
+                sglang: None,
                 model: "test_model".into(),
                 port: 19876,
                 llama_server: None,

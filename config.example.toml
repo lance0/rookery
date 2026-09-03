@@ -169,3 +169,48 @@ restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 # Deliberately separate from `workdir`, which also sets the agent process's cwd —
 # enabling checks should not mean relocating the agent.
 data_dir = "/path/to/agent/data"
+
+# ── SGLang backend ────────────────────────────────────────────────────
+#
+# SGLang runs as a Docker container (plain `docker run`, no compose file).
+# The presence of a [profiles.<name>.sglang] sub-table selects the backend;
+# declaring both .sglang and .vllm on one profile is rejected.
+#
+# The values below are MEASURED WORKING on a single RTX 5090 32GB (Sep 3 2026):
+#   285.7 tok/s short, 143.5 at 23K, 137,735 usable KV tokens, accept len 6.22.
+# Two of them are counter-intuitive and load-bearing:
+#   * context_length is 131072, NOT the model's native 262144. Asking for more
+#     sizes prefill activations and the draft pool for a context that cannot
+#     fit and starves the KV cache it is meant to size (measured: 1,560 tokens).
+#   * cuda_graph_backend_prefill = "disabled" frees ~1 GB and is what makes
+#     mem_fraction_static 0.93 safe. With the prefill graph enabled, 0.90+ OOMs
+#     during capture (sgl-project/sglang#35777).
+# The SGLANG_ENABLE_POST_CAPTURE_KV_SIZING=0 env var is applied automatically;
+# override it via [profiles.<name>.sglang.env] only if you know why.
+#
+# [profiles.qwen38_sglang]
+# model = "qwen38_27b"
+# port = 30000
+#
+# [profiles.qwen38_sglang.sglang]
+# docker_image = "lmsysorg/sglang:dev-cu12"
+# model_path = "QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4"
+# served_model_name = "qwen3.8-27b"
+# speculative_algorithm = "DFLASH"
+# draft_model_path = "incoai/Qwen3.8-27B-DFlash2"
+# speculative_num_draft_tokens = 8   # = the drafter's block_size; do NOT raise
+# mem_fraction_static = 0.93
+# context_length = 131072
+# max_mamba_cache_size = 4           # GDN state SLOTS, not requests or bytes
+# mamba_ssm_dtype = "bfloat16"
+# mamba_radix_cache_strategy = "extra_buffer_lazy"
+# kv_cache_dtype = "fp8_e4m3"
+# attention_backend = "flashinfer"   # trtllm_mha is SM100-only
+# chunked_prefill_size = 1024
+# cuda_graph_max_bs = 1
+# cuda_graph_backend_prefill = "disabled"
+# max_running_requests = 1
+# reasoning_parser = "qwen3"
+# tool_call_parser = "qwen3_coder"
+# language_model_only = true         # drops the vision tower, worth ~24K tokens
+# hf_cache = "/home/lance/models/cache"

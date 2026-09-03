@@ -2455,6 +2455,7 @@ mod tests {
                 (
                     "llama_fast".into(),
                     Profile {
+                        sglang: None,
                         model: "model_a".into(),
                         port: 8081,
                         llama_server: None,
@@ -2482,6 +2483,7 @@ mod tests {
                 (
                     "vllm_prod".into(),
                     Profile {
+                        sglang: None,
                         model: "model_b".into(),
                         port: 8081,
                         llama_server: None,
@@ -2593,6 +2595,7 @@ mod tests {
 
         // A vLLM profile with estimated_vram_mb on the model
         let vllm_profile = Profile {
+            sglang: None,
             model: "test_model".into(),
             port: 8081,
             llama_server: None,
@@ -2629,6 +2632,7 @@ mod tests {
 
         // A llama-server profile
         let llama_profile = Profile {
+            sglang: None,
             model: "test_model".into(),
             port: 8081,
             llama_server: None,
@@ -2740,6 +2744,7 @@ mod tests {
             profiles: HashMap::from([(
                 "bad_vllm".into(),
                 Profile {
+                    sglang: None,
                     model: "nonexistent_model".into(), // references missing model
                     port: 8081,
                     llama_server: None,
@@ -2819,6 +2824,7 @@ mod tests {
             profiles: HashMap::from([(
                 "llama_profile".into(),
                 Profile {
+                    sglang: None,
                     model: "m".into(),
                     port: 8081,
                     llama_server: None,
@@ -4080,6 +4086,7 @@ mod tests {
                 config.profiles.insert(
                     "other".into(),
                     rookery_core::config::Profile {
+                        sglang: None,
                         model: "test_model".into(),
                         port: mock_port,
                         llama_server: None,

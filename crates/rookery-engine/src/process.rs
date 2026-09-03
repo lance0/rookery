@@ -322,6 +322,7 @@ mod tests {
             profiles: HashMap::from([(
                 "test".into(),
                 Profile {
+                    sglang: None,
                     model: "test_model".into(),
                     port,
                     llama_server: None,
