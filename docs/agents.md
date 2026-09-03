@@ -159,7 +159,7 @@ traverse a bad page. Set `data_dir` and the watchdog runs a read-only
 local time.
 
 ```toml
-data_dir = "/home/lance/.hermes"
+data_dir = "~/.hermes"
 ```
 
 The directory and its immediate subdirectories are scanned for `*.db`, which

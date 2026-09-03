@@ -80,7 +80,7 @@ release_check_interval = 1800             # seconds between upstream release che
 - **TLS**: Rookery does not terminate TLS. For HTTPS, put a reverse proxy (nginx, caddy) in front. Example:
   ```
   # Caddy (automatic HTTPS)
-  lancebox.local {
+  rookery.local {
       reverse_proxy localhost:3131
   }
   ```
@@ -282,7 +282,7 @@ reasoning_parser = "qwen3"
 tool_call_parser = "qwen3_coder"
 language_model_only = true   # drop the vision tower, hand the memory to KV
 enable_metrics = true        # default; the dashboard scrapes /metrics
-hf_cache = "/home/lance/models/cache"
+hf_cache = "/path/to/hf/cache"   # optional; defaults to $HF_HOME, else ~/.cache/huggingface
 ```
 
 ### Settings that are not obvious

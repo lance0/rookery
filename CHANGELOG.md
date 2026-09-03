@@ -5,6 +5,42 @@
 > predate that change and are left as originally published.
 
 
+
+## 0.1.13
+
+Removes the maintainer's home directory from the shipped artifact and from a
+compiled-in default.
+
+### Fixed
+
+- **`hf_cache` no longer defaults to an absolute path from the maintainer's
+  machine.** 0.1.12 shipped `/home/lance/models/cache` as the compiled-in
+  default, which is both a privacy leak in a public repo and simply wrong for
+  everyone else — SGLang would have bind-mounted a directory that does not
+  exist. It is now optional and resolves at launch to `$HF_HOME`, else
+  `~/.cache/huggingface`, and errors clearly if neither is available.
+- **The committed dashboard WASM no longer embeds the builder's paths.** rustc
+  bakes source paths into dependency panic messages, and `dist/` is committed
+  because rookeryd embeds it via `include_dir!` — so the artifact carried 68
+  copies of `/home/<user>/.cargo/registry/...` and `/home/<user>/.rustup/...`.
+  The `dashboard` target now passes `--remap-path-prefix` for the cargo
+  registry, the rustup toolchain and the workspace root; the rebuilt artifact
+  contains zero. CI already rebuilt `dist/` on its own runners, so published
+  binaries were never affected.
+- Example configs and docs use placeholder paths and hostnames instead of the
+  maintainer's.
+
+### Notes
+
+- No credentials were ever committed. The `ghp_...` and `sk-...` matches in the
+  tree are placeholders in example config, and every `hf_*` hit is a variable
+  name.
+- Historical commits still contain the old paths inside previously committed
+  `dist/` artifacts. Not rewritten: the only thing exposed is a username already
+  public from the repository owner and commit authorship, no secrets are
+  involved, and rewriting would invalidate the commits that published releases
+  point at.
+
 ## 0.1.12
 
 SGLang becomes a first-class backend, and the release checker stops

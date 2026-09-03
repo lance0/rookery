@@ -240,9 +240,13 @@ pub struct SglangConfig {
     pub enable_metrics: bool,
 
     // ── container plumbing ───────────────────────────────────────────
-    /// Host HF cache, bind-mounted to /hf with HF_HOME pointed at it.
-    #[serde(default = "default_sglang_hf_cache")]
-    pub hf_cache: String,
+    /// Host HuggingFace cache, bind-mounted to `/hf` with `HF_HOME` pointed at it.
+    ///
+    /// Unset resolves at launch to `$HF_HOME`, else `~/.cache/huggingface` —
+    /// the standard locations. Set it explicitly only if your models live
+    /// somewhere else.
+    #[serde(default)]
+    pub hf_cache: Option<String>,
 
     #[serde(default = "default_sglang_shm_size")]
     pub shm_size: String,
@@ -252,10 +256,6 @@ pub struct SglangConfig {
 
     #[serde(default)]
     pub extra_args: Vec<String>,
-}
-
-fn default_sglang_hf_cache() -> String {
-    "/home/lance/models/cache".to_string()
 }
 
 fn default_sglang_shm_size() -> String {

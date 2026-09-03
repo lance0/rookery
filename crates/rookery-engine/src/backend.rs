@@ -786,6 +786,26 @@ impl SglangBackend {
             ))
         })?;
 
+        // Resolve the host HF cache: explicit config, else $HF_HOME, else the
+        // standard ~/.cache/huggingface. Never a hardcoded absolute path — this
+        // is a library default that ships to everyone.
+        let hf_cache = cfg
+            .hf_cache
+            .clone()
+            .or_else(|| std::env::var("HF_HOME").ok())
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| format!("{h}/.cache/huggingface"))
+            })
+            .ok_or_else(|| {
+                Error::ConfigValidation(
+                    "cannot resolve the HuggingFace cache: set hf_cache in the sglang \
+                     sub-table, or export HF_HOME"
+                        .into(),
+                )
+            })?;
+
         let name = Self::container_name_for(profile_name);
         let port = prof.port.to_string();
         let mut a: Vec<String> = vec![
@@ -798,7 +818,7 @@ impl SglangBackend {
             format!("--shm-size={}", cfg.shm_size),
             "--ipc=host".into(),
             "-v".into(),
-            format!("{}:/hf", cfg.hf_cache),
+            format!("{hf_cache}:/hf"),
             "-e".into(),
             "HF_HOME=/hf".into(),
             "-e".into(),
@@ -4033,7 +4053,7 @@ mod sglang_tests {
             language_model_only: true,
             trust_remote_code: true,
             enable_metrics: true,
-            hf_cache: "/home/lance/models/cache".into(),
+            hf_cache: Some("/models/cache".into()),
             shm_size: "16g".into(),
             env: HashMap::new(),
             extra_args: vec![],

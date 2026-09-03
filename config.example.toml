@@ -213,4 +213,4 @@ data_dir = "/path/to/agent/data"
 # reasoning_parser = "qwen3"
 # tool_call_parser = "qwen3_coder"
 # language_model_only = true         # drops the vision tower, worth ~24K tokens
-# hf_cache = "/home/lance/models/cache"
+# hf_cache = "/path/to/hf/cache"   # optional; defaults to $HF_HOME, else ~/.cache/huggingface
