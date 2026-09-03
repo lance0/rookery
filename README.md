@@ -1,6 +1,6 @@
 # rookery
 
-Local inference command center. Manage llama-server and vLLM backends, hot-swap models, monitor GPU, run agents, and browse models — all from one daemon + CLI + live dashboard.
+Local inference command center. Manage llama-server, SGLang and vLLM backends, hot-swap models, monitor GPU, run agents, and browse models — all from one daemon + CLI + live dashboard.
 
 [![CI](https://github.com/lance0/rookery/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/rookery/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
@@ -49,7 +49,7 @@ See [Installation](#installation) below for setup instructions.
 
 ## Features
 
-- **Multi-backend** — manage llama-server (GGUF) and vLLM (safetensors, AWQ, GPTQ, NVFP4) from the same config
+- **Multi-backend** — manage llama-server (GGUF), SGLang (NVFP4/FP8, speculative decoding, Docker) and vLLM (safetensors, AWQ, GPTQ, NVFP4) from the same config. `rookery swap` crosses engines: it stops a local process and starts a container, or the reverse, on the same port
 - **Hot-swap** — `rookery swap <profile>` stops the running backend and brings up another one, draining in-flight requests first. The daemon, its agents, and your open dashboard all stay up
 - **Config reload** — `rookery reload` re-reads `config.toml` in place, so adding a profile or repointing a model costs neither a daemon restart nor a model reload: the running backend and the running agents are left untouched. A config that fails to parse or validate is rejected and the daemon keeps the old one
 - **Live dashboard** — Leptos WASM frontend with 7 tabs: Overview, Settings, Agents, Chat, Bench, Logs, Models
@@ -70,7 +70,7 @@ See [Installation](#installation) below for setup instructions.
 | Feature | rookery | llama-swap | GPUStack | LocalAI |
 |---------|---------|------------|----------|---------|
 | Hot-swap profiles | Yes | Yes | No | No |
-| Multi-backend (llama.cpp + vLLM) | Yes | No | Partial | Yes |
+| Multi-backend (llama.cpp + SGLang + vLLM) | Yes | No | Partial | Yes |
 | Live dashboard | Yes (WASM) | No | Yes | No |
 | Agent lifecycle management | Yes | No | No | No |
 | Model browser + download | Yes | No | Yes | Yes |
@@ -217,7 +217,7 @@ depends_on_port = 8081
 restart_on_error_patterns = ["ConnectionError", "ReadTimeout"]
 ```
 
-See [config.example.toml](config.example.toml) for all options including vLLM backend, KV cache tuning, and API key auth.
+See [config.example.toml](config.example.toml) for all options including the SGLang and vLLM backends, KV cache tuning, and API key auth.
 
 Full reference: [docs/configuration.md](docs/configuration.md)
 
@@ -322,7 +322,7 @@ Two binaries:
 - **`rookeryd`** — long-running daemon (axum REST API + embedded dashboard)
 - **`rookery`** — thin CLI that talks to the daemon over HTTP
 
-The daemon reconciles persisted state on startup, adopts orphan processes, auto-starts configured agents, and cleans up stale llama-servers. The `InferenceBackend` trait abstracts over llama-server and vLLM backends.
+The daemon reconciles persisted state on startup, adopts orphan processes, auto-starts configured agents, and cleans up stale llama-servers. The `InferenceBackend` trait abstracts over llama-server (a supervised local process) and the container backends, SGLang and vLLM. Container backends have no host PID: liveness is a `docker inspect`, identity is the container ID, and adoption on daemon restart verifies the running container against the recorded one.
 
 ## Platform Support
 
@@ -345,6 +345,7 @@ The daemon reconciles persisted state on startup, adopts orphan processes, auto-
 - [Compatible Agents](docs/compatible-agents.md) — OpenClaw, SillyTavern, AnythingLLM, and more
 - [Dashboard](docs/dashboard.md) — tabs, shortcuts, features
 - [Architecture](docs/architecture.md) — crate structure, design decisions
+- [SGLang Integration](docs/sglang-integration.md) — Docker backend, speculative decoding, telemetry
 - [vLLM Integration](docs/vllm-integration-summary.md) — Docker backend
 
 ## Contributing

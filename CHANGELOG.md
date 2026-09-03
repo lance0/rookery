@@ -4,6 +4,69 @@
 > the 0.1.x line when the crates moved to a shared workspace version. Entries below 0.1.3
 > predate that change and are left as originally published.
 
+
+## 0.1.12
+
+SGLang becomes a first-class backend, and the release checker stops
+recommending downgrades.
+
+### Added
+
+- **SGLang backend.** A third implementation behind the existing
+  `InferenceBackend` trait, selected by a `[profiles.<name>.sglang]` sub-table.
+  `rookery swap` crosses engines on the same port: a local llama-server process
+  stops and a container starts, or the reverse, with clients seeing one endpoint
+  throughout. Driven by plain `docker run` rather than compose, because the whole
+  invocation is described by the config and a compose file would be a second
+  source of truth. Liveness is `docker inspect`, identity is the container ID,
+  and adoption verifies the running container against the recorded one with
+  prefix matching for short-vs-full IDs.
+- **SGLang telemetry in the dashboard.** SGLang exposes no `/slots`, but its
+  Prometheus scrape carries strictly more than llama-server's slot payload, so
+  the stats card renders KV used against total, KV usage, accept length and rate,
+  prefix cache hit rate, request counts, and the GDN state pool. That last one
+  has its own tile deliberately: on a 32GB card serving a hybrid GatedDeltaNet
+  model it is the resource that runs out first, and `/slots` cannot show it.
+- **Backend-aware release tracking.** The monitor polls the running backend's
+  upstream — `ggml-org/llama.cpp`, `sgl-project/sglang`, or `vllm-project/vllm` —
+  falling back to the default profile's backend when nothing is running.
+  Previously it always polled llama.cpp, so a box serving SGLang was told about
+  builds it does not run.
+
+### Fixed
+
+- **`rookery releases` no longer advertises a stale stable tag as "latest".**
+  It read `/releases/latest`, which returns only the newest NON-prerelease.
+  ggml-org publishes semver tags as stable *and* `bNNNNN` build tags as
+  prereleases, so every build tag was invisible. On 2026-09-03 this reported
+  `v0.3.0` (Aug 25) as latest to a box running a build 154 commits ahead of it —
+  and taking that "upgrade" would have lost a feature the newer build was
+  installed for. Now reads `/releases` and takes the newest non-draft entry;
+  drafts are the only kind worth skipping, since prereleases are the point.
+- **Nightly container builds are compared by date, not semver.** SGLang
+  nightlies report `0.0.0.dev1+g<hash>.d<YYYYMMDD>`, where the semver carries no
+  information. The build date is compared against the release's publish date, so
+  a nightly newer than the latest release reads as *ahead* rather than prompting
+  a downgrade. When neither a usable semver nor a date is available the status
+  stays **unknown** — never "up to date".
+- **`rookery profiles` shows a context length for container backends.** It read
+  `ctx_size` from `llama_server_config()`, which is `None` for them, so the
+  SGLang row rendered with no context and read like a broken profile.
+- **The "no slot data" explanation names the backend.** Previously a boolean
+  that only knew about vLLM, so SGLang fell through to llama-server's generic
+  "stats unavailable", which implies a fault rather than an endpoint that does
+  not exist.
+
+### Notes
+
+- A profile declaring two backend sub-tables is rejected rather than resolved by
+  precedence. Starting the wrong engine on the same port is the kind of thing you
+  notice an hour later via a confusing throughput number.
+- `rookery-dashboard` is **not** a workspace member, so `cargo build/clippy/test
+  --workspace` does not cover it. It needs `trunk build` and its own `cargo
+  clippy`/`cargo test`. Three clippy errors in it were missed this way during
+  development.
+
 ## 0.1.11 — 2026-08-21
 
 Finishes what 0.1.10 started. 0.1.10 stopped the *lie* — reporting "up to date"

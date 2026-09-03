@@ -25,7 +25,7 @@ The rules enforced:
 | `source = "hf"` requires `repo` | `source = "hf" requires \`repo\`` |
 | An `hf` model used by a **llama-server** profile also requires `file` | `has source = "hf" but no \`file\` — llama-server needs \`-hf <repo>:<file>\`` |
 | Every profile's `model` must name a defined `[models.*]` entry | invalid model reference |
-| A profile may not have both `llama_server` and `vllm` sub-tables | `exactly one backend must be specified` |
+| A profile may not declare two backend sub-tables (`llama_server`, `vllm`, `sglang`) | `exactly one backend must be specified` |
 | vLLM `gpu_memory_utilization` must be in `(0.0, 1.0]` | reports the offending value |
 | `default_profile` must name a defined profile | profile not found |
 | `llama_server` binary path must be set and exist — **only if** at least one llama-server profile is defined | path required / binary not found |
@@ -91,7 +91,25 @@ release_check_interval = 1800             # seconds between upstream release che
 
 `release_check_interval` controls how often the daemon polls GitHub for new llama.cpp releases. Default is 1800 seconds (30 minutes). Set to 0 to disable. Uses ETag caching to avoid counting against GitHub's rate limit when nothing has changed.
 
-Only `ggml-org/llama.cpp` is polled. vLLM is not tracked: the version comparison parses llama.cpp's `bNNNNN` build-number tags, and vLLM's `vX.Y.Z` tags would fail that parse and silently report "up to date" forever.
+The repo polled follows the **running backend** — `ggml-org/llama.cpp`,
+`sgl-project/sglang`, or `vllm-project/vllm`. When nothing is running it falls back
+to the default profile's backend, so the panel still describes this machine. Showing
+rows for engines you are not running trains you to ignore the panel.
+
+Two things this gets right that are easy to get wrong:
+
+- **Prereleases count.** The check reads `/releases`, not `/releases/latest`. ggml-org
+  publishes semver tags as stable *and* `bNNNNN` build tags as prereleases, so
+  `/releases/latest` reports a stable tag that can be weeks behind the newest build —
+  and on 2026-09-03 advertised `v0.3.0` as "latest" to a box running a build 154
+  commits ahead of it.
+- **Nightlies are compared by date.** SGLang nightlies report `0.0.0.dev1+g<hash>.d<YYYYMMDD>`,
+  where the semver carries no information. The build date is compared against the
+  release's publish date instead, so a nightly newer than the latest release reads as
+  *ahead* rather than prompting a downgrade.
+
+When the two versions genuinely cannot be compared, the status is **unknown** — never
+"up to date". That distinction is the whole point of the field.
 
 `github_token` is optional. Without it, GitHub allows 60 API requests per hour. With a personal access token, the limit is 5000/hr. Polling uses 1 request per interval (one tracked repo). The token only needs public repo read access.
 
@@ -220,12 +238,92 @@ extra_args = ["--enable-chunked-prefill"]            # additional vLLM flags
 The backend is determined by the profile's sub-table:
 - `[profiles.name.llama_server]` → llama-server (default, can also be flat with no sub-table)
 - `[profiles.name.vllm]` → vLLM via Docker Compose
+- `[profiles.name.sglang]` → SGLang via `docker run`
+
+Declaring two of them is a validation error, not a precedence rule: silently
+starting the wrong engine on the same port is the kind of thing you notice an
+hour later via a confusing throughput number.
 
 ```bash
-rookery start qwen_fast     # uses llama-server (has llama_server sub-table)
-rookery start qwen_nvfp4    # uses vLLM (has vllm sub-table)
-rookery swap qwen_fast       # swaps between backends seamlessly
+rookery start qwen_fast      # llama-server (has llama_server sub-table)
+rookery start qwen_nvfp4     # vLLM (has vllm sub-table)
+rookery swap qwen38_sglang   # SGLang; crosses engines on the same port
 ```
+
+## SGLang Backend
+
+SGLang runs as a Docker container via plain `docker run` — unlike vLLM there is
+no compose file, because the whole invocation is described by the sub-table.
+
+```toml
+[profiles.qwen38_sglang]
+model = "qwen38_27b"       # must name a [models.*] entry; SGLang itself uses model_path
+port = 8081
+
+[profiles.qwen38_sglang.sglang]
+docker_image = "lmsysorg/sglang:dev-cu12"
+model_path = "QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4"   # HF repo id or container path
+served_model_name = "qwen3.8-27b"
+speculative_algorithm = "DFLASH"
+draft_model_path = "incoai/Qwen3.8-27B-DFlash2"
+speculative_num_draft_tokens = 8
+mem_fraction_static = 0.93
+context_length = 131072
+max_mamba_cache_size = 4
+mamba_ssm_dtype = "bfloat16"
+mamba_radix_cache_strategy = "extra_buffer_lazy"
+kv_cache_dtype = "fp8_e4m3"
+attention_backend = "flashinfer"
+chunked_prefill_size = 1024
+cuda_graph_max_bs = 1
+cuda_graph_backend_prefill = "disabled"
+max_running_requests = 1
+reasoning_parser = "qwen3"
+tool_call_parser = "qwen3_coder"
+language_model_only = true   # drop the vision tower, hand the memory to KV
+enable_metrics = true        # default; the dashboard scrapes /metrics
+hf_cache = "/home/lance/models/cache"
+```
+
+### Settings that are not obvious
+
+Three of these are counter-intuitive and were established by measurement on a
+single RTX 5090 32GB. Changing them without re-measuring will cost you context
+or throughput.
+
+| setting | why |
+|---|---|
+| `context_length` **below** the model's native max | Asking for more sizes prefill activations and the draft pool for a context that cannot fit, and **starves the KV cache it is meant to size**. Measured: 262144 yielded 1,560 usable tokens; 131072 yielded 137,735. |
+| `cuda_graph_backend_prefill = "disabled"` | Frees ~1 GB and is what makes `mem_fraction_static` 0.93 safe. With the prefill graph enabled, 0.90+ OOMs during capture ([sgl #35777](https://github.com/sgl-project/sglang/issues/35777)). |
+| `max_mamba_cache_size` | Units are **GDN state slots**, not requests or bytes. Setting it explicitly bypasses `--mamba-full-memory-ratio` and hands all remaining memory to KV. On a 32GB card the state pool, not KV, is what runs out first. |
+
+`speculative_num_draft_tokens` must match the drafter checkpoint's `block_size`.
+SGLang does **not** clamp it — it logs a warning and rewrites the grouped
+convolution, running the drafter out of distribution. The DFlash paper's own
+ablation shows 8→16 is already a net loss.
+
+`SGLANG_ENABLE_POST_CAPTURE_KV_SIZING=0` is applied automatically. Enabling it
+re-sizes the KV pool from memory measured *after* CUDA-graph capture, when
+almost nothing is left; it cost 16× the context in testing. Override via
+`[profiles.<name>.sglang.env]` only if you know why.
+
+### Prerequisites for SGLang
+
+- Docker with GPU support (`--device nvidia.com/gpu=all` or the `nvidia` runtime)
+- The image pulled locally; `docker_image` is not fetched on demand
+- The model and any drafter present in `hf_cache`, which is bind-mounted to `/hf`
+  with `HF_HOME` pointed at it and `HF_HUB_OFFLINE=1`
+
+### How It Works
+
+`start` builds the `docker run` argv as an argument vector — never a shell
+string, because `--json-model-override-args {"language_model_only":true}` must
+arrive as one element with its inner quotes intact; a shell strips them and
+SGLang dies in `json.loads`. Readiness polls `/health` with a 300 s budget:
+weight load plus CUDA-graph capture is routinely 60–90 s, so a
+llama-server-tuned timeout would declare a healthy server dead. Logs are tailed
+from both stdout and stderr, because SGLang writes its startup and per-batch
+lines to stderr.
 
 ## Agents
 
