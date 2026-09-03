@@ -2111,8 +2111,55 @@ pub async fn post_models_pull(
 // ── Upstream releases ───────────────────────────────────────────────
 
 pub async fn get_releases(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // Show only the running backend's upstream. The cache is keyed by repo and
+    // entries persist, so after swapping engines it holds a row for whatever was
+    // running at each past check — rendering all of them means a permanent stale
+    // llama.cpp row next to the live one. Entries are kept (a swap back reuses
+    // them, ETag and all); they are just not rendered.
+    let active_repo = {
+        let current = state.current_state().await;
+        let config = state.config.read().await;
+        let backend = match &current {
+            rookery_core::state::ServerState::Running { backend_type, .. } => *backend_type,
+            _ => config
+                .profiles
+                .get(&config.default_profile)
+                .map(|p| p.backend_type())
+                .unwrap_or_default(),
+        };
+        rookery_engine::releases::repo_for_backend(backend)
+    };
+
     let cache = state.release_cache.read().await;
-    Json(serde_json::to_value(&*cache).unwrap_or_default())
+    let full = serde_json::to_value(&*cache).unwrap_or_default();
+    let repos = full
+        .get("repos")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|r| r.get("repo").and_then(|v| v.as_str()) == Some(active_repo))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Freshly swapped to a backend the monitor has not polled yet: say so rather
+    // than rendering the previous engine's numbers or an empty panel.
+    if repos.is_empty() {
+        return Json(serde_json::json!({
+            "repos": [{
+                "repo": active_repo,
+                "latest": null,
+                "current_version": null,
+                "update_available": false,
+                "ahead_of_release": false,
+                "version_comparable": false,
+                "checked_at": null,
+            }]
+        }));
+    }
+
+    Json(serde_json::json!({ "repos": repos }))
 }
 
 fn status_from_state(state: &rookery_core::state::ServerState) -> StatusResponse {
@@ -5999,5 +6046,33 @@ sglang:not_a_metric_we_want{model_name="x"} 99.0
     #[test]
     fn empty_scrape_is_empty_object() {
         assert_eq!(parse_sglang_metrics(""), serde_json::json!({}));
+    }
+}
+
+#[cfg(test)]
+mod releases_view_tests {
+    use rookery_core::config::BackendType;
+    use rookery_engine::releases::repo_for_backend;
+
+    /// The cache is keyed by repo and entries persist across swaps, so the view
+    /// must select rather than dump. Rendering the whole cache leaves a stale
+    /// llama.cpp row sitting next to the live SGLang one indefinitely.
+    #[test]
+    fn active_backend_selects_exactly_one_repo() {
+        let cached = [
+            "ggml-org/llama.cpp",
+            "sgl-project/sglang",
+            "vllm-project/vllm",
+        ];
+        for (backend, expected) in [
+            (BackendType::LlamaServer, "ggml-org/llama.cpp"),
+            (BackendType::Sglang, "sgl-project/sglang"),
+            (BackendType::Vllm, "vllm-project/vllm"),
+        ] {
+            let repo = repo_for_backend(backend);
+            let hits: Vec<_> = cached.iter().filter(|r| **r == repo).collect();
+            assert_eq!(hits.len(), 1, "{backend:?} must select exactly one repo");
+            assert_eq!(*hits[0], expected);
+        }
     }
 }
