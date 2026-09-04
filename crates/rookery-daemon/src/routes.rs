@@ -1489,8 +1489,18 @@ async fn bench_one(
                 prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(prompt_tokens);
                 completion_tokens = u["completion_tokens"].as_u64().unwrap_or(completion_tokens);
             }
-            let content = v["choices"][0]["delta"]["content"].as_str().unwrap_or("");
-            if !content.is_empty() {
+            // Count reasoning as generated text. A reasoning model behind
+            // --reasoning-parser splits its output, emitting `reasoning_content`
+            // deltas first and `content` only once it has finished thinking. Timing
+            // just `content` puts TTFT after the entire reasoning phase, which
+            // reports an absurd decode rate over the leftover window -- and on a
+            // prompt whose thinking fills max_tokens, no content arrives at all and
+            // the whole measurement is thrown away as "no content".
+            let delta = &v["choices"][0]["delta"];
+            let produced = ["content", "reasoning_content"]
+                .iter()
+                .any(|k| !delta[k].as_str().unwrap_or("").is_empty());
+            if produced {
                 deltas += 1;
                 ttft.get_or_insert_with(|| started.elapsed());
             }
@@ -4205,9 +4215,12 @@ mod tests {
                 .into_response();
             }
 
+            // A reasoning delta then a content one: behind --reasoning-parser a model
+            // emits `reasoning_content` first and `content` only after it stops
+            // thinking, so both have to count toward TTFT and the token total.
             let mut frames = vec![
-                r#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#.to_string(),
-                r#"data: {"choices":[{"delta":{"content":"lo!"}}]}"#.to_string(),
+                r#"data: {"choices":[{"delta":{"reasoning_content":"Hmm"}}]}"#.to_string(),
+                r#"data: {"choices":[{"delta":{"content":"Hello!"}}]}"#.to_string(),
             ];
             if with_usage {
                 frames.push(
