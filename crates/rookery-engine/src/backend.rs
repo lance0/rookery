@@ -807,9 +807,16 @@ impl SglangBackend {
 
         let name = Self::container_name_for(profile_name);
         let port = prof.port.to_string();
+        // Deliberately NOT --rm. Cleanup is already handled by
+        // remove_stale_container(), which runs immediately before every `docker run`
+        // and again on stop, so --rm buys nothing -- while costing the one thing you
+        // need after a crash. It deletes the dead container, and its logs with it, the
+        // instant it exits. On 2026-09-04 SGLang exited 0 after 15.7h under live use;
+        // the canary restarted it correctly, but the container was already destroyed
+        // and there was nothing left to diagnose from. Leave the corpse for the next
+        // start to bury.
         let mut a: Vec<String> = vec![
             "run".into(),
-            "--rm".into(),
             "--name".into(),
             name,
             "--device".into(),
@@ -1118,8 +1125,9 @@ impl InferenceBackend for SglangBackend {
             }
         }
 
-        // --rm handles removal, but be explicit so a crashed container does not
-        // hold the name reservation.
+        // Containers are not started with --rm (see build_docker_argv), so this is
+        // what actually removes them -- both after a clean stop and after a crash
+        // whose logs have since been read.
         Self::remove_stale_container(&name).await;
 
         if let Some(t) = self.log_task.lock().await.take() {
@@ -4131,7 +4139,12 @@ mod sglang_tests {
             assert!(joined.contains(expected), "argv missing {expected:?}");
         }
         assert_eq!(argv[0], "run");
-        assert!(argv.contains(&"--rm".to_string()));
+        // A crashed container must survive so its logs can be read; cleanup is
+        // remove_stale_container()'s job on the next start, not --rm's on exit.
+        assert!(
+            !argv.contains(&"--rm".to_string()),
+            "--rm destroys the logs of a container that died on its own"
+        );
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "-p" && w[1] == "30000:30000")
