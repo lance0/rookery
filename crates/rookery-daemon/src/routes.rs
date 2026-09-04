@@ -1420,8 +1420,8 @@ pub struct BenchTest {
 ///   pp_tok_s  = prompt_tokens / TTFT      (TTFT is prefill-dominated)
 ///   gen_tok_s = (completion_tokens - 1) / (total - TTFT)
 ///
-/// which is SGLang's TPOT definition inverted, and matches what
-/// lancebox-inference's `bench_portable.py` reports for the same server.
+/// which is SGLang's TPOT definition inverted, so the numbers line up with what
+/// an external streaming benchmark reports against the same server.
 async fn bench_one(
     client: &reqwest::Client,
     port: u16,
