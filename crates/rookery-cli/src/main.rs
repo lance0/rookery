@@ -1497,30 +1497,71 @@ async fn cmd_bench(client: &DaemonClient, json: bool) -> Result<(), Box<dyn std:
     }
 
     let tests = resp["tests"].as_array().ok_or("no bench results")?;
+    let empty = Vec::new();
+    let errors = resp["errors"].as_array().unwrap_or(&empty);
+    println!("{}", render_bench(tests, errors));
 
+    Ok(())
+}
+
+/// Render the bench table, plus any per-prompt failures.
+///
+/// Split out so the tests exercise this instead of a copy of it -- the previous
+/// test re-implemented the formatting inline, so it could not have caught a
+/// regression in what `rookery bench` actually prints.
+///
+/// The failures matter as much as the table. The daemon records why each prompt
+/// failed and the CLI used to discard it, which is how `rookery bench` came to
+/// print "is a model running?" at a perfectly healthy server for every backend
+/// that isn't llama.cpp -- the reason was sitting in the response the whole time.
+fn render_bench(tests: &[serde_json::Value], errors: &[serde_json::Value]) -> String {
+    let failures = |out: &mut Vec<String>| {
+        for e in errors {
+            out.push(format!(
+                "  {}: {}",
+                e["name"].as_str().unwrap_or("?"),
+                e["error"].as_str().unwrap_or("unknown")
+            ));
+        }
+    };
+
+    let mut lines = Vec::new();
     if tests.is_empty() {
-        println!("no results (is a model running?)");
-        return Ok(());
+        if errors.is_empty() {
+            lines.push("no results (is a model running?)".to_string());
+        } else {
+            lines.push("no results — every prompt failed:".to_string());
+            failures(&mut lines);
+        }
+        return lines.join("\n");
     }
 
-    println!(
+    lines.push(format!(
         "{:<12} {:>8} {:>8} {:>10} {:>10}",
         "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s"
-    );
-    println!("{}", "-".repeat(52));
-
+    ));
+    lines.push("-".repeat(52));
     for t in tests {
-        println!(
+        lines.push(format!(
             "{:<12} {:>8} {:>8} {:>10.0} {:>10.0}",
             t["name"].as_str().unwrap_or("?"),
             t["prompt_tokens"].as_u64().unwrap_or(0),
             t["completion_tokens"].as_u64().unwrap_or(0),
             t["pp_tok_s"].as_f64().unwrap_or(0.0),
             t["gen_tok_s"].as_f64().unwrap_or(0.0),
-        );
+        ));
     }
 
-    Ok(())
+    if !errors.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} of {} prompts failed:",
+            errors.len(),
+            tests.len() + errors.len()
+        ));
+        failures(&mut lines);
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -2304,6 +2345,53 @@ mod tests {
 
     /// Bench display shows test name, token counts, and tok/s rates.
     #[test]
+    fn test_bench_reports_failures_alongside_results() {
+        let tests = vec![serde_json::json!({
+            "name": "short", "prompt_tokens": 5, "completion_tokens": 2,
+            "pp_tok_s": 100.0, "gen_tok_s": 50.0,
+        })];
+        let errors = vec![serde_json::json!({
+            "name": "long", "error": "HTTP 500: upstream exploded",
+        })];
+
+        let out = render_bench(&tests, &errors);
+        assert!(
+            out.contains("short"),
+            "the result must still show, got: {out}"
+        );
+        assert!(
+            out.contains("1 of 2 prompts failed"),
+            "partial failure must be counted, got: {out}"
+        );
+        assert!(
+            out.contains("upstream exploded"),
+            "the daemon's reason must reach the user, got: {out}"
+        );
+    }
+
+    /// Every prompt failing must say WHY, not "is a model running?" -- that message
+    /// at a healthy server is what hid the SGLang bench regression.
+    #[test]
+    fn test_bench_total_failure_prints_reasons_not_a_shrug() {
+        let errors = vec![serde_json::json!({
+            "name": "short", "error": "response carried no timings",
+        })];
+
+        let out = render_bench(&[], &errors);
+        assert!(
+            out.contains("response carried no timings"),
+            "the reason must be surfaced, got: {out}"
+        );
+        assert!(
+            !out.contains("is a model running?"),
+            "must not shrug when the daemon told us the reason, got: {out}"
+        );
+
+        // With no reasons recorded, the old message is still the right one.
+        assert!(render_bench(&[], &[]).contains("is a model running?"));
+    }
+
+    #[test]
     fn test_bench_display_formatting() {
         let tests = vec![
             serde_json::json!({
@@ -2322,26 +2410,7 @@ mod tests {
             }),
         ];
 
-        // Replicate the bench formatting from cmd_bench
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "{:<12} {:>8} {:>8} {:>10} {:>10}",
-            "Test", "PP Tok", "Gen Tok", "PP tok/s", "Gen tok/s"
-        ));
-        lines.push("-".repeat(52));
-
-        for t in &tests {
-            lines.push(format!(
-                "{:<12} {:>8} {:>8} {:>10.0} {:>10.0}",
-                t["name"].as_str().unwrap_or("?"),
-                t["prompt_tokens"].as_u64().unwrap_or(0),
-                t["completion_tokens"].as_u64().unwrap_or(0),
-                t["pp_tok_s"].as_f64().unwrap_or(0.0),
-                t["gen_tok_s"].as_f64().unwrap_or(0.0),
-            ));
-        }
-
-        let output = lines.join("\n");
+        let output = render_bench(&tests, &[]);
         assert!(output.contains("PP tok/s"), "header should show PP tok/s");
         assert!(output.contains("Gen tok/s"), "header should show Gen tok/s");
         assert!(output.contains("pp512"), "should contain test name 'pp512'");

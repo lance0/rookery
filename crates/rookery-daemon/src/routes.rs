@@ -1405,6 +1405,126 @@ pub struct BenchTest {
     pub gen_tok_s: f64,
 }
 
+/// Time one bench prompt by streaming it, and derive the rates from arrival times.
+///
+/// The obvious implementation reads llama.cpp's `timings` block, which is more
+/// precise -- but only llama.cpp emits it, so vLLM and SGLang produced
+/// "response carried no timings" for every prompt and `rookery bench` reported
+/// "no results (is a model running?)" against a perfectly healthy server.
+///
+/// Falling back to `timings` where available and wall-clock elsewhere would be
+/// worse than either: the two measure different things, so llama.cpp and SGLang
+/// numbers would silently stop being comparable across a `rookery swap`. One
+/// instrument for every backend is the whole point of this endpoint.
+///
+///   pp_tok_s  = prompt_tokens / TTFT      (TTFT is prefill-dominated)
+///   gen_tok_s = (completion_tokens - 1) / (total - TTFT)
+///
+/// which is SGLang's TPOT definition inverted, and matches what
+/// lancebox-inference's `bench_portable.py` reports for the same server.
+async fn bench_one(
+    client: &reqwest::Client,
+    port: u16,
+    model: &str,
+    name: &str,
+    prompt: &str,
+) -> Result<BenchTest, String> {
+    use futures_util::StreamExt;
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 256,
+        "stream": true,
+        // Backends only report token counts on a streamed response when asked.
+        "stream_options": {"include_usage": true},
+    });
+
+    let started = std::time::Instant::now();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        // The body carries the actual reason ("model not found").
+        let detail: String = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect();
+        return Err(format!("HTTP {status}: {}", detail.trim()));
+    }
+
+    let mut ttft: Option<std::time::Duration> = None;
+    let mut prompt_tokens = 0u64;
+    let mut completion_tokens = 0u64;
+    let mut deltas = 0u64;
+    let mut buf = String::new();
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?));
+        // SSE frames are newline-delimited; keep any partial trailing line.
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim().to_string();
+            buf.drain(..=nl);
+            let Some(payload) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload.is_empty() || payload == "[DONE]" {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                continue;
+            };
+            // The usage frame arrives last and carries empty choices.
+            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+                prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(prompt_tokens);
+                completion_tokens = u["completion_tokens"].as_u64().unwrap_or(completion_tokens);
+            }
+            let content = v["choices"][0]["delta"]["content"].as_str().unwrap_or("");
+            if !content.is_empty() {
+                deltas += 1;
+                ttft.get_or_insert_with(|| started.elapsed());
+            }
+        }
+    }
+
+    let total = started.elapsed();
+    let Some(ttft) = ttft else {
+        return Err("stream produced no content".to_string());
+    };
+    // Not every backend honours include_usage; one delta is close enough to one
+    // token on these engines to keep the row meaningful rather than blank.
+    if completion_tokens == 0 {
+        completion_tokens = deltas;
+    }
+
+    let decode_secs = total.saturating_sub(ttft).as_secs_f64();
+    Ok(BenchTest {
+        name: name.to_string(),
+        prompt_tokens,
+        completion_tokens,
+        pp_tok_s: if ttft.as_secs_f64() > 0.0 {
+            prompt_tokens as f64 / ttft.as_secs_f64()
+        } else {
+            0.0
+        },
+        gen_tok_s: if decode_secs > 0.0 && completion_tokens > 1 {
+            (completion_tokens - 1) as f64 / decode_secs
+        } else {
+            0.0
+        },
+    })
+}
+
 pub async fn get_bench(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BenchResult>, StatusCode> {
@@ -1456,52 +1576,9 @@ pub async fn get_bench(
     let mut tests = Vec::new();
     let mut errors = Vec::new();
     for (name, prompt) in prompts {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 256,
-        });
-
         // Every path that yields no measurement has to end up in `errors`.
         // A silently dropped one reads to the caller as "never ran".
-        let outcome = match client
-            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    // The body carries the actual reason ("model not found").
-                    let detail: String = resp
-                        .text()
-                        .await
-                        .unwrap_or_default()
-                        .chars()
-                        .take(200)
-                        .collect();
-                    Err(format!("HTTP {status}: {}", detail.trim()))
-                } else {
-                    match resp.json::<serde_json::Value>().await {
-                        // No `timings` block: a backend that does not report
-                        // them (vLLM) or a response shape we do not understand.
-                        Ok(data) => match data.get("timings") {
-                            Some(t) => Ok(BenchTest {
-                                name: name.to_string(),
-                                prompt_tokens: t["prompt_n"].as_u64().unwrap_or(0),
-                                completion_tokens: t["predicted_n"].as_u64().unwrap_or(0),
-                                pp_tok_s: t["prompt_per_second"].as_f64().unwrap_or(0.0),
-                                gen_tok_s: t["predicted_per_second"].as_f64().unwrap_or(0.0),
-                            }),
-                            None => Err("response carried no timings".to_string()),
-                        },
-                        Err(e) => Err(format!("malformed response: {e}")),
-                    }
-                }
-            }
-            Err(e) => Err(e.to_string()),
-        };
+        let outcome = bench_one(&client, port, &model, name, prompt).await;
 
         match outcome {
             Ok(test) => tests.push(test),
@@ -4101,6 +4178,60 @@ mod tests {
         /// endpoints that route handlers proxy to: /health, /v1/models,
         /// /props, /slots, /v1/chat/completions.
         /// Returns (port, shutdown_sender).
+        /// A chat completion shaped like a real backend's: streamed when the request
+        /// asks for it, plain JSON otherwise.
+        ///
+        /// The frames are spaced in real time on purpose. /api/bench derives its rates
+        /// from arrival times, so a burst-delivered stream would put TTFT at the total
+        /// elapsed and report gen_tok_s as zero.
+        ///
+        /// `with_usage: false` covers a backend that ignores `stream_options` and never
+        /// sends a usage frame -- bench has to fall back to counting deltas there.
+        fn mock_chat_response(
+            req: &serde_json::Value,
+            with_usage: bool,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if !req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return axum::response::Json(serde_json::json!({
+                    "id": "chatcmpl-mock",
+                    "object": "chat.completion",
+                    "model": "mock-model",
+                    "choices": [{"index": 0, "message": {
+                        "role": "assistant", "content": "Hello!"
+                    }, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+                }))
+                .into_response();
+            }
+
+            let mut frames = vec![
+                r#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#.to_string(),
+                r#"data: {"choices":[{"delta":{"content":"lo!"}}]}"#.to_string(),
+            ];
+            if with_usage {
+                frames.push(
+                    r#"data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#
+                        .to_string(),
+                );
+            }
+            frames.push("data: [DONE]".to_string());
+
+            let body = axum::body::Body::from_stream(futures_util::stream::unfold(
+                frames.into_iter(),
+                |mut it| async move {
+                    let f = it.next()?;
+                    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+                    Some((Ok::<_, std::convert::Infallible>(format!("{f}\n\n")), it))
+                },
+            ));
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                body,
+            )
+                .into_response()
+        }
+
         async fn spawn_mock_llama_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
             use axum::response::Json as AxumJson;
             use axum::routing::{get as aget, post as apost};
@@ -4134,33 +4265,8 @@ mod tests {
                 )
                 .route(
                     "/v1/chat/completions",
-                    apost(|| async {
-                        AxumJson(serde_json::json!({
-                            "id": "chatcmpl-mock",
-                            "object": "chat.completion",
-                            "created": 1700000000,
-                            "model": "mock-model",
-                            "choices": [{
-                                "index": 0,
-                                "message": {"role": "assistant", "content": "Hello!"},
-                                "finish_reason": "stop"
-                            }],
-                            "usage": {
-                                "prompt_tokens": 5,
-                                "completion_tokens": 1,
-                                "total_tokens": 6
-                            },
-                            "timings": {
-                                "prompt_n": 5,
-                                "prompt_ms": 10.0,
-                                "prompt_per_token_ms": 2.0,
-                                "prompt_per_second": 500.0,
-                                "predicted_n": 1,
-                                "predicted_ms": 5.0,
-                                "predicted_per_token_ms": 5.0,
-                                "predicted_per_second": 200.0
-                            }
-                        }))
+                    apost(|AxumJson(req): AxumJson<serde_json::Value>| async move {
+                        mock_chat_response(&req, true)
                     }),
                 );
 
@@ -5732,24 +5838,15 @@ mod tests {
                         "/v1/chat/completions",
                         apost(
                             move |AxumJson(body): AxumJson<serde_json::Value>| async move {
+                                use axum::response::IntoResponse;
                                 if body["model"].as_str() != Some(served) {
                                     return (
                                         StatusCode::NOT_FOUND,
                                         AxumJson(serde_json::json!({"error": "model not found"})),
-                                    );
+                                    )
+                                        .into_response();
                                 }
-                                (
-                                    StatusCode::OK,
-                                    AxumJson(serde_json::json!({
-                                        "choices": [{"index": 0, "message": {
-                                            "role": "assistant", "content": "hi"
-                                        }}],
-                                        "timings": {
-                                            "prompt_n": 5, "prompt_per_second": 500.0,
-                                            "predicted_n": 1, "predicted_per_second": 200.0
-                                        }
-                                    })),
-                                )
+                                mock_chat_response(&body, true)
                             },
                         ),
                     );
@@ -5831,25 +5928,15 @@ mod tests {
                 )
                 .route(
                     "/v1/chat/completions",
-                    apost(move || {
+                    apost(move |AxumJson(req): AxumJson<serde_json::Value>| {
                         let seen = seen.clone();
                         let failure = failure.clone();
                         async move {
+                            use axum::response::IntoResponse;
                             if seen.fetch_add(1, Ordering::SeqCst) >= ok_count {
-                                return (failure.0, AxumJson(failure.1));
+                                return (failure.0, AxumJson(failure.1)).into_response();
                             }
-                            (
-                                StatusCode::OK,
-                                AxumJson(serde_json::json!({
-                                    "choices": [{"index": 0, "message": {
-                                        "role": "assistant", "content": "hi"
-                                    }}],
-                                    "timings": {
-                                        "prompt_n": 5, "prompt_per_second": 500.0,
-                                        "predicted_n": 1, "predicted_per_second": 200.0
-                                    }
-                                })),
-                            )
+                            mock_chat_response(&req, true)
                         }
                     }),
                 );
@@ -5960,7 +6047,47 @@ mod tests {
         /// `timings` block fell through both `if let`s and was discarded
         /// without even a log line.
         #[tokio::test]
-        async fn test_route_bench_reports_response_without_timings() {
+        /// A backend that emits no llama.cpp `timings` block must still be measured.
+        ///
+        /// This is the SGLang regression: bench used to require `timings`, so every
+        /// prompt errored with "response carried no timings" and `rookery bench`
+        /// printed "no results (is a model running?)" against a healthy server. It
+        /// went unnoticed until SGLang became the default profile.
+        async fn test_route_bench_measures_backend_without_timings() {
+            let (mock_port, shutdown_tx) = spawn_bench_mock(
+                3,
+                (StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({})),
+            )
+            .await;
+
+            let json = bench_json(mock_port).await;
+
+            let tests = json["tests"].as_array().expect("tests array");
+            assert_eq!(
+                tests.len(),
+                3,
+                "no backend emits `timings` except llama.cpp; the rest must still be \
+                 measured from arrival times, got: {json}"
+            );
+            for t in tests {
+                assert!(
+                    t["gen_tok_s"].as_f64().unwrap_or(0.0) > 0.0,
+                    "gen_tok_s must be derived from the stream, got: {t}"
+                );
+                assert_eq!(
+                    t["completion_tokens"].as_u64().unwrap_or(0),
+                    2,
+                    "token counts come from the usage frame, got: {t}"
+                );
+            }
+
+            let _ = shutdown_tx.send(());
+        }
+
+        #[tokio::test]
+        /// A 200 that yields no content is still no measurement, and has to be
+        /// reported rather than silently dropped.
+        async fn test_route_bench_reports_empty_stream_as_error() {
             let (mock_port, shutdown_tx) = spawn_bench_mock(
                 0,
                 (
@@ -5978,13 +6105,13 @@ mod tests {
             assert_eq!(
                 errors.len(),
                 3,
-                "a 200 with no timings is still no measurement, got: {json}"
+                "a 200 carrying no stream content is no measurement, got: {json}"
             );
             assert!(
                 errors[0]["error"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("timings"),
+                    .contains("no content"),
                 "the reason must say what was missing, got: {}",
                 errors[0]
             );
