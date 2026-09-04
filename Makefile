@@ -16,6 +16,17 @@ SERVICE_USER ?= $(or $(SUDO_USER),$(shell whoami))
 SERVICE_HOME ?= $(shell getent passwd $(SERVICE_USER) | cut -d: -f6)
 HF_HOME ?= $(if $(SERVICE_HOME),$(SERVICE_HOME),$(HOME))/.cache/huggingface
 
+# Only the install steps need root. Building under sudo breaks three ways at once:
+# trunk lives in the invoking user's ~/.cargo/bin and is not on root's PATH, HOME
+# becomes /root so cargo uses a different (empty) registry and re-downloads the
+# world, and every artifact left in target/ ends up root-owned, so the next
+# ordinary `cargo build` fails on permissions. Drop back to the invoking user for
+# anything that compiles. Empty when not under sudo, where the commands run as-is.
+# An explicit minimal PATH rather than $(PATH): inheriting the caller's would drag
+# in whatever happens to be in their shell, which is neither reproducible nor
+# portable. cargo and trunk both live in ~/.cargo/bin.
+RUNAS = $(if $(SUDO_USER),sudo -u $(SERVICE_USER) env HOME=$(SERVICE_HOME) PATH=$(SERVICE_HOME)/.cargo/bin:/usr/local/bin:/usr/bin:/bin,)
+
 .PHONY: build install uninstall enable disable restart dashboard clean test chaos-test
 
 # NOTE: `build` does NOT rebuild the dashboard. rookeryd embeds
@@ -24,7 +35,7 @@ HF_HOME ?= $(if $(SERVICE_HOME),$(SERVICE_HOME),$(HOME))/.cache/huggingface
 # Use `make dashboard` after changing dashboard source, or `make install` which
 # does it for you.
 build:
-	cargo build --release
+	$(RUNAS) cargo build --release
 
 # --remap-path-prefix keeps absolute build paths out of the artifact. dist/ is
 # committed (rookeryd embeds it via include_dir!) and rustc bakes source paths
@@ -32,11 +43,11 @@ build:
 # the build machine's directory layout.
 dashboard:
 	cd crates/rookery-dashboard && \
-	RUSTFLAGS="--remap-path-prefix=$(HOME)/.cargo/registry=/cargo/registry --remap-path-prefix=$(HOME)/.rustup=/rustup --remap-path-prefix=$(CURDIR)=/build $$RUSTFLAGS" \
+	$(RUNAS) RUSTFLAGS="--remap-path-prefix=$(SERVICE_HOME)/.cargo/registry=/cargo/registry --remap-path-prefix=$(SERVICE_HOME)/.rustup=/rustup --remap-path-prefix=$(CURDIR)=/build $$RUSTFLAGS" \
 	trunk build --release
 	@# Trigger re-embed into daemon binary
 	touch crates/rookery-daemon/src/routes.rs
-	cargo build --release -p rookery-daemon
+	$(RUNAS) cargo build --release -p rookery-daemon
 
 install: dashboard build
 	install -d $(DESTDIR)$(BINDIR)
