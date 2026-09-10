@@ -47,9 +47,22 @@ pub async fn check_health(port: u16, timeout: Duration) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
-/// Check if all server slots are busy processing requests.
-/// Returns true if the server is reachable and all slots are currently processing.
-/// Returns false if the server is unreachable, returns an error, or has idle slots.
+/// Check if the server is busy processing requests.
+///
+/// Probes llama-server's `/slots` first, then SGLang's Prometheus `/metrics`.
+/// `/slots` is llama.cpp-only — SGLang answers it 404 — and the backend type
+/// is not plumbed down here, so probing answers for both without threading an
+/// enum through every caller.
+///
+/// Returns false when neither endpoint gives a usable answer (unreachable,
+/// non-success, unparseable). That fail-open behaviour is load-bearing: the
+/// canary exists to restart a server that has stopped answering, so an
+/// undecidable busy check must not veto the restart.
+///
+/// ponytail: a request that is genuinely stuck keeps this returning true and
+/// defers the restart for as long as it hangs. That matches the long-standing
+/// llama.cpp behaviour, so it is parity, not a new gap — add a consecutive-skip
+/// cap only if a stuck request is ever actually observed.
 pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
@@ -59,37 +72,61 @@ pub async fn check_slots_busy(port: u16, timeout: Duration) -> bool {
         }
     };
 
-    let resp = match client
+    match client
         .get(format!("http://127.0.0.1:{port}/slots"))
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => r,
+        Ok(r) if r.status().is_success() => match r.json::<Vec<serde_json::Value>>().await {
+            // If all slots are processing, server is busy — don't send canary requests
+            Ok(slots) => {
+                return !slots.is_empty()
+                    && slots.iter().all(|s| {
+                        s.get("is_processing")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    });
+            }
+            Err(e) => tracing::debug!(port, error = %e, "slots check JSON parse failed"),
+        },
         Ok(r) => {
-            tracing::debug!(port, status = %r.status(), "slots check returned non-success");
-            return false;
+            tracing::debug!(port, status = %r.status(), "no /slots endpoint, trying /metrics")
+        }
+        Err(e) => tracing::debug!(port, error = %e, "slots check request failed"),
+    }
+
+    match client
+        .get(format!("http://127.0.0.1:{port}/metrics"))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.text().await.is_ok_and(|b| sglang_busy(&b)),
+        Ok(r) => {
+            tracing::debug!(port, status = %r.status(), "metrics check returned non-success");
+            false
         }
         Err(e) => {
-            tracing::debug!(port, error = %e, "slots check request failed");
-            return false;
+            tracing::debug!(port, error = %e, "metrics check request failed");
+            false
         }
-    };
+    }
+}
 
-    let slots: Vec<serde_json::Value> = match resp.json().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(port, error = %e, "slots check JSON parse failed");
-            return false;
-        }
-    };
-
-    // If all slots are processing, server is busy — don't send canary requests
-    !slots.is_empty()
-        && slots.iter().all(|s| {
-            s.get("is_processing")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+/// True when an SGLang Prometheus scrape shows a request running or queued.
+///
+/// The gauges carry labels — `sglang:num_running_reqs{model_name="…"} 1.0` —
+/// so match the metric name left of `{`, never a plain line prefix.
+fn sglang_busy(body: &str) -> bool {
+    body.lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.rsplit_once(' '))
+        .filter(|(lhs, _)| {
+            matches!(
+                lhs.split('{').next().unwrap_or(lhs).trim(),
+                "sglang:num_running_reqs" | "sglang:num_queue_reqs"
+            )
         })
+        .any(|(_, value)| value.trim().parse::<f64>().is_ok_and(|v| v > 0.0))
 }
 
 /// Fallback `model` value when the server won't say what it serves.
@@ -328,6 +365,80 @@ mod tests {
             "check_health should return false when request times out"
         );
         server.shutdown().await;
+    }
+
+    // ── check_slots_busy tests ────────────────────────────────────────
+
+    /// Shape of a real SGLang scrape: HELP/TYPE lines, and gauges whose value
+    /// sits behind a label set, so a prefix match on the bare metric name
+    /// misses them — which is how the busy guard silently never fired and the
+    /// canary restarted servers mid-generation.
+    fn sglang_scrape(running: &str, queued: &str) -> String {
+        format!(
+            "# HELP sglang:num_running_reqs The number of running requests.\n\
+             # TYPE sglang:num_running_reqs gauge\n\
+             sglang:num_running_reqs{{engine_type=\"unified\",model_name=\"qwen\"}} {running}\n\
+             # TYPE sglang:num_queue_reqs gauge\n\
+             sglang:num_queue_reqs{{engine_type=\"unified\",model_name=\"qwen\"}} {queued}\n\
+             sglang:gen_throughput{{model_name=\"qwen\"}} 143.5\n"
+        )
+    }
+
+    #[test]
+    fn test_sglang_busy_reads_labelled_gauges() {
+        assert!(
+            !sglang_busy(&sglang_scrape("0.0", "0.0")),
+            "idle server: both gauges zero means not busy"
+        );
+        assert!(
+            sglang_busy(&sglang_scrape("1.0", "0.0")),
+            "a running request means busy"
+        );
+        assert!(
+            sglang_busy(&sglang_scrape("0.0", "3.0")),
+            "a queued request means busy"
+        );
+        assert!(
+            !sglang_busy(""),
+            "an empty scrape is undecidable — must fail open so a wedged server restarts"
+        );
+        assert!(
+            !sglang_busy("sglang:gen_throughput{model_name=\"qwen\"} 143.5\n"),
+            "a scrape without the request gauges must not report busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_slots_busy_falls_back_to_metrics() {
+        // SGLang-shaped: no /slots at all (404), one request running on /metrics.
+        let app = axum::Router::new().route(
+            "/metrics",
+            axum::routing::get(|| async { sglang_scrape("1.0", "0.0") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        assert!(
+            check_slots_busy(port, Duration::from_secs(5)).await,
+            "a 404 on /slots must fall back to /metrics, not report the server idle"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_check_slots_busy_false_when_neither_endpoint_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        assert!(
+            !check_slots_busy(port, Duration::from_secs(1)).await,
+            "an unreachable server must not be reported busy — that would veto the restart"
+        );
     }
 
     // ── check_inference tests ─────────────────────────────────────────

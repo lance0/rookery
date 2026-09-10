@@ -102,12 +102,13 @@ async fn run_canary_check_inner(
             return false;
         }
 
-        // A user request can land in the gap after the /slots poll above, and
-        // with `--parallel 1` it holds the only slot for the whole generation.
+        // A user request can land in the gap after the busy poll above, and at
+        // a concurrency of one it holds the only slot for the whole generation.
         // Re-check before the retry and again before the restart, so a request
         // that arrived during the canary's own timeout window is not killed.
-        // `check_slots_busy` returns false when /slots is unreachable or errors,
-        // so a wedged server still falls through and restarts.
+        // `check_slots_busy` returns false when neither the llama.cpp nor the
+        // SGLang busy endpoint answers, so a wedged server still falls through
+        // and restarts.
         if rookery_engine::health::check_slots_busy(port, CANARY_TIMEOUT).await {
             tracing::debug!(port, "inference canary retry skipped: all slots busy");
             return false;
