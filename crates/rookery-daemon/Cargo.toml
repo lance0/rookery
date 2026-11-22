@@ -24,11 +24,11 @@ axum = { version = "0.8", features = ["json"] }
 tower-http = { version = "0.7", features = ["cors"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.32", features = ["signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 include_dir = "0.7"
 mime_guess = "2"
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 url = "2"
 
 [dev-dependencies]
